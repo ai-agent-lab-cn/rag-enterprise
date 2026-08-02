@@ -1,0 +1,22 @@
+[
+  {
+    "question": "RongRAG Studio 主要解决什么问题？",
+    "expected_filename": "project-profile.md",
+    "expected_paragraph": 2
+  },
+  {
+    "question": "系统使用什么组件完成向量召回和精排？",
+    "expected_filename": "project-profile.md",
+    "expected_paragraph": 4
+  },
+  {
+    "question": "项目如何量化精排效果？",
+    "expected_filename": "project-profile.md",
+    "expected_paragraph": 8
+  },
+  {
+    "question": "上传资料和密钥会被提交到 Git 吗？",
+    "expected_filename": "project-profile.md",
+    "expected_paragraph": 10
+  }
+]

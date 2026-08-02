@@ -1,0 +1,50 @@
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+class DocumentInfo(BaseModel):
+    document_id: str
+    filename: str
+    chunk_count: int
+    status: str = "ready"
+
+
+class QueryRequest(BaseModel):
+    question: str = Field(min_length=2, max_length=2000)
+    retrieve_k: int = Field(default=10, ge=1, le=50)
+    rerank_k: int = Field(default=5, ge=1, le=20)
+
+
+class Source(BaseModel):
+    chunk_id: str
+    document_id: str
+    filename: str
+    page: int | None = None
+    paragraph: int
+    chunk_index: int
+    char_count: int
+    summary: str
+    text: str
+    retrieval_score: float
+    rerank_score: float
+
+
+class QueryResponse(BaseModel):
+    answer: str
+    sources: list[Source]
+    model: str
+    latency_ms: dict[str, float]
+
+
+class HealthResponse(BaseModel):
+    status: str
+    collection_ready: bool
+    generation_ready: bool
+    models: dict[str, str]
+
+
+class ErrorBody(BaseModel):
+    code: str
+    message: str
+    details: Any = None
