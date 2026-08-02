@@ -8,7 +8,7 @@ from .errors import AppError
 
 SUPPORTED_EXTENSIONS = {".md", ".txt", ".pdf"}
 
-
+# MD/TXT/PDF 解析和错误处理
 @dataclass(frozen=True)
 class ParsedSection:
     text: str

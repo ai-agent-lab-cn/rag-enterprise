@@ -6,7 +6,7 @@ import chromadb
 
 from .chunking import Chunk
 
-
+# ChromaDB 持久化、查询、列出和删除
 @dataclass
 class RetrievedChunk:
     chunk_id: str

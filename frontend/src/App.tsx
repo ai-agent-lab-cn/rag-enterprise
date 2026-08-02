@@ -4,7 +4,7 @@ import { AnswerPanel } from "./components/AnswerPanel";
 import { DocumentPanel } from "./components/DocumentPanel";
 import type { DocumentInfo, QueryResult } from "./types";
 import "./styles.css";
-
+// 前端状态和上传/删除/提问流程
 const EXAMPLE_QUESTIONS = ["这个项目解决了什么问题？", "系统采用了哪些技术？", "如何评估检索效果？"];
 
 export default function App() {
@@ -76,9 +76,9 @@ export default function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <a className="brand" href="#top" aria-label="RongRAG Studio 首页">
+        <a className="brand" href="#top" aria-label="RongRAG 首页">
           <span className="brand-symbol">R</span>
-          <span><strong>RongRAG</strong><small>STUDIO</small></span>
+          <strong>RongRAG</strong>
         </a>
         <div className="system-state"><span /> 本地检索引擎</div>
       </header>
@@ -87,8 +87,8 @@ export default function App() {
         <DocumentPanel documents={documents} loading={uploading} onUpload={upload} onDelete={remove} />
         <section className="conversation">
           <div className="hero-copy">
-            <span className="eyebrow">RETRIEVE · RERANK · RESPOND</span>
-            <h1>让你的项目资料，<br /><em>自己给出答案。</em></h1>
+            <span className="eyebrow">检索 · 精排 · 生成</span>
+            <h2>让你的项目资料，<em>自己给出答案。</em></h2>
             <p>每一个结论都能追溯到原文，每一次检索都展示真实分数与延迟。</p>
           </div>
 

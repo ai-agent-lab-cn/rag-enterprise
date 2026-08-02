@@ -6,7 +6,7 @@ from sentence_transformers import CrossEncoder, SentenceTransformer
 from .config import get_settings
 from .errors import AppError
 
-
+# Embedding、CrossEncoder、Gemini 封装
 class EmbeddingModel:
     def __init__(self, model_name: str):
         self.model_name = model_name

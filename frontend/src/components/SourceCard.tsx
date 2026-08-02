@@ -13,7 +13,7 @@ export function SourceCard({ source, index }: SourceCardProps) {
         <span className="source-number">{index + 1}</span>
         <span className="source-main">
           <strong>{source.filename}</strong>
-          <small>{location} · chunk {source.chunk_index}</small>
+          <small>{location} · 片段 {source.chunk_index}</small>
         </span>
         <span className="score-pair">
           <span title="向量粗召回相似度">召回 {source.retrieval_score.toFixed(3)}</span>

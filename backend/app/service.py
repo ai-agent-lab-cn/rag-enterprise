@@ -10,7 +10,7 @@ from .parsers import parse_document
 from .schemas import DocumentInfo, QueryResponse, Source
 from .store import ChromaStore, RetrievedChunk
 
-
+# 完整 RAG 编排：入库、召回、精排、Prompt、生成
 class RAGServiceProtocol(Protocol):
     def index_document(self, filename: str, content: bytes) -> DocumentInfo: ...
     def list_documents(self) -> list[DocumentInfo]: ...

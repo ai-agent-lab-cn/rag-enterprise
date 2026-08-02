@@ -20,7 +20,6 @@ export function DocumentPanel({ documents, loading, onUpload, onDelete }: Docume
     <aside className="document-panel" aria-label="知识库文档">
       <div className="panel-heading">
         <div>
-          <span className="eyebrow">KNOWLEDGE BASE</span>
           <h2>资料库</h2>
         </div>
         <span className="count-pill">{documents.length}</span>

@@ -35,7 +35,25 @@ test("loads documents and renders query sources", async () => {
   await userEvent.click(screen.getByRole("button", { name: /提问/ }));
   expect(await screen.findByText("系统使用可解释的检索流程。")).toBeInTheDocument();
   expect(screen.getByText("召回 0.820")).toBeInTheDocument();
+  expect(screen.getByText("召回")).toBeInTheDocument();
+  expect(screen.getByText("精排")).toBeInTheDocument();
+  expect(screen.getByText("生成")).toBeInTheDocument();
+  expect(screen.getByText("总耗时")).toBeInTheDocument();
+  expect(screen.getByText("模型")).toBeInTheDocument();
+  expect(screen.getByText("第 1 段 · 片段 0")).toBeInTheDocument();
   expect(fetchMock).toHaveBeenCalledWith("/api/query", expect.objectContaining({ method: "POST" }));
+});
+
+test("renders the localized interface without legacy English labels", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify([]), { status: 200 }),
+  );
+  render(<App />);
+  expect(await screen.findByText("资料库")).toBeInTheDocument();
+  expect(screen.getByText("检索 · 精排 · 生成")).toBeInTheDocument();
+  expect(screen.queryByText("STUDIO")).not.toBeInTheDocument();
+  expect(screen.queryByText("KNOWLEDGE BASE")).not.toBeInTheDocument();
+  expect(screen.queryByText("RETRIEVE · RERANK · RESPOND")).not.toBeInTheDocument();
 });
 
 test("shows API errors", async () => {
