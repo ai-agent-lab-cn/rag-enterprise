@@ -124,10 +124,6 @@ npm run lint
 npm run build
 ```
 
-## 教学 Notebook
-
-[`examples/rag_walkthrough.ipynb`](examples/rag_walkthrough.ipynb) 用独立编写的代码解释解析、切片、Embedding、ChromaDB、向量粗召回、CrossEncoder 精排和带来源生成。生产应用以 `backend/app` 中的模块为准。
-
 ## 数据与隐私
 
 - `.env`、`data/uploads/` 和 `data/chroma/` 已加入 `.gitignore`。
