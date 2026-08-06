@@ -73,6 +73,24 @@ npm run dev
 
 打开 <http://localhost:5173>，上传 `knowledge/project-profile.md` 后即可使用。API 文档位于 <http://localhost:8000/api/docs>。
 
+### 使用 Docker Compose
+
+本机安装 Docker 后，可构建并启动前后端容器：
+
+```bash
+docker compose up --build -d
+```
+
+打开 <http://localhost:5173> 即可访问界面。前端会把 `/api` 请求转发到后端；健康检查地址为 <http://localhost:5173/api/health>。
+
+如需启用 Gemini 生成，先在仓库根目录的 `.env` 中填写 `GEMINI_API_KEY`。Chroma 索引和上传文件分别保存在 Compose 命名卷中。停止并删除容器：
+
+```bash
+docker compose down
+```
+
+上述命令默认保留命名卷。如需同时删除本地容器数据，请明确执行 `docker compose down --volumes`。
+
 ## API
 
 | 方法 | 地址 | 用途 |
