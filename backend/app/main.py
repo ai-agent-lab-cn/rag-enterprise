@@ -12,6 +12,7 @@ from .schemas import DocumentInfo, HealthResponse, QueryRequest, QueryResponse
 from .service import RAGService, RAGServiceProtocol
 from .store import ChromaStore
 
+
 # FastAPI 路由、依赖注入、上传限制和 CORS
 @lru_cache
 def get_service() -> RAGService:
