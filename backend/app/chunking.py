@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 from .parsers import ParsedSection
 
+
 # 重叠切片、metadata、稳定 document/chunk ID
 @dataclass(frozen=True)
 class Chunk:
