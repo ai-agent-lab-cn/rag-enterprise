@@ -1,4 +1,27 @@
+from backend.app.config import get_settings
 from backend.app.errors import AppError
+from backend.app.main import get_service
+
+
+def test_health_does_not_initialize_rag_service(client) -> None:
+    def fail_service_initialization() -> None:
+        raise AssertionError("health check must not initialize the RAG service")
+
+    client.app.dependency_overrides[get_service] = fail_service_initialization
+    response = client.get("/api/health")
+    settings = get_settings()
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "collection_ready": True,
+        "generation_ready": bool(settings.gemini_api_key),
+        "models": {
+            "embedding": settings.embedding_model,
+            "reranker": settings.reranker_model,
+            "generation": settings.generation_model,
+        },
+    }
 
 
 def test_document_lifecycle(client) -> None:

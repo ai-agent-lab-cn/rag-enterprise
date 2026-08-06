@@ -43,12 +43,11 @@ def create_app() -> FastAPI:
     install_error_handlers(app)
 
     @app.get("/api/health", response_model=HealthResponse)
-    async def health(service: ServiceDependency) -> HealthResponse:
-        generator = getattr(service, "generator", None)
+    async def health() -> HealthResponse:
         return HealthResponse(
             status="ok",
             collection_ready=True,
-            generation_ready=bool(getattr(generator, "ready", True)),
+            generation_ready=bool(settings.gemini_api_key),
             models={
                 "embedding": settings.embedding_model,
                 "reranker": settings.reranker_model,
