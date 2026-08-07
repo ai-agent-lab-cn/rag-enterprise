@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from backend.evaluation import (
 )
 
 DATASET_PATH = Path("backend/evaluation/datasets/retrieval_v1.json")
+BASELINE_REPORT_PATH = Path("backend/evaluation/reports/retrieval_v1_baseline.json")
 
 
 def test_retrieval_dataset_is_versioned_and_reviewable() -> None:
@@ -28,6 +30,22 @@ def test_retrieval_dataset_is_versioned_and_reviewable() -> None:
     assert len(dataset.chunks) == 20
     assert len({query.query_id for query in dataset.queries}) == 20
     assert all(query.relevant_chunk_ids for query in dataset.queries)
+
+
+def test_official_baseline_report_is_complete_and_passes_frozen_gate() -> None:
+    # 将提交进仓库的报告重新走一遍 Pydantic 校验，防止手工编辑造成字段或结论不一致。
+    report = RetrievalEvaluationReport.model_validate(
+        json.loads(BASELINE_REPORT_PATH.read_text(encoding="utf-8"))
+    )
+
+    assert report.official is True
+    assert report.dataset_version == "1.0.0"
+    assert report.query_count == 20
+    assert all("@" in model for model in report.models.values())
+    assert report.recall_at_5.threshold == 0.80
+    assert report.vector_mrr.threshold == 0.60
+    assert report.rerank_mrr.threshold == 0.70
+    assert report.passed is True
 
 
 def test_recall_at_k_covers_relevant_chunks_without_counting_duplicates() -> None:
