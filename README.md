@@ -131,6 +131,18 @@ uv run python -m evaluations.evaluate
 
 小规模演示集仅用于验证评测链路，不代表通用数据集表现。
 
+V2 固定检索集的正式基线使用真实 embedding、CrossEncoder 和隔离的临时 ChromaStore 生成：
+
+```bash
+uv run python -m backend.evaluation.run_baseline \
+  --dataset backend/evaluation/datasets/retrieval_v1.json \
+  --commit "$(git rev-parse HEAD)" \
+  --output backend/evaluation/reports/retrieval_v1_baseline.json
+```
+
+报告记录数据版本、模型 revision、代码提交、运行参数、Recall@5、向量 MRR、精排 MRR
+及冻结质量门结论。正式报告必须由真实模型生成，测试替身结果不得写入该目录。
+
 ## 测试与质量检查
 
 ```bash

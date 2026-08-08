@@ -1,0 +1,40 @@
+{
+  "report_id": "retrieval-20260807T084421Z",
+  "dataset_id": "rag-enterprise-retrieval",
+  "dataset_version": "1.0.0",
+  "commit": "dc99c2714f403c1db71101718e9b23ec13ef7162",
+  "run_at": "2026-08-07T08:44:21.988933Z",
+  "official": true,
+  "models": {
+    "embedding": "shibing624/text2vec-base-chinese@183bb99aa7af74355fb58d16edf8c13ae7c5433e",
+    "reranker": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1@1427fd652930e4ba29e8149678df786c240d8825"
+  },
+  "parameters": {
+    "retrieve_k": 10,
+    "rerank_k": 5,
+    "distance": "cosine",
+    "normalize_embeddings": true
+  },
+  "query_count": 20,
+  "recall_at_5": {
+    "value": 1.0,
+    "threshold": 0.8,
+    "baseline": null,
+    "passed": true,
+    "regressed": false
+  },
+  "vector_mrr": {
+    "value": 0.9083333333333334,
+    "threshold": 0.6,
+    "baseline": null,
+    "passed": true,
+    "regressed": false
+  },
+  "rerank_mrr": {
+    "value": 0.9666666666666666,
+    "threshold": 0.7,
+    "baseline": null,
+    "passed": true,
+    "regressed": false
+  }
+}
