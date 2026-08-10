@@ -68,7 +68,11 @@ export function DocumentPanel({ documents, loading, onUpload, onDelete }: Docume
                 className="icon-button"
                 type="button"
                 aria-label={`删除 ${document.filename}`}
-                onClick={() => void onDelete(document.document_id)}
+                onClick={() => {
+                  if (window.confirm(`确认删除“${document.filename}”及其索引吗？`)) {
+                    void onDelete(document.document_id);
+                  }
+                }}
               >
                 ×
               </button>

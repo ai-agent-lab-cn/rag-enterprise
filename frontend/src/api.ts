@@ -1,4 +1,10 @@
-import type { ApiErrorPayload, DocumentInfo, QueryResult } from "./types";
+import type {
+  ApiErrorPayload,
+  DocumentInfo,
+  EvaluationReport,
+  EvaluationReportSummary,
+  QueryResult,
+} from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -24,4 +30,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, retrieve_k: retrieveK, rerank_k: rerankK }),
     }),
+  listEvaluations: () => request<EvaluationReportSummary[]>("/api/evaluations"),
+  getEvaluation: (reportId: string) =>
+    request<EvaluationReport>(`/api/evaluations/${encodeURIComponent(reportId)}`),
 };
