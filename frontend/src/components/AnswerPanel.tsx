@@ -1,5 +1,6 @@
 import type { QueryResult } from "../types";
 import { SourceCard } from "./SourceCard";
+import { TechnicalDrawer } from "./TechnicalDrawer";
 
 interface AnswerPanelProps {
   result: QueryResult | null;
@@ -12,6 +13,19 @@ const METRICS = [
   ["generation", "生成"],
   ["total", "总耗时"],
 ] as const;
+
+const SOURCE_REFERENCE = /(\[来源\s*(\d+)\])/g;
+
+function answerWithSourceLinks(answer: string, sourceCount: number) {
+  return answer.split(SOURCE_REFERENCE).map((part, index) => {
+    const sourceNumber = Number(part);
+    if (index % 3 === 2 && sourceNumber >= 1 && sourceNumber <= sourceCount) {
+      return <a className="source-reference" href={`#source-${sourceNumber}`} key={`${part}-${index}`}>[来源 {sourceNumber}]</a>;
+    }
+    if (index % 3 === 1 || index % 3 === 2) return null;
+    return part;
+  });
+}
 
 export function AnswerPanel({ result, loading }: AnswerPanelProps) {
   if (loading) {
@@ -30,7 +44,7 @@ export function AnswerPanel({ result, loading }: AnswerPanelProps) {
   return (
     <section className="answer-result" aria-live="polite">
       <div className="answer-label">生成答案</div>
-      <p className="answer-text">{result.answer}</p>
+      <p className="answer-text">{answerWithSourceLinks(result.answer, result.sources.length)}</p>
       <div className="metric-strip" aria-label="查询性能">
         {METRICS.map(([key, label]) => {
           const value = result.latency_ms[key];
@@ -52,6 +66,7 @@ export function AnswerPanel({ result, loading }: AnswerPanelProps) {
           <SourceCard key={source.chunk_id} source={source} index={index} />
         ))}
       </div>
+      <TechnicalDrawer result={result} />
     </section>
   );
 }

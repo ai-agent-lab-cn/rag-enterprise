@@ -8,7 +8,7 @@ interface SourceCardProps {
 export function SourceCard({ source, index }: SourceCardProps) {
   const location = source.page ? `第 ${source.page} 页` : `第 ${source.paragraph + 1} 段`;
   return (
-    <details className="source-card">
+    <details className="source-card" id={`source-${index + 1}`}>
       <summary>
         <span className="source-number">{index + 1}</span>
         <span className="source-main">

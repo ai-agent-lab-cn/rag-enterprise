@@ -1,11 +1,17 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import { AnswerPanel } from "./components/AnswerPanel";
+import { AppNavigation, type AppPage } from "./components/AppNavigation";
 import { DocumentPanel } from "./components/DocumentPanel";
+import { EvaluationPage } from "./components/EvaluationPage";
 import type { DocumentInfo, QueryResult } from "./types";
 import "./styles.css";
 // 前端状态和上传/删除/提问流程
 const EXAMPLE_QUESTIONS = ["这个项目解决了什么问题？", "系统采用了哪些技术？", "如何评估检索效果？"];
+
+function pageFromPath(pathname: string): AppPage {
+  return pathname === "/evaluation/retrieval" ? "evaluation" : "chat";
+}
 
 export default function App() {
   const [documents, setDocuments] = useState<DocumentInfo[]>([]);
@@ -14,6 +20,20 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const [querying, setQuerying] = useState(false);
   const [error, setError] = useState("");
+  const [page, setPage] = useState<AppPage>(() => pageFromPath(window.location.pathname));
+
+  useEffect(() => {
+    const syncPage = () => setPage(pageFromPath(window.location.pathname));
+    window.addEventListener("popstate", syncPage);
+    return () => window.removeEventListener("popstate", syncPage);
+  }, []);
+
+  const navigate = (nextPage: AppPage) => {
+    const nextPath = nextPage === "evaluation" ? "/evaluation/retrieval" : "/chat";
+    window.history.pushState({}, "", nextPath);
+    setPage(nextPage);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
 
   const refreshDocuments = useCallback(async () => {
     try {
@@ -24,6 +44,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (page !== "chat") return;
     let active = true;
     api.listDocuments().then(
       (items) => { if (active) setDocuments(items); },
@@ -32,7 +53,7 @@ export default function App() {
       },
     );
     return () => { active = false; };
-  }, []);
+  }, [page]);
 
   const upload = async (file: File) => {
     setUploading(true);
@@ -76,50 +97,44 @@ export default function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <a className="brand" href="#top" aria-label="RongRAG 首页">
+        <button className="brand" type="button" onClick={() => navigate("chat")} aria-label="RongRAG 问答工作台">
           <span className="brand-symbol">R</span>
           <strong>RongRAG</strong>
-        </a>
+        </button>
+        <AppNavigation page={page} onNavigate={navigate} />
         <div className="system-state"><span /> 本地检索引擎</div>
       </header>
 
-      <div className="workspace" id="top">
-        <DocumentPanel documents={documents} loading={uploading} onUpload={upload} onDelete={remove} />
-        <section className="conversation">
-          <div className="hero-copy">
-            <span className="eyebrow">检索 · 精排 · 生成</span>
-            <h2>让你的项目资料，<em>自己给出答案。</em></h2>
-            <p>每一个结论都能追溯到原文，每一次检索都展示真实分数与延迟。</p>
-          </div>
-
-          {error ? <div className="error-banner" role="alert">{error}</div> : null}
-          <AnswerPanel result={result} loading={querying} />
-
-          <div className="examples" aria-label="示例问题">
-            {EXAMPLE_QUESTIONS.map((example) => (
-              <button type="button" key={example} onClick={() => setQuestion(example)}>{example}</button>
-            ))}
-          </div>
-
-          <form className="question-box" onSubmit={ask}>
-            <label className="sr-only" htmlFor="question">向知识库提问</label>
-            <textarea
-              id="question"
-              value={question}
-              onChange={(event) => setQuestion(event.target.value)}
-              placeholder="例如：这个项目如何保证回答可追溯？"
-              rows={2}
-              maxLength={2000}
-            />
-            <div className="question-footer">
-              <span>{documents.length ? `正在检索 ${documents.length} 份资料` : "请先添加资料"}</span>
-              <button type="submit" disabled={querying || !question.trim() || documents.length === 0}>
-                {querying ? "思考中" : "提问"} <span aria-hidden="true">→</span>
-              </button>
+      {page === "chat" ? (
+        <div className="workspace" id="top">
+          <DocumentPanel documents={documents} loading={uploading} onUpload={upload} onDelete={remove} />
+          <section className="conversation">
+            <div className="hero-copy">
+              <span className="eyebrow">单知识库问答工作台</span>
+              <h1>让你的项目资料，<em>自己给出答案。</em></h1>
+              <p>上传资料、提出问题，并从答案引用直接定位到原文证据。</p>
             </div>
-          </form>
-        </section>
-      </div>
+
+            {error ? <div className="error-banner" role="alert">{error}</div> : null}
+            <AnswerPanel result={result} loading={querying} />
+
+            <div className="examples" aria-label="示例问题">
+              {EXAMPLE_QUESTIONS.map((example) => (
+                <button type="button" key={example} onClick={() => setQuestion(example)}>{example}</button>
+              ))}
+            </div>
+
+            <form className="question-box" onSubmit={ask}>
+              <label className="sr-only" htmlFor="question">向知识库提问</label>
+              <textarea id="question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="例如：这个项目如何保证回答可追溯？" rows={2} maxLength={2000} />
+              <div className="question-footer">
+                <span>{documents.length ? `正在检索 ${documents.length} 份资料` : "请先添加资料"}</span>
+                <button type="submit" disabled={querying || !question.trim() || documents.length === 0}>{querying ? "思考中" : "提问"} <span aria-hidden="true">→</span></button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : <EvaluationPage />}
     </main>
   );
 }
