@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -42,6 +43,32 @@ class HealthResponse(BaseModel):
     collection_ready: bool
     generation_ready: bool
     models: dict[str, str]
+
+
+class EvaluationMetricResponse(BaseModel):
+    value: float
+    threshold: float
+    baseline: float | None
+    passed: bool
+    regressed: bool
+
+
+class EvaluationReportSummary(BaseModel):
+    report_id: str
+    dataset_id: str
+    dataset_version: str
+    commit: str
+    run_at: datetime
+    models: dict[str, str]
+    passed: bool
+
+
+class EvaluationReportResponse(EvaluationReportSummary):
+    parameters: dict[str, int | float | str | bool]
+    query_count: int
+    recall_at_5: EvaluationMetricResponse
+    vector_mrr: EvaluationMetricResponse
+    rerank_mrr: EvaluationMetricResponse
 
 
 class ErrorBody(BaseModel):
