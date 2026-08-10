@@ -5,6 +5,7 @@ from typing import Protocol
 from .chunking import split_sections, stable_document_id
 from .config import Settings
 from .errors import AppError
+from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
 from .models import EmbeddingModel, GeminiGenerator, Reranker
 from .parsers import parse_document
 from .ranking import rank_candidates
@@ -36,8 +37,9 @@ class RAGService:
         self.generator = generator
 
     def index_document(self, filename: str, content: bytes) -> DocumentInfo:
+        knowledge_base_id = DEFAULT_KNOWLEDGE_BASE_ID
         document_id = stable_document_id(filename, content)
-        for document in self.store.list_documents():
+        for document in self.store.list_documents(knowledge_base_id):
             if document["document_id"] == document_id:
                 return DocumentInfo(**document)
 
@@ -48,22 +50,28 @@ class RAGService:
             sections,
             self.settings.chunk_size,
             self.settings.chunk_overlap,
+            knowledge_base_id,
         )
         embeddings = self.embedder.encode([chunk.text for chunk in chunks])
         self.store.upsert(chunks, embeddings)
-        return DocumentInfo(document_id=document_id, filename=Path(filename).name, chunk_count=len(chunks))
+        return DocumentInfo(
+            knowledge_base_id=knowledge_base_id,
+            document_id=document_id,
+            filename=Path(filename).name,
+            chunk_count=len(chunks),
+        )
 
     def list_documents(self) -> list[DocumentInfo]:
-        return [DocumentInfo(**item) for item in self.store.list_documents()]
+        return [DocumentInfo(**item) for item in self.store.list_documents(DEFAULT_KNOWLEDGE_BASE_ID)]
 
     def delete_document(self, document_id: str) -> bool:
-        return self.store.delete_document(document_id)
+        return self.store.delete_document(document_id, DEFAULT_KNOWLEDGE_BASE_ID)
 
     def query(self, question: str, retrieve_k: int, rerank_k: int) -> QueryResponse:
         total_started = time.perf_counter()
         retrieval_started = time.perf_counter()
         query_embedding = self.embedder.encode([question])[0]
-        candidates = self.store.query(query_embedding, retrieve_k)
+        candidates = self.store.query(query_embedding, retrieve_k, DEFAULT_KNOWLEDGE_BASE_ID)
         retrieval_ms = _elapsed(retrieval_started)
         if not candidates:
             raise AppError("NO_DOCUMENTS", "知识库为空，请先上传文档。", 409)
@@ -116,6 +124,7 @@ def _source(item: RetrievedChunk) -> Source:
     page = metadata.get("page")
     return Source(
         chunk_id=item.chunk_id,
+        knowledge_base_id=str(metadata.get("knowledge_base_id", DEFAULT_KNOWLEDGE_BASE_ID)),
         document_id=str(metadata.get("document_id", "unknown")),
         filename=str(metadata.get("filename", "unknown")),
         page=int(page) if page is not None else None,

@@ -28,6 +28,7 @@ def test_document_lifecycle(client) -> None:
     response = client.post("/api/documents", files={"file": ("profile.md", "个人项目资料", "text/markdown")})
     assert response.status_code == 201
     assert response.json()["chunk_count"] == 2
+    assert response.json()["knowledge_base_id"] == "kb_default"
 
     listed = client.get("/api/documents")
     assert listed.status_code == 200
@@ -51,6 +52,7 @@ def test_query_returns_sources_and_metrics(client) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["sources"][0]["filename"] == "profile.md"
+    assert payload["sources"][0]["knowledge_base_id"] == "kb_default"
     assert payload["latency_ms"]["total"] == 6
 
 

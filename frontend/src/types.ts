@@ -1,4 +1,5 @@
 export interface DocumentInfo {
+  knowledge_base_id: string;
   document_id: string;
   filename: string;
   chunk_count: number;
@@ -6,6 +7,7 @@ export interface DocumentInfo {
 }
 
 export interface Source {
+  knowledge_base_id: string;
   chunk_id: string;
   document_id: string;
   filename: string;
