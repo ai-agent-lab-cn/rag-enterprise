@@ -143,6 +143,26 @@ uv run python -m backend.evaluation.run_baseline \
 报告记录数据版本、模型 revision、代码提交、运行参数、Recall@5、向量 MRR、精排 MRR
 及冻结质量门结论。正式报告必须由真实模型生成，测试替身结果不得写入该目录。
 
+V2 融合排序以 15% 归一化向量分数和 85% 归一化 CrossEncoder 分数计算最终顺序。
+固定数据集的正式结果如下，完整运行上下文见
+`backend/evaluation/reports/retrieval_v1_optimized.json`：
+
+| 指标 | V2 基线 | 融合排序 | 是否回退 |
+| --- | ---: | ---: | --- |
+| Recall@5 | 1.000 | 1.000 | 否 |
+| 向量 MRR | 0.9083 | 0.9083 | 否 |
+| 最终排序 MRR | 0.9667 | 0.9750 | 否 |
+
+复现并与冻结基线比较：
+
+```bash
+uv run python -m backend.evaluation.run_baseline \
+  --dataset backend/evaluation/datasets/retrieval_v1.json \
+  --commit "$(git rev-parse HEAD)" \
+  --baseline-report backend/evaluation/reports/retrieval_v1_baseline.json \
+  --output backend/evaluation/reports/retrieval_v1_optimized.json
+```
+
 ## 测试与质量检查
 
 ```bash

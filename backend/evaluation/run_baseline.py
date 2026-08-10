@@ -11,6 +11,7 @@ from huggingface_hub import HfApi
 from backend.app.chunking import Chunk
 from backend.app.config import get_settings
 from backend.app.models import get_embedding_model, get_reranker
+from backend.app.ranking import VECTOR_SCORE_WEIGHT, rank_candidates
 from backend.app.store import ChromaStore
 
 from .dataset import EvaluationDataset, load_dataset
@@ -22,7 +23,11 @@ VECTOR_MRR_THRESHOLD = 0.60
 RERANK_MRR_THRESHOLD = 0.70
 
 
-def run_baseline(dataset: EvaluationDataset, commit: str) -> RetrievalEvaluationReport:
+def run_baseline(
+    dataset: EvaluationDataset,
+    commit: str,
+    baseline: RetrievalEvaluationReport | None = None,
+) -> RetrievalEvaluationReport:
     """运行一次真实检索基线，并返回带完整上下文的正式报告。
 
     评测只验证 embedding、Chroma 向量召回和 CrossEncoder 精排；生成模型不参与
@@ -52,9 +57,7 @@ def run_baseline(dataset: EvaluationDataset, commit: str) -> RetrievalEvaluation
 
             # CrossEncoder 只对同一批候选重新排序，不能补召回向量阶段遗漏的分块。
             scores = reranker.score(query.question, [candidate.text for candidate in candidates])
-            for candidate, score in zip(candidates, scores, strict=True):
-                candidate.rerank_score = score
-            reranked = sorted(candidates, key=lambda candidate: candidate.rerank_score, reverse=True)[:5]
+            reranked = rank_candidates(candidates, scores, 5)
             reranked_rankings[query.query_id] = [candidate.chunk_id for candidate in reranked]
 
     metrics = evaluate_rankings(dataset.queries, vector_rankings, reranked_rankings)
@@ -76,11 +79,25 @@ def run_baseline(dataset: EvaluationDataset, commit: str) -> RetrievalEvaluation
             "rerank_k": 5,
             "distance": "cosine",
             "normalize_embeddings": True,
+            "ranking_strategy": "minmax_weighted_fusion",
+            "vector_score_weight": VECTOR_SCORE_WEIGHT,
         },
         query_count=metrics.query_count,
-        recall_at_5=assess_metric(metrics.recall_at_5, RECALL_AT_5_THRESHOLD),
-        vector_mrr=assess_metric(metrics.vector_mrr, VECTOR_MRR_THRESHOLD),
-        rerank_mrr=assess_metric(metrics.rerank_mrr, RERANK_MRR_THRESHOLD),
+        recall_at_5=assess_metric(
+            metrics.recall_at_5,
+            RECALL_AT_5_THRESHOLD,
+            baseline.recall_at_5.value if baseline else None,
+        ),
+        vector_mrr=assess_metric(
+            metrics.vector_mrr,
+            VECTOR_MRR_THRESHOLD,
+            baseline.vector_mrr.value if baseline else None,
+        ),
+        rerank_mrr=assess_metric(
+            metrics.rerank_mrr,
+            RERANK_MRR_THRESHOLD,
+            baseline.rerank_mrr.value if baseline else None,
+        ),
     )
 
 
@@ -116,9 +133,15 @@ def main() -> None:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--baseline-report", type=Path)
     args = parser.parse_args()
 
-    report = run_baseline(load_dataset(args.dataset), args.commit)
+    baseline = None
+    if args.baseline_report:
+        baseline = RetrievalEvaluationReport.model_validate_json(
+            args.baseline_report.read_text(encoding="utf-8")
+        )
+    report = run_baseline(load_dataset(args.dataset), args.commit, baseline)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",

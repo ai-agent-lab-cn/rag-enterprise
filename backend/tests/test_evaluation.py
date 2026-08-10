@@ -18,6 +18,7 @@ from backend.evaluation import (
 
 DATASET_PATH = Path("backend/evaluation/datasets/retrieval_v1.json")
 BASELINE_REPORT_PATH = Path("backend/evaluation/reports/retrieval_v1_baseline.json")
+OPTIMIZED_REPORT_PATH = Path("backend/evaluation/reports/retrieval_v1_optimized.json")
 
 
 def test_retrieval_dataset_is_versioned_and_reviewable() -> None:
@@ -45,6 +46,28 @@ def test_official_baseline_report_is_complete_and_passes_frozen_gate() -> None:
     assert report.recall_at_5.threshold == 0.80
     assert report.vector_mrr.threshold == 0.60
     assert report.rerank_mrr.threshold == 0.70
+    assert report.passed is True
+
+
+def test_optimized_report_improves_rerank_mrr_without_regression() -> None:
+    """正式优化报告必须引用被测提交，并满足相对基线的无回退契约。"""
+
+    report = RetrievalEvaluationReport.model_validate(
+        json.loads(OPTIMIZED_REPORT_PATH.read_text(encoding="utf-8"))
+    )
+
+    assert report.official is True
+    assert report.commit == "56fb090aba680172c8ce7a324422fa78a05f8bfb"
+    assert report.parameters["ranking_strategy"] == "minmax_weighted_fusion"
+    assert report.parameters["vector_score_weight"] == 0.15
+    assert report.recall_at_5.value == report.recall_at_5.baseline == 1.0
+    assert report.vector_mrr.value == report.vector_mrr.baseline
+    assert report.rerank_mrr.value == pytest.approx(0.975)
+    assert report.rerank_mrr.value > report.rerank_mrr.baseline
+    assert all(
+        metric.regressed is False
+        for metric in (report.recall_at_5, report.vector_mrr, report.rerank_mrr)
+    )
     assert report.passed is True
 
 

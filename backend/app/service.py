@@ -7,6 +7,7 @@ from .config import Settings
 from .errors import AppError
 from .models import EmbeddingModel, GeminiGenerator, Reranker
 from .parsers import parse_document
+from .ranking import rank_candidates
 from .schemas import DocumentInfo, QueryResponse, Source
 from .store import ChromaStore, RetrievedChunk
 
@@ -69,11 +70,8 @@ class RAGService:
 
         rerank_started = time.perf_counter()
         scores = self.reranker.score(question, [candidate.text for candidate in candidates])
-        for candidate, score in zip(candidates, scores, strict=True):
-            candidate.rerank_score = score
-        ranked = sorted(candidates, key=lambda item: item.rerank_score, reverse=True)[
-            : min(rerank_k, len(candidates))
-        ]
+        # 在线查询与正式评测共用融合排序，避免两个入口产生不同的质量结论。
+        ranked = rank_candidates(candidates, scores, min(rerank_k, len(candidates)))
         rerank_ms = _elapsed(rerank_started)
 
         generation_started = time.perf_counter()
