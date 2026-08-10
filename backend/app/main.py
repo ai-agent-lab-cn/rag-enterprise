@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Annotated
 
@@ -8,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .errors import AppError, install_error_handlers
 from .evaluation_reports import EvaluationReportRepository
+from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID, KnowledgeBaseScope
 from .models import get_embedding_model, get_generator, get_reranker
 from .schemas import (
     DocumentInfo,
@@ -50,7 +52,19 @@ EvaluationReportsDependency = Annotated[EvaluationReportRepository, Depends(get_
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title=settings.app_name, version="1.0.0", docs_url="/api/docs")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # 服务启动时迁移 V2 原始文件；只移动根目录文件，不扫描其他知识库目录。
+        KnowledgeBaseScope(DEFAULT_KNOWLEDGE_BASE_ID, settings.upload_path).migrate_legacy_uploads()
+        yield
+
+    app = FastAPI(
+        title=settings.app_name,
+        version="1.0.0",
+        docs_url="/api/docs",
+        lifespan=lifespan,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[settings.frontend_origin],
@@ -83,9 +97,11 @@ def create_app() -> FastAPI:
         if len(content) > settings.max_upload_mb * 1024 * 1024:
             raise AppError("FILE_TOO_LARGE", f"文件不能超过 {settings.max_upload_mb} MB。", 413)
         result = await run_in_threadpool(service.index_document, filename, content)
-        settings.upload_path.mkdir(parents=True, exist_ok=True)
+        scope = KnowledgeBaseScope(DEFAULT_KNOWLEDGE_BASE_ID, settings.upload_path)
+        scope.migrate_legacy_uploads()
+        scope.upload_path.mkdir(parents=True, exist_ok=True)
         extension = filename.rsplit(".", maxsplit=1)[-1].lower() if "." in filename else "txt"
-        (settings.upload_path / f"{result.document_id}.{extension}").write_bytes(content)
+        (scope.upload_path / f"{result.document_id}.{extension}").write_bytes(content)
         return result
 
     @app.get("/api/documents", response_model=list[DocumentInfo])
@@ -113,7 +129,9 @@ def create_app() -> FastAPI:
         deleted = await run_in_threadpool(service.delete_document, document_id)
         if not deleted:
             raise AppError("DOCUMENT_NOT_FOUND", "未找到该文档。", 404)
-        for path in settings.upload_path.glob(f"{document_id}.*"):
+        scope = KnowledgeBaseScope(DEFAULT_KNOWLEDGE_BASE_ID, settings.upload_path)
+        scope.migrate_legacy_uploads()
+        for path in scope.upload_path.glob(f"{document_id}.*"):
             path.unlink(missing_ok=True)
 
     @app.post("/api/query", response_model=QueryResponse)

@@ -3,8 +3,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
+
 
 class DocumentInfo(BaseModel):
+    knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
     document_id: str
     filename: str
     chunk_count: int
@@ -19,6 +22,7 @@ class QueryRequest(BaseModel):
 
 class Source(BaseModel):
     chunk_id: str
+    knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
     document_id: str
     filename: str
     page: int | None = None

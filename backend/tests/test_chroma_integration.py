@@ -121,7 +121,8 @@ def test_retrieval_api_uses_isolated_real_chroma(
         )
         assert uploaded.status_code == 201
         document_id = uploaded.json()["document_id"]
-        assert list(upload_path.glob(f"{document_id}.*"))
+        default_upload_path = upload_path / "kb_default"
+        assert list(default_upload_path.glob(f"{document_id}.*"))
 
         listed = client.get("/api/documents")
         assert listed.status_code == 200
@@ -138,4 +139,4 @@ def test_retrieval_api_uses_isolated_real_chroma(
         deleted = client.delete(f"/api/documents/{document_id}")
         assert deleted.status_code == 204
         assert client.get("/api/documents").json() == []
-        assert not list(upload_path.glob(f"{document_id}.*"))
+        assert not list(default_upload_path.glob(f"{document_id}.*"))

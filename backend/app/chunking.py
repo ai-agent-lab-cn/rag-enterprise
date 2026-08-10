@@ -1,6 +1,7 @@
 import hashlib
 from dataclasses import dataclass
 
+from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID, validate_knowledge_base_id
 from .parsers import ParsedSection
 
 
@@ -8,6 +9,7 @@ from .parsers import ParsedSection
 @dataclass(frozen=True)
 class Chunk:
     chunk_id: str
+    knowledge_base_id: str
     document_id: str
     filename: str
     text: str
@@ -19,6 +21,7 @@ class Chunk:
 
     def metadata(self) -> dict[str, str | int]:
         data: dict[str, str | int] = {
+            "knowledge_base_id": self.knowledge_base_id,
             "document_id": self.document_id,
             "filename": self.filename,
             "paragraph": self.paragraph,
@@ -44,9 +47,11 @@ def split_sections(
     sections: list[ParsedSection],
     chunk_size: int,
     overlap: int,
+    knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
 ) -> list[Chunk]:
     if overlap >= chunk_size:
         raise ValueError("chunk overlap must be smaller than chunk size")
+    validate_knowledge_base_id(knowledge_base_id)
 
     chunks: list[Chunk] = []
     step = chunk_size - overlap
@@ -58,7 +63,13 @@ def split_sections(
                 index = len(chunks)
                 chunks.append(
                     Chunk(
-                        chunk_id=f"{document_id}:chunk:{index:05d}",
+                        # 保留 V2 默认知识库的旧 ID；新知识库加前缀以避免 Chroma 全局 ID 冲突。
+                        chunk_id=(
+                            f"{document_id}:chunk:{index:05d}"
+                            if knowledge_base_id == DEFAULT_KNOWLEDGE_BASE_ID
+                            else f"{knowledge_base_id}:{document_id}:chunk:{index:05d}"
+                        ),
+                        knowledge_base_id=knowledge_base_id,
                         document_id=document_id,
                         filename=filename,
                         text=text,

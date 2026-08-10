@@ -179,6 +179,11 @@ npm run build
 ## 数据与隐私
 
 - `.env`、`data/uploads/` 和 `data/chroma/` 已加入 `.gitignore`。
+- V3 起每个文档和来源都带有 `knowledge_base_id`；V2 数据统一迁入稳定的默认知识库
+  `kb_default`，原始文件存放于 `data/uploads/kb_default/`。
+- Chroma 启动时会为缺少 `knowledge_base_id` 的 V2 chunk 补上默认值；迁移可重复执行，
+  不会复制 chunk。旧上传文件与新目录存在内容冲突时会停止迁移，不会静默覆盖。
+- 当前 API 仍使用默认知识库，知识库管理与请求级选择将在 V3 后续任务中实现。
 - 演示资料由项目作者编写，不包含真实电话、邮箱或访问令牌。
 - 不建议把包含个人敏感信息的索引目录或 API 原始响应公开提交。
 

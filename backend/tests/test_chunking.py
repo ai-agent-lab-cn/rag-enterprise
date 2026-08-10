@@ -22,6 +22,20 @@ def test_split_preserves_metadata_and_overlap() -> None:
     assert chunks[1].char_count == 6
 
 
+def test_non_default_knowledge_base_scopes_chunk_ids_and_metadata() -> None:
+    chunks = split_sections(
+        "doc_1",
+        "notes.md",
+        [ParsedSection("知识库资料", page=None, paragraph=0)],
+        chunk_size=100,
+        overlap=0,
+        knowledge_base_id="kb_team",
+    )
+
+    assert chunks[0].chunk_id == "kb_team:doc_1:chunk:00000"
+    assert chunks[0].metadata()["knowledge_base_id"] == "kb_team"
+
+
 def test_overlap_must_be_smaller_than_chunk_size() -> None:
     try:
         split_sections("doc", "a.md", [ParsedSection("abc", None, 0)], 3, 3)
