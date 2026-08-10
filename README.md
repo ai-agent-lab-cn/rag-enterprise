@@ -99,6 +99,8 @@ docker compose down
 | `GET` | `/api/documents` | 获取已索引文档及 chunk 数量 |
 | `DELETE` | `/api/documents/{id}` | 删除文档、向量与本地上传文件 |
 | `POST` | `/api/query` | 检索、精排并生成带来源答案 |
+| `GET` | `/api/evaluations` | 按运行时间倒序获取正式检索评测报告 |
+| `GET` | `/api/evaluations/{report_id}` | 获取单次正式检索评测报告详情 |
 | `GET` | `/api/health` | 检查索引与模型配置状态 |
 
 查询请求示例：

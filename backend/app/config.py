@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     chroma_path: Path = Path("data/chroma")
     upload_path: Path = Path("data/uploads")
+    evaluation_reports_path: Path = Path("backend/evaluation/reports")
     collection_name: str = "rongrag_documents"
     chunk_size: int = Field(default=700, ge=100, le=4000)
     chunk_overlap: int = Field(default=100, ge=0, le=1000)

@@ -7,8 +7,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .errors import AppError, install_error_handlers
+from .evaluation_reports import EvaluationReportRepository
 from .models import get_embedding_model, get_generator, get_reranker
-from .schemas import DocumentInfo, HealthResponse, QueryRequest, QueryResponse
+from .schemas import (
+    DocumentInfo,
+    EvaluationReportResponse,
+    EvaluationReportSummary,
+    HealthResponse,
+    QueryRequest,
+    QueryResponse,
+)
 from .service import RAGService, RAGServiceProtocol
 from .store import ChromaStore
 
@@ -28,6 +36,16 @@ def get_service() -> RAGService:
 
 ServiceDependency = Annotated[RAGServiceProtocol, Depends(get_service)]
 UploadedFile = Annotated[UploadFile, File()]
+
+
+@lru_cache
+def get_evaluation_reports() -> EvaluationReportRepository:
+    """报告查询不依赖 RAGService，避免只读请求初始化重量模型。"""
+
+    return EvaluationReportRepository(get_settings().evaluation_reports_path)
+
+
+EvaluationReportsDependency = Annotated[EvaluationReportRepository, Depends(get_evaluation_reports)]
 
 
 def create_app() -> FastAPI:
@@ -73,6 +91,19 @@ def create_app() -> FastAPI:
     @app.get("/api/documents", response_model=list[DocumentInfo])
     async def list_documents(service: ServiceDependency) -> list[DocumentInfo]:
         return await run_in_threadpool(service.list_documents)
+
+    @app.get("/api/evaluations", response_model=list[EvaluationReportSummary])
+    async def list_evaluations(
+        reports: EvaluationReportsDependency,
+    ) -> list[EvaluationReportSummary]:
+        return await run_in_threadpool(reports.list_official)
+
+    @app.get("/api/evaluations/{report_id}", response_model=EvaluationReportResponse)
+    async def get_evaluation(
+        report_id: str,
+        reports: EvaluationReportsDependency,
+    ) -> EvaluationReportResponse:
+        return await run_in_threadpool(reports.get_official, report_id)
 
     @app.delete("/api/documents/{document_id}", status_code=204)
     async def delete_document(
