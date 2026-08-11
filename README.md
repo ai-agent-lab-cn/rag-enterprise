@@ -174,6 +174,37 @@ uv run python -m backend.evaluation.run_baseline \
   --output backend/evaluation/reports/retrieval_v1_optimized.json
 ```
 
+### V3 回答质量工具链
+
+固定回答评测集位于 `backend/evaluation/datasets/answer_v1.json`，包含 30 个稳定样本：
+20 个有充分证据的中文问答，以及 10 个证据不足、来源冲突、检索为空和生成失败场景。
+每题记录知识库、参考要点、允许来源、禁止断言、期望状态及失败时是否必须保留来源。
+
+回答运行记录必须包含被测 commit、数据集版本、Prompt 版本/哈希、模型标识、参数和逐题
+API 结果。快速模式只执行引用编号与失败结构等确定性检查，不调用模型裁判：
+
+```bash
+uv run python -m backend.evaluation.run_answer_evaluation \
+  --dataset backend/evaluation/datasets/answer_v1.json \
+  --run /path/to/answer-run.json \
+  --mode fast \
+  --output /tmp/answer-fast-report.json
+```
+
+正式候选模式还要求每个可回答样本提供逐声明语义裁判结果，包括正确性、完整性、支持证据、
+引用编号、是否有来源支持、是否与来源矛盾及归因是否正确：
+
+```bash
+uv run python -m backend.evaluation.run_answer_evaluation \
+  --dataset backend/evaluation/datasets/answer_v1.json \
+  --run /path/to/answer-run-with-judgements.json \
+  --mode formal \
+  --output /tmp/answer-formal-candidate.json
+```
+
+生成模型不能作为唯一裁判。工具链输出默认都是非正式候选报告；测试替身只验证计算和报告
+结构，不能形成正式质量分数。正式基线、人工抽检和放行报告属于 V3 #44。
+
 ## 测试与质量检查
 
 ```bash
