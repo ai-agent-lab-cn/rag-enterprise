@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.config import Settings, get_settings
-from backend.app.main import create_app, get_knowledge_bases, get_service
+from backend.app.main import create_app, get_conversations, get_knowledge_bases, get_service
 from backend.app.service import RAGService
 from backend.app.store import ChromaStore
 
@@ -110,7 +110,13 @@ def test_retrieval_api_uses_isolated_real_chroma(
         "knowledge_bases_path",
         tmp_path / "knowledge-bases" / "registry.json",
     )
+    monkeypatch.setattr(
+        get_settings(),
+        "conversations_path",
+        tmp_path / "conversations" / "records.json",
+    )
     get_knowledge_bases.cache_clear()
+    get_conversations.cache_clear()
     app = create_app()
     app.dependency_overrides[get_service] = lambda: isolated_service
 
@@ -141,12 +147,27 @@ def test_retrieval_api_uses_isolated_real_chroma(
         assert queried.status_code == 200
         assert queried.json()["sources"][0]["document_id"] == document_id
         assert queried.json()["sources"][0]["filename"] == "retrieval-evidence.md"
+        assert queried.json()["prompt_version"] == "v2-legacy"
+        assert len(queried.json()["prompt_hash"]) == 64
+        assert queried.json()["models"] == {
+            "embedding": "deterministic-embedding-v1",
+            "reranker": "deterministic-reranker-v1",
+            "generation": "disabled-generator",
+        }
+
+        saved_answer = client.get(
+            "/api/knowledge-bases/kb_default/answers/" + queried.json()["record_id"]
+        )
+        assert saved_answer.status_code == 200
+        assert saved_answer.json()["sources"][0]["text"].endswith("原文证据。")
+        assert saved_answer.json()["prompt_hash"] == queried.json()["prompt_hash"]
 
         deleted = client.delete(f"/api/documents/{document_id}")
         assert deleted.status_code == 204
         assert client.get("/api/documents").json() == []
         assert not list(default_upload_path.glob(f"{document_id}.*"))
     get_knowledge_bases.cache_clear()
+    get_conversations.cache_clear()
 
 
 def test_rag_service_keeps_documents_and_results_in_requested_knowledge_base(

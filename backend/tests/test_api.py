@@ -54,6 +54,8 @@ def test_query_returns_sources_and_metrics(client) -> None:
     assert payload["sources"][0]["filename"] == "profile.md"
     assert payload["sources"][0]["knowledge_base_id"] == "kb_default"
     assert payload["latency_ms"]["total"] == 6
+    assert payload["conversation_id"].startswith("conv_")
+    assert payload["record_id"].startswith("answer_")
 
 
 def test_invalid_top_k_returns_machine_readable_error(client) -> None:
@@ -82,6 +84,8 @@ def test_generation_failure_returns_stable_error(client, fake_service) -> None:
     )
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "MODEL_UNAVAILABLE"
+    assert response.json()["error"]["details"]["conversation_id"].startswith("conv_")
+    assert response.json()["error"]["details"]["record_id"].startswith("answer_")
 
 
 def test_knowledge_base_crud_and_default_protection(client) -> None:
@@ -153,6 +157,10 @@ def test_scoped_document_and_query_routes_are_isolated(client) -> None:
     assert client.delete(
         f"/api/knowledge-bases/{knowledge_base_id}/documents/doc_test"
     ).status_code == 204
+    assert client.delete(
+        f"/api/knowledge-bases/{knowledge_base_id}/conversations/"
+        + queried.json()["conversation_id"]
+    ).status_code == 204
     assert client.delete(f"/api/knowledge-bases/{knowledge_base_id}").status_code == 204
 
 
@@ -160,6 +168,116 @@ def test_unknown_knowledge_base_is_rejected_before_scoped_operation(client) -> N
     response = client.get("/api/knowledge-bases/kb_missing/documents")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "KNOWLEDGE_BASE_NOT_FOUND"
+
+
+def test_conversation_history_records_success_and_continuation(client) -> None:
+    first = client.post(
+        "/api/query",
+        json={"question": "项目是什么？", "retrieve_k": 5, "rerank_k": 3},
+    )
+    assert first.status_code == 200
+    conversation_id = first.json()["conversation_id"]
+    record_id = first.json()["record_id"]
+
+    second = client.post(
+        "/api/query",
+        json={
+            "question": "还有哪些特点？",
+            "retrieve_k": 5,
+            "rerank_k": 3,
+            "conversation_id": conversation_id,
+        },
+    )
+    assert second.status_code == 200
+    assert second.json()["conversation_id"] == conversation_id
+
+    listed = client.get("/api/knowledge-bases/kb_default/conversations")
+    assert listed.status_code == 200
+    assert listed.json()[0]["turn_count"] == 2
+    assert listed.json()[0]["last_status"] == "success"
+
+    detail = client.get(f"/api/knowledge-bases/kb_default/conversations/{conversation_id}")
+    assert detail.status_code == 200
+    assert [item["question"] for item in detail.json()["records"]] == [
+        "项目是什么？",
+        "还有哪些特点？",
+    ]
+    assert detail.json()["records"][0]["sources"][0]["filename"] == "profile.md"
+
+    answer = client.get(f"/api/knowledge-bases/kb_default/answers/{record_id}")
+    assert answer.status_code == 200
+    assert answer.json()["status"] == "success"
+
+    deleted = client.delete(
+        f"/api/knowledge-bases/kb_default/conversations/{conversation_id}"
+    )
+    assert deleted.status_code == 204
+    assert client.get(f"/api/knowledge-bases/kb_default/answers/{record_id}").status_code == 404
+
+
+def test_failed_query_is_saved_in_history(client, fake_service) -> None:
+    def fail_query(*_args) -> None:
+        raise AppError("MODEL_UNAVAILABLE", "生成模型暂时不可用。", 502)
+
+    fake_service.query = fail_query
+    response = client.post(
+        "/api/query",
+        json={"question": "项目是什么？", "retrieve_k": 5, "rerank_k": 3},
+    )
+    details = response.json()["error"]["details"]
+
+    saved = client.get(
+        f"/api/knowledge-bases/kb_default/answers/{details['record_id']}"
+    )
+    assert saved.status_code == 200
+    assert saved.json()["status"] == "failed"
+    assert saved.json()["error_code"] == "MODEL_UNAVAILABLE"
+    assert saved.json()["answer"] is None
+
+
+def test_conversation_cannot_cross_knowledge_base_boundary(client) -> None:
+    conversation_id = client.post(
+        "/api/query",
+        json={"question": "默认库问题？", "retrieve_k": 5, "rerank_k": 3},
+    ).json()["conversation_id"]
+    knowledge_base_id = client.post(
+        "/api/knowledge-bases",
+        json={"name": "另一个知识库", "description": ""},
+    ).json()["knowledge_base_id"]
+
+    response = client.post(
+        f"/api/knowledge-bases/{knowledge_base_id}/query",
+        json={
+            "question": "尝试串库？",
+            "retrieve_k": 5,
+            "rerank_k": 3,
+            "conversation_id": conversation_id,
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "CONVERSATION_NOT_FOUND"
+    assert client.get(
+        f"/api/knowledge-bases/{knowledge_base_id}/conversations"
+    ).json() == []
+
+
+def test_knowledge_base_with_history_cannot_be_deleted_until_conversation_is_removed(client) -> None:
+    knowledge_base_id = client.post(
+        "/api/knowledge-bases",
+        json={"name": "历史保护测试", "description": ""},
+    ).json()["knowledge_base_id"]
+    queried = client.post(
+        f"/api/knowledge-bases/{knowledge_base_id}/query",
+        json={"question": "空库问题？", "retrieve_k": 5, "rerank_k": 3},
+    )
+    conversation_id = queried.json()["conversation_id"]
+
+    assert client.delete(f"/api/knowledge-bases/{knowledge_base_id}").status_code == 409
+    assert client.delete(
+        f"/api/knowledge-bases/{knowledge_base_id}/conversations/{conversation_id}"
+    ).status_code == 204
+    assert client.delete(f"/api/knowledge-bases/{knowledge_base_id}").status_code == 204
 
 
 def test_knowledge_base_with_orphan_original_file_cannot_be_deleted(client) -> None:

@@ -26,6 +26,12 @@ export interface QueryResult {
   sources: Source[];
   model: string;
   latency_ms: Record<string, number>;
+  conversation_id: string | null;
+  record_id: string | null;
+  models: Record<string, string>;
+  model_metadata: Record<string, string | number | boolean>;
+  prompt_version: string | null;
+  prompt_hash: string | null;
 }
 
 export interface ApiErrorPayload {

@@ -107,6 +107,10 @@ docker compose down
 | `GET/POST` | `/api/knowledge-bases/{id}/documents` | 列出或上传指定知识库的文档 |
 | `DELETE` | `/api/knowledge-bases/{id}/documents/{document_id}` | 删除指定知识库的文档 |
 | `POST` | `/api/knowledge-bases/{id}/query` | 只检索指定知识库并生成答案 |
+| `GET` | `/api/knowledge-bases/{id}/conversations` | 获取指定知识库的会话历史 |
+| `GET` | `/api/knowledge-bases/{id}/conversations/{conversation_id}` | 获取会话及回答记录 |
+| `DELETE` | `/api/knowledge-bases/{id}/conversations/{conversation_id}` | 删除会话及其回答记录 |
+| `GET` | `/api/knowledge-bases/{id}/answers/{record_id}` | 获取单条回答、来源和执行元数据 |
 
 查询请求示例：
 
@@ -191,6 +195,10 @@ npm run build
 - 原 V2 文档和查询 API 继续映射默认知识库；V3 作用域 API 通过路径中的
   `knowledge_base_id` 严格隔离上传文件、Chroma 检索与删除操作。
 - 默认知识库不能删除；其他知识库包含文档时也不能删除，必须先明确删除其中的文档。
+- 每次有效查询都会保存成功或失败记录，包括来源快照、分段耗时、模型集合、Prompt
+  版本/哈希及稳定错误码；只保存 Prompt 哈希，不保存完整 Prompt。
+- 会话和回答记录位于 `data/conversations/`，并严格绑定 `knowledge_base_id`；Render
+  免费演示环境仍只保证当前实例生命周期内可用，不承诺跨休眠或重新部署保留。
 - 演示资料由项目作者编写，不包含真实电话、邮箱或访问令牌。
 - 不建议把包含个人敏感信息的索引目录或 API 原始响应公开提交。
 

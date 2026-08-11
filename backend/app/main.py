@@ -1,3 +1,4 @@
+import time
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Annotated
@@ -9,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .errors import AppError, install_error_handlers
 from .evaluation_reports import EvaluationReportRepository
+from .history import ConversationRepository
 from .knowledge_bases import (
     DEFAULT_KNOWLEDGE_BASE_ID,
     KnowledgeBaseRecord,
@@ -17,6 +19,9 @@ from .knowledge_bases import (
 )
 from .models import get_embedding_model, get_generator, get_reranker
 from .schemas import (
+    AnswerRecordResponse,
+    ConversationDetailResponse,
+    ConversationSummaryResponse,
     DocumentInfo,
     EvaluationReportResponse,
     EvaluationReportSummary,
@@ -66,6 +71,14 @@ def get_knowledge_bases() -> KnowledgeBaseRepository:
 KnowledgeBasesDependency = Annotated[KnowledgeBaseRepository, Depends(get_knowledge_bases)]
 
 
+@lru_cache
+def get_conversations() -> ConversationRepository:
+    return ConversationRepository(get_settings().conversations_path)
+
+
+ConversationsDependency = Annotated[ConversationRepository, Depends(get_conversations)]
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
 
@@ -74,6 +87,7 @@ def create_app() -> FastAPI:
         # 服务启动时迁移 V2 原始文件；只移动根目录文件，不扫描其他知识库目录。
         KnowledgeBaseScope(DEFAULT_KNOWLEDGE_BASE_ID, settings.upload_path).migrate_legacy_uploads()
         get_knowledge_bases()
+        get_conversations()
         yield
 
     app = FastAPI(
@@ -174,6 +188,7 @@ def create_app() -> FastAPI:
         knowledge_base_id: str,
         knowledge_bases: KnowledgeBasesDependency,
         service: ServiceDependency,
+        conversations: ConversationsDependency,
     ) -> None:
         await _require_knowledge_base(knowledge_bases, knowledge_base_id)
         if knowledge_base_id == DEFAULT_KNOWLEDGE_BASE_ID:
@@ -181,8 +196,9 @@ def create_app() -> FastAPI:
         documents = await run_in_threadpool(service.list_documents, knowledge_base_id)
         upload_scope = KnowledgeBaseScope(knowledge_base_id, settings.upload_path)
         has_original_files = upload_scope.upload_path.exists() and any(upload_scope.upload_path.iterdir())
-        if documents or has_original_files:
-            raise AppError("KNOWLEDGE_BASE_NOT_EMPTY", "请先删除知识库中的文档。", 409)
+        history = await run_in_threadpool(conversations.list_conversations, knowledge_base_id)
+        if documents or has_original_files or history:
+            raise AppError("KNOWLEDGE_BASE_NOT_EMPTY", "请先删除知识库中的文档和会话。", 409)
         await run_in_threadpool(knowledge_bases.delete, knowledge_base_id)
 
     @app.post(
@@ -248,15 +264,16 @@ def create_app() -> FastAPI:
     async def query(
         payload: QueryRequest,
         service: ServiceDependency,
+        conversations: ConversationsDependency,
     ) -> QueryResponse:
         if payload.rerank_k > payload.retrieve_k:
             raise AppError("INVALID_TOP_K", "rerank_k 不能大于 retrieve_k。")
-        return await run_in_threadpool(
-            service.query,
-            payload.question.strip(),
-            payload.retrieve_k,
-            payload.rerank_k,
+        return await _execute_recorded_query(
+            payload,
+            service,
+            conversations,
             DEFAULT_KNOWLEDGE_BASE_ID,
+            settings,
         )
 
     @app.post(
@@ -268,17 +285,99 @@ def create_app() -> FastAPI:
         payload: QueryRequest,
         knowledge_bases: KnowledgeBasesDependency,
         service: ServiceDependency,
+        conversations: ConversationsDependency,
     ) -> QueryResponse:
         await _require_knowledge_base(knowledge_bases, knowledge_base_id)
         if payload.rerank_k > payload.retrieve_k:
             raise AppError("INVALID_TOP_K", "rerank_k 不能大于 retrieve_k。")
-        return await run_in_threadpool(
-            service.query,
-            payload.question.strip(),
-            payload.retrieve_k,
-            payload.rerank_k,
+        return await _execute_recorded_query(
+            payload,
+            service,
+            conversations,
             knowledge_base_id,
+            settings,
         )
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/conversations",
+        response_model=list[ConversationSummaryResponse],
+    )
+    async def list_conversations(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        conversations: ConversationsDependency,
+    ) -> list[ConversationSummaryResponse]:
+        await _require_knowledge_base(knowledge_bases, knowledge_base_id)
+        items = await run_in_threadpool(conversations.list_conversations, knowledge_base_id)
+        return [ConversationSummaryResponse(**item) for item in items]
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/conversations/{conversation_id}",
+        response_model=ConversationDetailResponse,
+    )
+    async def get_conversation(
+        knowledge_base_id: str,
+        conversation_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        conversations: ConversationsDependency,
+    ) -> ConversationDetailResponse:
+        await _require_knowledge_base(knowledge_bases, knowledge_base_id)
+        try:
+            item = await run_in_threadpool(
+                conversations.get_conversation,
+                knowledge_base_id,
+                conversation_id,
+            )
+        except ValueError as exc:
+            raise AppError("CONVERSATION_NOT_FOUND", "未找到该会话。", 404) from exc
+        if item is None:
+            raise AppError("CONVERSATION_NOT_FOUND", "未找到该会话。", 404)
+        return ConversationDetailResponse(**item)
+
+    @app.delete(
+        "/api/knowledge-bases/{knowledge_base_id}/conversations/{conversation_id}",
+        status_code=204,
+    )
+    async def delete_conversation(
+        knowledge_base_id: str,
+        conversation_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        conversations: ConversationsDependency,
+    ) -> None:
+        await _require_knowledge_base(knowledge_bases, knowledge_base_id)
+        try:
+            deleted = await run_in_threadpool(
+                conversations.delete_conversation,
+                knowledge_base_id,
+                conversation_id,
+            )
+        except ValueError as exc:
+            raise AppError("CONVERSATION_NOT_FOUND", "未找到该会话。", 404) from exc
+        if not deleted:
+            raise AppError("CONVERSATION_NOT_FOUND", "未找到该会话。", 404)
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/answers/{record_id}",
+        response_model=AnswerRecordResponse,
+    )
+    async def get_answer_record(
+        knowledge_base_id: str,
+        record_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        conversations: ConversationsDependency,
+    ) -> AnswerRecordResponse:
+        await _require_knowledge_base(knowledge_bases, knowledge_base_id)
+        try:
+            item = await run_in_threadpool(
+                conversations.get_answer,
+                knowledge_base_id,
+                record_id,
+            )
+        except ValueError as exc:
+            raise AppError("ANSWER_RECORD_NOT_FOUND", "未找到该回答记录。", 404) from exc
+        if item is None:
+            raise AppError("ANSWER_RECORD_NOT_FOUND", "未找到该回答记录。", 404)
+        return AnswerRecordResponse(**item)
 
     return app
 
@@ -343,3 +442,82 @@ async def _delete_document(
     scope.migrate_legacy_uploads()
     for path in scope.upload_path.glob(f"{document_id}.*"):
         path.unlink(missing_ok=True)
+
+
+async def _execute_recorded_query(
+    payload: QueryRequest,
+    service: RAGServiceProtocol,
+    conversations: ConversationRepository,
+    knowledge_base_id: str,
+    settings,
+) -> QueryResponse:
+    question = payload.question.strip()
+    try:
+        conversation = await run_in_threadpool(
+            conversations.resolve_conversation,
+            knowledge_base_id,
+            question,
+            payload.conversation_id,
+        )
+    except (LookupError, PermissionError, ValueError) as exc:
+        raise AppError("CONVERSATION_NOT_FOUND", "未找到该知识库中的会话。", 404) from exc
+
+    started = time.perf_counter()
+    try:
+        result = await run_in_threadpool(
+            service.query,
+            question,
+            payload.retrieve_k,
+            payload.rerank_k,
+            knowledge_base_id,
+        )
+    except AppError as exc:
+        record = await run_in_threadpool(
+            conversations.record,
+            conversation_id=conversation["conversation_id"],
+            knowledge_base_id=knowledge_base_id,
+            question=question,
+            status="failed",
+            answer=None,
+            sources=[],
+            latency_ms={"total": round((time.perf_counter() - started) * 1000, 2)},
+            models={
+                "embedding": settings.embedding_model,
+                "reranker": settings.reranker_model,
+                "generation": settings.generation_model,
+            },
+            model_metadata={"configured_model": settings.generation_model},
+            prompt_version=None,
+            prompt_hash=None,
+            error_code=exc.code,
+            error_message=exc.message,
+        )
+        details = dict(exc.details) if isinstance(exc.details, dict) else {}
+        details.update(
+            {
+                "conversation_id": conversation["conversation_id"],
+                "record_id": record["record_id"],
+            }
+        )
+        raise AppError(exc.code, exc.message, exc.status_code, details) from exc
+
+    record = await run_in_threadpool(
+        conversations.record,
+        conversation_id=conversation["conversation_id"],
+        knowledge_base_id=knowledge_base_id,
+        question=question,
+        status="success",
+        answer=result.answer,
+        sources=[item.model_dump(mode="json") for item in result.sources],
+        latency_ms=result.latency_ms,
+        models=result.models,
+        model_metadata=result.model_metadata,
+        prompt_version=result.prompt_version,
+        prompt_hash=result.prompt_hash,
+    )
+    return result.model_copy(
+        update={
+            "conversation_id": conversation["conversation_id"],
+            "record_id": record["record_id"],
+        }
+    )
