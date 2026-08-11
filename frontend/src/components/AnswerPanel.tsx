@@ -16,6 +16,14 @@ const METRICS = [
 
 const SOURCE_REFERENCE = /(\[来源\s*(\d+)\])/g;
 
+const ANSWER_STATUS_LABELS: Record<QueryResult["answer_status"], string> = {
+  answered: "已基于证据回答",
+  insufficient_evidence: "证据不足",
+  source_conflict: "来源存在冲突",
+  retrieval_only: "仅展示检索结果",
+  generation_failed: "答案生成已降级",
+};
+
 function answerWithSourceLinks(answer: string, sourceCount: number) {
   return answer.split(SOURCE_REFERENCE).map((part, index) => {
     const sourceNumber = Number(part);
@@ -43,7 +51,9 @@ export function AnswerPanel({ result, loading }: AnswerPanelProps) {
 
   return (
     <section className="answer-result" aria-live="polite">
-      <div className="answer-label">生成答案</div>
+      <div className={`answer-label answer-status-${result.answer_status}`}>
+        {ANSWER_STATUS_LABELS[result.answer_status]}
+      </div>
       <p className="answer-text">{answerWithSourceLinks(result.answer, result.sources.length)}</p>
       <div className="metric-strip" aria-label="查询性能">
         {METRICS.map(([key, label]) => {

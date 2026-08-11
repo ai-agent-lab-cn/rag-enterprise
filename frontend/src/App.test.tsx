@@ -22,6 +22,9 @@ test("loads documents and renders query sources", async () => {
     if (url === "/api/query" && init?.method === "POST") {
       return new Response(JSON.stringify({
         answer: "系统使用可解释的检索流程。[来源 1]",
+        answer_status: "answered",
+        error_code: null,
+        error_message: null,
         model: "gemini-test",
         latency_ms: { retrieval: 10, rerank: 5, generation: 20, total: 35 },
         sources: [{

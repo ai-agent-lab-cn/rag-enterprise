@@ -1,4 +1,3 @@
-import hashlib
 import time
 from pathlib import Path
 from typing import Protocol
@@ -9,12 +8,18 @@ from .errors import AppError
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
 from .models import EmbeddingModel, GeminiGenerator, Reranker
 from .parsers import parse_document
+from .prompts import (
+    GENERATION_FAILED_ANSWER,
+    RETRIEVAL_ONLY_ANSWER,
+    ParsedAnswer,
+    build_prompt,
+    parse_answer,
+)
 from .ranking import rank_candidates
 from .schemas import DocumentInfo, QueryResponse, Source
 from .store import ChromaStore, RetrievedChunk
 
 # 完整 RAG 编排：入库、召回、精排、Prompt、生成
-PROMPT_VERSION = "v2-legacy"
 
 
 class RAGServiceProtocol(Protocol):
@@ -114,13 +119,16 @@ class RAGService:
         ranked = rank_candidates(candidates, scores, min(rerank_k, len(candidates)))
         rerank_ms = _elapsed(rerank_started)
 
+        prompt = build_prompt(question, ranked)
         generation_started = time.perf_counter()
-        prompt = _build_prompt(question, ranked)
-        answer, generation_metadata = self.generator.generate(prompt)
+        parsed_answer, generation_metadata = self._generate_answer(prompt.text, len(ranked))
         generation_ms = _elapsed(generation_started)
         model_metadata = _model_metadata(generation_metadata, self.generator.model_name)
         return QueryResponse(
-            answer=answer,
+            answer=parsed_answer.answer,
+            answer_status=parsed_answer.status,
+            error_code=parsed_answer.error_code,
+            error_message=parsed_answer.error_message,
             sources=[_source(item) for item in ranked],
             model=self.generator.model_name,
             models={
@@ -129,8 +137,8 @@ class RAGService:
                 "generation": self.generator.model_name,
             },
             model_metadata=model_metadata,
-            prompt_version=PROMPT_VERSION,
-            prompt_hash=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            prompt_version=prompt.version,
+            prompt_hash=prompt.sha256,
             latency_ms={
                 "retrieval": retrieval_ms,
                 "rerank": rerank_ms,
@@ -138,6 +146,30 @@ class RAGService:
                 "total": _elapsed(total_started),
             },
         )
+
+    def _generate_answer(
+        self,
+        prompt: str,
+        source_count: int,
+    ) -> tuple[ParsedAnswer, dict[str, object]]:
+        if not getattr(self.generator, "ready", True):
+            return ParsedAnswer("retrieval_only", RETRIEVAL_ONLY_ANSWER), {}
+
+        try:
+            raw_answer, metadata = self.generator.generate(prompt)
+        except AppError as exc:
+            if exc.code not in {"MODEL_TIMEOUT", "MODEL_UNAVAILABLE"}:
+                raise
+            return (
+                ParsedAnswer(
+                    "generation_failed",
+                    GENERATION_FAILED_ANSWER,
+                    exc.code,
+                    exc.message,
+                ),
+                {},
+            )
+        return parse_answer(raw_answer, source_count), metadata
 
 
 def _model_metadata(
@@ -159,23 +191,6 @@ def _model_metadata(
 
 def _elapsed(started: float) -> float:
     return round((time.perf_counter() - started) * 1000, 2)
-
-
-def _build_prompt(question: str, chunks: list[RetrievedChunk]) -> str:
-    context = "\n\n".join(
-        f"[来源 {index}: {item.metadata.get('filename', 'unknown')} / "
-        f"第 {item.metadata.get('paragraph', 0) + 1} 段]\n{item.text}"
-        for index, item in enumerate(chunks, start=1)
-    )
-    return f"""你是 RongRAG Studio 的知识助手。请仅根据给定资料回答问题。
-如果资料不足，请明确说明无法从资料中确定。回答中的关键事实请使用 [来源 N] 标注。
-请使用简洁的纯文本，不要使用 Markdown 加粗标记。
-
-问题：{question}
-
-资料：
-{context}
-"""
 
 
 def _source(item: RetrievedChunk) -> Source:

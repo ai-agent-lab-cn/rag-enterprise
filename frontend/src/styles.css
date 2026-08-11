@@ -53,6 +53,8 @@ button:focus-visible, textarea:focus-visible, a:focus-visible, summary:focus-vis
 .pulse { animation: pulse 1.5s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .45; } }
 .answer-label { color: #61dda8; font-size: 11px; letter-spacing: .16em; font-weight: 700; }
+.answer-status-insufficient_evidence, .answer-status-source_conflict { color: #f2c66d; }
+.answer-status-retrieval_only, .answer-status-generation_failed { color: #f39a8b; }
 .answer-text { font-size: 18px; line-height: 1.95; color: #dce8e4; white-space: pre-wrap; }
 .source-reference { color: #71e8b3; text-decoration: none; font-size: .85em; font-weight: 700; padding: 2px 5px; border-radius: 5px; background: rgba(104,230,174,.08); }
 .source-reference:hover { background: rgba(104,230,174,.16); }

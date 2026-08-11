@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.config import Settings, get_settings
+from backend.app.errors import AppError
 from backend.app.main import create_app, get_conversations, get_knowledge_bases, get_service
 from backend.app.service import RAGService
 from backend.app.store import ChromaStore
@@ -38,10 +39,11 @@ class DeterministicReranker:
 
 class DisabledGenerator:
     model_name = "disabled-generator"
+    ready = True
 
     def generate(self, prompt: str) -> tuple[str, dict[str, object]]:
         del prompt
-        return "集成测试仅验证检索链路。", {}
+        return "[STATUS: ANSWERED]\n集成测试仅验证检索链路。[来源 1]", {}
 
 
 @pytest.fixture
@@ -98,6 +100,28 @@ def test_real_chroma_store_import_query_sources_and_delete(isolated_service: RAG
     assert isolated_service.store.count() == 2
 
 
+def test_generation_failure_keeps_ranked_sources(
+    isolated_service: RAGService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    isolated_service.index_document(
+        "failure-evidence.md",
+        "# 故障策略\n\n即使模型不可用，也必须保留检索来源。".encode(),
+    )
+
+    def fail_generation(_prompt: str) -> tuple[str, dict[str, object]]:
+        raise AppError("MODEL_TIMEOUT", "生成模型响应超时，请稍后重试。", 504)
+
+    monkeypatch.setattr(isolated_service.generator, "generate", fail_generation)
+    response = isolated_service.query("模型故障时如何处理？", 5, 2)
+
+    assert response.answer_status == "generation_failed"
+    assert response.error_code == "MODEL_TIMEOUT"
+    assert response.sources
+    assert response.prompt_version == "v3-grounded-answer-1"
+    assert len(response.prompt_hash or "") == 64
+
+
 def test_retrieval_api_uses_isolated_real_chroma(
     isolated_service: RAGService,
     tmp_path: Path,
@@ -147,7 +171,7 @@ def test_retrieval_api_uses_isolated_real_chroma(
         assert queried.status_code == 200
         assert queried.json()["sources"][0]["document_id"] == document_id
         assert queried.json()["sources"][0]["filename"] == "retrieval-evidence.md"
-        assert queried.json()["prompt_version"] == "v2-legacy"
+        assert queried.json()["prompt_version"] == "v3-grounded-answer-1"
         assert len(queried.json()["prompt_hash"]) == 64
         assert queried.json()["models"] == {
             "embedding": "deterministic-embedding-v1",
