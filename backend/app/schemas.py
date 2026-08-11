@@ -55,6 +55,7 @@ class QueryRequest(BaseModel):
     question: str = Field(min_length=2, max_length=2000)
     retrieve_k: int = Field(default=10, ge=1, le=50)
     rerank_k: int = Field(default=5, ge=1, le=20)
+    conversation_id: str | None = Field(default=None, pattern=r"^conv_[a-f0-9]{16}$")
 
 
 class Source(BaseModel):
@@ -77,6 +78,49 @@ class QueryResponse(BaseModel):
     sources: list[Source]
     model: str
     latency_ms: dict[str, float]
+    conversation_id: str | None = None
+    record_id: str | None = None
+    models: dict[str, str] = Field(default_factory=dict)
+    model_metadata: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    prompt_version: str | None = None
+    prompt_hash: str | None = None
+
+
+class AnswerRecordResponse(BaseModel):
+    record_id: str
+    conversation_id: str
+    knowledge_base_id: str
+    question: str
+    status: str
+    answer: str | None
+    sources: list[Source]
+    latency_ms: dict[str, float]
+    models: dict[str, str]
+    model_metadata: dict[str, str | int | float | bool]
+    prompt_version: str | None
+    prompt_hash: str | None
+    error_code: str | None
+    error_message: str | None
+    created_at: datetime
+
+
+class ConversationSummaryResponse(BaseModel):
+    conversation_id: str
+    knowledge_base_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    turn_count: int
+    last_status: str | None
+
+
+class ConversationDetailResponse(BaseModel):
+    conversation_id: str
+    knowledge_base_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    records: list[AnswerRecordResponse]
 
 
 class HealthResponse(BaseModel):

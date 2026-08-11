@@ -9,6 +9,7 @@ __pycache__/
 data/chroma/
 data/uploads/
 data/knowledge_bases/
+data/conversations/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo

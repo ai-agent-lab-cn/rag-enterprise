@@ -15,7 +15,7 @@ RUN uv sync --locked --no-dev --no-install-project
 
 COPY backend ./backend
 
-RUN mkdir -p data/chroma data/uploads data/knowledge_bases \
+RUN mkdir -p data/chroma data/uploads data/knowledge_bases data/conversations \
     && chown -R app:app /app
 
 USER app

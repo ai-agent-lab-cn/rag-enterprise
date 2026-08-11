@@ -1,3 +1,4 @@
+import hashlib
 import time
 from pathlib import Path
 from typing import Protocol
@@ -12,8 +13,10 @@ from .ranking import rank_candidates
 from .schemas import DocumentInfo, QueryResponse, Source
 from .store import ChromaStore, RetrievedChunk
 
-
 # 完整 RAG 编排：入库、召回、精排、Prompt、生成
+PROMPT_VERSION = "v2-legacy"
+
+
 class RAGServiceProtocol(Protocol):
     def index_document(
         self, filename: str, content: bytes, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
@@ -112,12 +115,22 @@ class RAGService:
         rerank_ms = _elapsed(rerank_started)
 
         generation_started = time.perf_counter()
-        answer, _ = self.generator.generate(_build_prompt(question, ranked))
+        prompt = _build_prompt(question, ranked)
+        answer, generation_metadata = self.generator.generate(prompt)
         generation_ms = _elapsed(generation_started)
+        model_metadata = _model_metadata(generation_metadata, self.generator.model_name)
         return QueryResponse(
             answer=answer,
             sources=[_source(item) for item in ranked],
             model=self.generator.model_name,
+            models={
+                "embedding": self.embedder.model_name,
+                "reranker": self.reranker.model_name,
+                "generation": self.generator.model_name,
+            },
+            model_metadata=model_metadata,
+            prompt_version=PROMPT_VERSION,
+            prompt_hash=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             latency_ms={
                 "retrieval": retrieval_ms,
                 "rerank": rerank_ms,
@@ -125,6 +138,23 @@ class RAGService:
                 "total": _elapsed(total_started),
             },
         )
+
+
+def _model_metadata(
+    response_metadata: dict[str, object],
+    configured_model: str,
+) -> dict[str, str | int | float | bool]:
+    """只保留可复现且体积稳定的生成元数据，不保存供应商原始响应或 Prompt。"""
+
+    metadata: dict[str, str | int | float | bool] = {"configured_model": configured_model}
+    for source_key, target_key in (
+        ("model_version", "model_version"),
+        ("response_id", "response_id"),
+    ):
+        value = response_metadata.get(source_key)
+        if isinstance(value, (str, int, float, bool)):
+            metadata[target_key] = value
+    return metadata
 
 
 def _elapsed(started: float) -> float:

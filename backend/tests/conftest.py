@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.config import get_settings
 from backend.app.knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
-from backend.app.main import create_app, get_knowledge_bases, get_service
+from backend.app.main import create_app, get_conversations, get_knowledge_bases, get_service
 from backend.app.schemas import DocumentInfo, QueryResponse, Source
 
 
@@ -85,13 +85,18 @@ def client(fake_service: FakeService, tmp_path) -> Iterator[TestClient]:
     settings = get_settings()
     original_upload_path = settings.upload_path
     original_knowledge_bases_path = settings.knowledge_bases_path
+    original_conversations_path = settings.conversations_path
     settings.upload_path = tmp_path / "uploads"
     settings.knowledge_bases_path = tmp_path / "knowledge-bases" / "registry.json"
+    settings.conversations_path = tmp_path / "conversations" / "records.json"
     get_knowledge_bases.cache_clear()
+    get_conversations.cache_clear()
     app = create_app()
     app.dependency_overrides[get_service] = lambda: fake_service
     with TestClient(app) as test_client:
         yield test_client
     settings.upload_path = original_upload_path
     settings.knowledge_bases_path = original_knowledge_bases_path
+    settings.conversations_path = original_conversations_path
     get_knowledge_bases.cache_clear()
+    get_conversations.cache_clear()
