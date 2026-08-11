@@ -9,13 +9,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .errors import AppError, install_error_handlers
 from .evaluation_reports import EvaluationReportRepository
-from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID, KnowledgeBaseScope
+from .knowledge_bases import (
+    DEFAULT_KNOWLEDGE_BASE_ID,
+    KnowledgeBaseRecord,
+    KnowledgeBaseRepository,
+    KnowledgeBaseScope,
+)
 from .models import get_embedding_model, get_generator, get_reranker
 from .schemas import (
     DocumentInfo,
     EvaluationReportResponse,
     EvaluationReportSummary,
     HealthResponse,
+    KnowledgeBaseCreate,
+    KnowledgeBaseResponse,
+    KnowledgeBaseUpdate,
     QueryRequest,
     QueryResponse,
 )
@@ -50,6 +58,14 @@ def get_evaluation_reports() -> EvaluationReportRepository:
 EvaluationReportsDependency = Annotated[EvaluationReportRepository, Depends(get_evaluation_reports)]
 
 
+@lru_cache
+def get_knowledge_bases() -> KnowledgeBaseRepository:
+    return KnowledgeBaseRepository(get_settings().knowledge_bases_path)
+
+
+KnowledgeBasesDependency = Annotated[KnowledgeBaseRepository, Depends(get_knowledge_bases)]
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
 
@@ -57,6 +73,7 @@ def create_app() -> FastAPI:
     async def lifespan(_app: FastAPI):
         # 服务启动时迁移 V2 原始文件；只移动根目录文件，不扫描其他知识库目录。
         KnowledgeBaseScope(DEFAULT_KNOWLEDGE_BASE_ID, settings.upload_path).migrate_legacy_uploads()
+        get_knowledge_bases()
         yield
 
     app = FastAPI(
@@ -69,7 +86,7 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=[settings.frontend_origin],
         allow_credentials=False,
-        allow_methods=["GET", "POST", "DELETE"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Content-Type"],
     )
     install_error_handlers(app)
@@ -92,21 +109,107 @@ def create_app() -> FastAPI:
         file: UploadedFile,
         service: ServiceDependency,
     ) -> DocumentInfo:
-        filename = file.filename or "document.txt"
-        content = await file.read(settings.max_upload_mb * 1024 * 1024 + 1)
-        if len(content) > settings.max_upload_mb * 1024 * 1024:
-            raise AppError("FILE_TOO_LARGE", f"文件不能超过 {settings.max_upload_mb} MB。", 413)
-        result = await run_in_threadpool(service.index_document, filename, content)
-        scope = KnowledgeBaseScope(DEFAULT_KNOWLEDGE_BASE_ID, settings.upload_path)
-        scope.migrate_legacy_uploads()
-        scope.upload_path.mkdir(parents=True, exist_ok=True)
-        extension = filename.rsplit(".", maxsplit=1)[-1].lower() if "." in filename else "txt"
-        (scope.upload_path / f"{result.document_id}.{extension}").write_bytes(content)
-        return result
+        return await _upload_document(file, service, DEFAULT_KNOWLEDGE_BASE_ID, settings)
 
     @app.get("/api/documents", response_model=list[DocumentInfo])
     async def list_documents(service: ServiceDependency) -> list[DocumentInfo]:
-        return await run_in_threadpool(service.list_documents)
+        return await run_in_threadpool(service.list_documents, DEFAULT_KNOWLEDGE_BASE_ID)
+
+    @app.get("/api/knowledge-bases", response_model=list[KnowledgeBaseResponse])
+    async def list_knowledge_bases(
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+    ) -> list[KnowledgeBaseResponse]:
+        records = await run_in_threadpool(knowledge_bases.list)
+        return [await _knowledge_base_response(item, service) for item in records]
+
+    @app.post("/api/knowledge-bases", response_model=KnowledgeBaseResponse, status_code=201)
+    async def create_knowledge_base(
+        payload: KnowledgeBaseCreate,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+    ) -> KnowledgeBaseResponse:
+        try:
+            record = await run_in_threadpool(
+                knowledge_bases.create,
+                payload.name.strip(),
+                payload.description.strip(),
+            )
+        except ValueError as exc:
+            raise AppError("KNOWLEDGE_BASE_NAME_CONFLICT", "知识库名称已存在。", 409) from exc
+        return await _knowledge_base_response(record, service)
+
+    @app.get("/api/knowledge-bases/{knowledge_base_id}", response_model=KnowledgeBaseResponse)
+    async def get_knowledge_base(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+    ) -> KnowledgeBaseResponse:
+        record = await _require_knowledge_base(knowledge_bases, knowledge_base_id)
+        return await _knowledge_base_response(record, service)
+
+    @app.put("/api/knowledge-bases/{knowledge_base_id}", response_model=KnowledgeBaseResponse)
+    async def update_knowledge_base(
+        knowledge_base_id: str,
+        payload: KnowledgeBaseUpdate,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+    ) -> KnowledgeBaseResponse:
+        await _require_knowledge_base(knowledge_bases, knowledge_base_id)
+        try:
+            record = await run_in_threadpool(
+                knowledge_bases.update,
+                knowledge_base_id,
+                payload.name.strip(),
+                payload.description.strip(),
+            )
+        except ValueError as exc:
+            raise AppError("KNOWLEDGE_BASE_NAME_CONFLICT", "知识库名称已存在。", 409) from exc
+        if record is None:
+            raise AppError("KNOWLEDGE_BASE_NOT_FOUND", "未找到该知识库。", 404)
+        return await _knowledge_base_response(record, service)
+
+    @app.delete("/api/knowledge-bases/{knowledge_base_id}", status_code=204)
+    async def delete_knowledge_base(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+    ) -> None:
+        await _require_knowledge_base(knowledge_bases, knowledge_base_id)
+        if knowledge_base_id == DEFAULT_KNOWLEDGE_BASE_ID:
+            raise AppError("DEFAULT_KNOWLEDGE_BASE_PROTECTED", "默认知识库不能删除。", 409)
+        documents = await run_in_threadpool(service.list_documents, knowledge_base_id)
+        upload_scope = KnowledgeBaseScope(knowledge_base_id, settings.upload_path)
+        has_original_files = upload_scope.upload_path.exists() and any(upload_scope.upload_path.iterdir())
+        if documents or has_original_files:
+            raise AppError("KNOWLEDGE_BASE_NOT_EMPTY", "请先删除知识库中的文档。", 409)
+        await run_in_threadpool(knowledge_bases.delete, knowledge_base_id)
+
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/documents",
+        response_model=DocumentInfo,
+        status_code=201,
+    )
+    async def upload_scoped_document(
+        knowledge_base_id: str,
+        file: UploadedFile,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+    ) -> DocumentInfo:
+        await _require_knowledge_base(knowledge_bases, knowledge_base_id)
+        return await _upload_document(file, service, knowledge_base_id, settings)
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/documents",
+        response_model=list[DocumentInfo],
+    )
+    async def list_scoped_documents(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+    ) -> list[DocumentInfo]:
+        await _require_knowledge_base(knowledge_bases, knowledge_base_id)
+        return await run_in_threadpool(service.list_documents, knowledge_base_id)
 
     @app.get("/api/evaluations", response_model=list[EvaluationReportSummary])
     async def list_evaluations(
@@ -126,13 +229,20 @@ def create_app() -> FastAPI:
         document_id: str,
         service: ServiceDependency,
     ) -> None:
-        deleted = await run_in_threadpool(service.delete_document, document_id)
-        if not deleted:
-            raise AppError("DOCUMENT_NOT_FOUND", "未找到该文档。", 404)
-        scope = KnowledgeBaseScope(DEFAULT_KNOWLEDGE_BASE_ID, settings.upload_path)
-        scope.migrate_legacy_uploads()
-        for path in scope.upload_path.glob(f"{document_id}.*"):
-            path.unlink(missing_ok=True)
+        await _delete_document(document_id, service, DEFAULT_KNOWLEDGE_BASE_ID, settings)
+
+    @app.delete(
+        "/api/knowledge-bases/{knowledge_base_id}/documents/{document_id}",
+        status_code=204,
+    )
+    async def delete_scoped_document(
+        knowledge_base_id: str,
+        document_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+    ) -> None:
+        await _require_knowledge_base(knowledge_bases, knowledge_base_id)
+        await _delete_document(document_id, service, knowledge_base_id, settings)
 
     @app.post("/api/query", response_model=QueryResponse)
     async def query(
@@ -146,9 +256,90 @@ def create_app() -> FastAPI:
             payload.question.strip(),
             payload.retrieve_k,
             payload.rerank_k,
+            DEFAULT_KNOWLEDGE_BASE_ID,
+        )
+
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/query",
+        response_model=QueryResponse,
+    )
+    async def query_knowledge_base(
+        knowledge_base_id: str,
+        payload: QueryRequest,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+    ) -> QueryResponse:
+        await _require_knowledge_base(knowledge_bases, knowledge_base_id)
+        if payload.rerank_k > payload.retrieve_k:
+            raise AppError("INVALID_TOP_K", "rerank_k 不能大于 retrieve_k。")
+        return await run_in_threadpool(
+            service.query,
+            payload.question.strip(),
+            payload.retrieve_k,
+            payload.rerank_k,
+            knowledge_base_id,
         )
 
     return app
 
 
 app = create_app()
+
+
+async def _require_knowledge_base(
+    repository: KnowledgeBaseRepository,
+    knowledge_base_id: str,
+) -> KnowledgeBaseRecord:
+    try:
+        record = await run_in_threadpool(repository.get, knowledge_base_id)
+    except ValueError as exc:
+        raise AppError("KNOWLEDGE_BASE_NOT_FOUND", "未找到该知识库。", 404) from exc
+    if record is None:
+        raise AppError("KNOWLEDGE_BASE_NOT_FOUND", "未找到该知识库。", 404)
+    return record
+
+
+async def _knowledge_base_response(
+    record: KnowledgeBaseRecord,
+    service: RAGServiceProtocol,
+) -> KnowledgeBaseResponse:
+    documents = await run_in_threadpool(service.list_documents, record.knowledge_base_id)
+    return KnowledgeBaseResponse(
+        **record.to_json(),
+        document_count=len(documents),
+        chunk_count=sum(item.chunk_count for item in documents),
+    )
+
+
+async def _upload_document(
+    file: UploadFile,
+    service: RAGServiceProtocol,
+    knowledge_base_id: str,
+    settings,
+) -> DocumentInfo:
+    filename = file.filename or "document.txt"
+    content = await file.read(settings.max_upload_mb * 1024 * 1024 + 1)
+    if len(content) > settings.max_upload_mb * 1024 * 1024:
+        raise AppError("FILE_TOO_LARGE", f"文件不能超过 {settings.max_upload_mb} MB。", 413)
+    result = await run_in_threadpool(service.index_document, filename, content, knowledge_base_id)
+    scope = KnowledgeBaseScope(knowledge_base_id, settings.upload_path)
+    scope.migrate_legacy_uploads()
+    scope.upload_path.mkdir(parents=True, exist_ok=True)
+    extension = filename.rsplit(".", maxsplit=1)[-1].lower() if "." in filename else "txt"
+    (scope.upload_path / f"{result.document_id}.{extension}").write_bytes(content)
+    return result
+
+
+async def _delete_document(
+    document_id: str,
+    service: RAGServiceProtocol,
+    knowledge_base_id: str,
+    settings,
+) -> None:
+    deleted = await run_in_threadpool(service.delete_document, document_id, knowledge_base_id)
+    if not deleted:
+        raise AppError("DOCUMENT_NOT_FOUND", "未找到该文档。", 404)
+    scope = KnowledgeBaseScope(knowledge_base_id, settings.upload_path)
+    scope.migrate_legacy_uploads()
+    for path in scope.upload_path.glob(f"{document_id}.*"):
+        path.unlink(missing_ok=True)

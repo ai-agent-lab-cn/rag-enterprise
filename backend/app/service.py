@@ -15,10 +15,22 @@ from .store import ChromaStore, RetrievedChunk
 
 # 完整 RAG 编排：入库、召回、精排、Prompt、生成
 class RAGServiceProtocol(Protocol):
-    def index_document(self, filename: str, content: bytes) -> DocumentInfo: ...
-    def list_documents(self) -> list[DocumentInfo]: ...
-    def delete_document(self, document_id: str) -> bool: ...
-    def query(self, question: str, retrieve_k: int, rerank_k: int) -> QueryResponse: ...
+    def index_document(
+        self, filename: str, content: bytes, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
+    ) -> DocumentInfo: ...
+    def list_documents(
+        self, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
+    ) -> list[DocumentInfo]: ...
+    def delete_document(
+        self, document_id: str, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
+    ) -> bool: ...
+    def query(
+        self,
+        question: str,
+        retrieve_k: int,
+        rerank_k: int,
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> QueryResponse: ...
 
 
 class RAGService:
@@ -36,8 +48,12 @@ class RAGService:
         self.reranker = reranker
         self.generator = generator
 
-    def index_document(self, filename: str, content: bytes) -> DocumentInfo:
-        knowledge_base_id = DEFAULT_KNOWLEDGE_BASE_ID
+    def index_document(
+        self,
+        filename: str,
+        content: bytes,
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> DocumentInfo:
         document_id = stable_document_id(filename, content)
         for document in self.store.list_documents(knowledge_base_id):
             if document["document_id"] == document_id:
@@ -61,17 +77,30 @@ class RAGService:
             chunk_count=len(chunks),
         )
 
-    def list_documents(self) -> list[DocumentInfo]:
-        return [DocumentInfo(**item) for item in self.store.list_documents(DEFAULT_KNOWLEDGE_BASE_ID)]
+    def list_documents(
+        self,
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> list[DocumentInfo]:
+        return [DocumentInfo(**item) for item in self.store.list_documents(knowledge_base_id)]
 
-    def delete_document(self, document_id: str) -> bool:
-        return self.store.delete_document(document_id, DEFAULT_KNOWLEDGE_BASE_ID)
+    def delete_document(
+        self,
+        document_id: str,
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> bool:
+        return self.store.delete_document(document_id, knowledge_base_id)
 
-    def query(self, question: str, retrieve_k: int, rerank_k: int) -> QueryResponse:
+    def query(
+        self,
+        question: str,
+        retrieve_k: int,
+        rerank_k: int,
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> QueryResponse:
         total_started = time.perf_counter()
         retrieval_started = time.perf_counter()
         query_embedding = self.embedder.encode([question])[0]
-        candidates = self.store.query(query_embedding, retrieve_k, DEFAULT_KNOWLEDGE_BASE_ID)
+        candidates = self.store.query(query_embedding, retrieve_k, knowledge_base_id)
         retrieval_ms = _elapsed(retrieval_started)
         if not candidates:
             raise AppError("NO_DOCUMENTS", "知识库为空，请先上传文档。", 409)
