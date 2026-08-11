@@ -75,6 +75,9 @@ class Source(BaseModel):
 
 class QueryResponse(BaseModel):
     answer: str
+    answer_status: str = "answered"
+    error_code: str | None = None
+    error_message: str | None = None
     sources: list[Source]
     model: str
     latency_ms: dict[str, float]

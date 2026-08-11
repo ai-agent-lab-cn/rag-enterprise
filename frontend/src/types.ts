@@ -23,6 +23,9 @@ export interface Source {
 
 export interface QueryResult {
   answer: string;
+  answer_status: "answered" | "insufficient_evidence" | "source_conflict" | "retrieval_only" | "generation_failed";
+  error_code: string | null;
+  error_message: string | null;
   sources: Source[];
   model: string;
   latency_ms: Record<string, number>;

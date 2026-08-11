@@ -501,12 +501,17 @@ async def _execute_recorded_query(
         )
         raise AppError(exc.code, exc.message, exc.status_code, details) from exc
 
+    record_status = (
+        "success"
+        if result.answer_status in {"answered", "insufficient_evidence", "source_conflict"}
+        else "failed"
+    )
     record = await run_in_threadpool(
         conversations.record,
         conversation_id=conversation["conversation_id"],
         knowledge_base_id=knowledge_base_id,
         question=question,
-        status="success",
+        status=record_status,
         answer=result.answer,
         sources=[item.model_dump(mode="json") for item in result.sources],
         latency_ms=result.latency_ms,
@@ -514,6 +519,8 @@ async def _execute_recorded_query(
         model_metadata=result.model_metadata,
         prompt_version=result.prompt_version,
         prompt_hash=result.prompt_hash,
+        error_code=result.error_code,
+        error_message=result.error_message,
     )
     return result.model_copy(
         update={
