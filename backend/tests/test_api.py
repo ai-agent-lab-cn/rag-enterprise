@@ -82,3 +82,97 @@ def test_generation_failure_returns_stable_error(client, fake_service) -> None:
     )
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "MODEL_UNAVAILABLE"
+
+
+def test_knowledge_base_crud_and_default_protection(client) -> None:
+    listed = client.get("/api/knowledge-bases")
+    assert listed.status_code == 200
+    assert listed.json()[0]["knowledge_base_id"] == "kb_default"
+    assert listed.json()[0]["is_default"] is True
+
+    created = client.post(
+        "/api/knowledge-bases",
+        json={"name": "产品资料", "description": "产品知识库"},
+    )
+    assert created.status_code == 201
+    knowledge_base_id = created.json()["knowledge_base_id"]
+    assert knowledge_base_id.startswith("kb_")
+    assert created.json()["document_count"] == 0
+
+    fetched = client.get(f"/api/knowledge-bases/{knowledge_base_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["name"] == "产品资料"
+
+    updated = client.put(
+        f"/api/knowledge-bases/{knowledge_base_id}",
+        json={"name": "产品手册", "description": "已更新"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "产品手册"
+
+    assert client.delete("/api/knowledge-bases/kb_default").status_code == 409
+    assert client.delete(f"/api/knowledge-bases/{knowledge_base_id}").status_code == 204
+    assert client.get(f"/api/knowledge-bases/{knowledge_base_id}").status_code == 404
+
+
+def test_knowledge_base_names_are_unique(client) -> None:
+    payload = {"name": "团队资料", "description": ""}
+    assert client.post("/api/knowledge-bases", json=payload).status_code == 201
+    conflict = client.post("/api/knowledge-bases", json=payload)
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "KNOWLEDGE_BASE_NAME_CONFLICT"
+
+
+def test_scoped_document_and_query_routes_are_isolated(client) -> None:
+    created = client.post(
+        "/api/knowledge-bases",
+        json={"name": "隔离资料", "description": ""},
+    ).json()
+    knowledge_base_id = created["knowledge_base_id"]
+
+    uploaded = client.post(
+        f"/api/knowledge-bases/{knowledge_base_id}/documents",
+        files={"file": ("isolated.md", "隔离内容", "text/markdown")},
+    )
+    assert uploaded.status_code == 201
+    assert uploaded.json()["knowledge_base_id"] == knowledge_base_id
+    assert client.get("/api/documents").json() == []
+    assert len(client.get(f"/api/knowledge-bases/{knowledge_base_id}/documents").json()) == 1
+
+    queried = client.post(
+        f"/api/knowledge-bases/{knowledge_base_id}/query",
+        json={"question": "隔离内容是什么？", "retrieve_k": 5, "rerank_k": 3},
+    )
+    assert queried.status_code == 200
+    assert queried.json()["sources"][0]["knowledge_base_id"] == knowledge_base_id
+
+    non_empty = client.delete(f"/api/knowledge-bases/{knowledge_base_id}")
+    assert non_empty.status_code == 409
+    assert non_empty.json()["error"]["code"] == "KNOWLEDGE_BASE_NOT_EMPTY"
+
+    assert client.delete(
+        f"/api/knowledge-bases/{knowledge_base_id}/documents/doc_test"
+    ).status_code == 204
+    assert client.delete(f"/api/knowledge-bases/{knowledge_base_id}").status_code == 204
+
+
+def test_unknown_knowledge_base_is_rejected_before_scoped_operation(client) -> None:
+    response = client.get("/api/knowledge-bases/kb_missing/documents")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "KNOWLEDGE_BASE_NOT_FOUND"
+
+
+def test_knowledge_base_with_orphan_original_file_cannot_be_deleted(client) -> None:
+    created = client.post(
+        "/api/knowledge-bases",
+        json={"name": "孤立文件测试", "description": ""},
+    ).json()
+    knowledge_base_id = created["knowledge_base_id"]
+    upload_path = get_settings().upload_path / knowledge_base_id
+    upload_path.mkdir(parents=True)
+    (upload_path / "orphan.md").write_text("不能被静默遗留", encoding="utf-8")
+
+    response = client.delete(f"/api/knowledge-bases/{knowledge_base_id}")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "KNOWLEDGE_BASE_NOT_EMPTY"

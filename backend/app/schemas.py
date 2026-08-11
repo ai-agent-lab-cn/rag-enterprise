@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
 
@@ -12,6 +12,43 @@ class DocumentInfo(BaseModel):
     filename: str
     chunk_count: int
     status: str = "ready"
+
+
+class KnowledgeBaseCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("知识库名称不能为空")
+        return value
+
+
+class KnowledgeBaseUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("知识库名称不能为空")
+        return value
+
+
+class KnowledgeBaseResponse(BaseModel):
+    knowledge_base_id: str
+    name: str
+    description: str
+    created_at: datetime
+    updated_at: datetime
+    is_default: bool
+    document_count: int
+    chunk_count: int
 
 
 class QueryRequest(BaseModel):

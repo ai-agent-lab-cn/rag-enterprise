@@ -83,7 +83,7 @@ docker compose up --build -d
 
 打开 <http://localhost:5173> 即可访问界面。前端会把 `/api` 请求转发到后端；健康检查地址为 <http://localhost:5173/api/health>。
 
-如需启用 Gemini 生成，先在仓库根目录的 `.env` 中填写 `GEMINI_API_KEY`。Chroma 索引和上传文件分别保存在 Compose 命名卷中。停止并删除容器：
+如需启用 Gemini 生成，先在仓库根目录的 `.env` 中填写 `GEMINI_API_KEY`。Chroma 索引、上传文件和知识库清单分别保存在 Compose 命名卷中。停止并删除容器：
 
 ```bash
 docker compose down
@@ -102,6 +102,11 @@ docker compose down
 | `GET` | `/api/evaluations` | 按运行时间倒序获取正式检索评测报告 |
 | `GET` | `/api/evaluations/{report_id}` | 获取单次正式检索评测报告详情 |
 | `GET` | `/api/health` | 检查索引与模型配置状态 |
+| `GET/POST` | `/api/knowledge-bases` | 列出或创建知识库 |
+| `GET/PUT/DELETE` | `/api/knowledge-bases/{id}` | 查看、更新或删除空知识库 |
+| `GET/POST` | `/api/knowledge-bases/{id}/documents` | 列出或上传指定知识库的文档 |
+| `DELETE` | `/api/knowledge-bases/{id}/documents/{document_id}` | 删除指定知识库的文档 |
+| `POST` | `/api/knowledge-bases/{id}/query` | 只检索指定知识库并生成答案 |
 
 查询请求示例：
 
@@ -183,7 +188,9 @@ npm run build
   `kb_default`，原始文件存放于 `data/uploads/kb_default/`。
 - Chroma 启动时会为缺少 `knowledge_base_id` 的 V2 chunk 补上默认值；迁移可重复执行，
   不会复制 chunk。旧上传文件与新目录存在内容冲突时会停止迁移，不会静默覆盖。
-- 当前 API 仍使用默认知识库，知识库管理与请求级选择将在 V3 后续任务中实现。
+- 原 V2 文档和查询 API 继续映射默认知识库；V3 作用域 API 通过路径中的
+  `knowledge_base_id` 严格隔离上传文件、Chroma 检索与删除操作。
+- 默认知识库不能删除；其他知识库包含文档时也不能删除，必须先明确删除其中的文档。
 - 演示资料由项目作者编写，不包含真实电话、邮箱或访问令牌。
 - 不建议把包含个人敏感信息的索引目录或 API 原始响应公开提交。
 

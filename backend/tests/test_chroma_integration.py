@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.config import Settings, get_settings
-from backend.app.main import create_app, get_service
+from backend.app.main import create_app, get_knowledge_bases, get_service
 from backend.app.service import RAGService
 from backend.app.store import ChromaStore
 
@@ -105,6 +105,12 @@ def test_retrieval_api_uses_isolated_real_chroma(
 ) -> None:
     upload_path = tmp_path / "api-uploads"
     monkeypatch.setattr(get_settings(), "upload_path", upload_path)
+    monkeypatch.setattr(
+        get_settings(),
+        "knowledge_bases_path",
+        tmp_path / "knowledge-bases" / "registry.json",
+    )
+    get_knowledge_bases.cache_clear()
     app = create_app()
     app.dependency_overrides[get_service] = lambda: isolated_service
 
@@ -140,3 +146,33 @@ def test_retrieval_api_uses_isolated_real_chroma(
         assert deleted.status_code == 204
         assert client.get("/api/documents").json() == []
         assert not list(default_upload_path.glob(f"{document_id}.*"))
+    get_knowledge_bases.cache_clear()
+
+
+def test_rag_service_keeps_documents_and_results_in_requested_knowledge_base(
+    isolated_service: RAGService,
+) -> None:
+    default_document = isolated_service.index_document(
+        "default.md",
+        "# 默认资料\n\n默认知识库提供来源和原文证据。".encode(),
+    )
+    team_document = isolated_service.index_document(
+        "team.md",
+        "# 团队部署\n\n团队知识库记录容器部署。".encode(),
+        "kb_team",
+    )
+
+    assert {item.document_id for item in isolated_service.list_documents()} == {
+        default_document.document_id
+    }
+    assert {item.document_id for item in isolated_service.list_documents("kb_team")} == {
+        team_document.document_id
+    }
+
+    default_response = isolated_service.query("来源证据是什么？", 5, 2)
+    team_response = isolated_service.query("如何容器部署？", 5, 2, "kb_team")
+
+    assert {source.knowledge_base_id for source in default_response.sources} == {"kb_default"}
+    assert {source.knowledge_base_id for source in team_response.sources} == {"kb_team"}
+    assert all(source.document_id != team_document.document_id for source in default_response.sources)
+    assert all(source.document_id != default_document.document_id for source in team_response.sources)

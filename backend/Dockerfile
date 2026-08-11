@@ -15,7 +15,7 @@ RUN uv sync --locked --no-dev --no-install-project
 
 COPY backend ./backend
 
-RUN mkdir -p data/chroma data/uploads \
+RUN mkdir -p data/chroma data/uploads data/knowledge_bases \
     && chown -R app:app /app
 
 USER app
@@ -26,4 +26,3 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=6 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
 
 CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-

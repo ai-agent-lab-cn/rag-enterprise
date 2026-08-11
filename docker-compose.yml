@@ -10,6 +10,7 @@ services:
     volumes:
       - chroma_data:/app/data/chroma
       - uploads_data:/app/data/uploads
+      - knowledge_bases_data:/app/data/knowledge_bases
     healthcheck:
       test:
         - CMD
@@ -45,4 +46,4 @@ services:
 volumes:
   chroma_data:
   uploads_data:
-
+  knowledge_bases_data:
