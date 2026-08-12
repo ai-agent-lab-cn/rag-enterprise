@@ -195,6 +195,48 @@ class AnswerEvaluationReport(BaseModel):
     passed: bool
 
 
+class HumanReviewItem(BaseModel):
+    case_id: str = Field(pattern=r"^a\d{3}$")
+    accepted: bool
+    reviewer: str = Field(min_length=1)
+    reviewed_at: datetime
+    notes: str = Field(min_length=1)
+
+
+class HumanReviewRecord(BaseModel):
+    report_id: str = Field(min_length=1)
+    reviews: list[HumanReviewItem]
+
+
+def promote_official_report(
+    dataset: AnswerEvaluationDataset,
+    report: AnswerEvaluationReport,
+    review: HumanReviewRecord,
+) -> AnswerEvaluationReport:
+    """人工复核满足冻结比例后，才把通过的正式候选报告标为 official。"""
+
+    if report.mode != "formal" or not report.passed:
+        raise ValueError("只有通过全部质量门的正式候选报告可以放行")
+    if review.report_id != report.report_id:
+        raise ValueError("人工复核记录与报告不匹配")
+    reviews = {item.case_id: item for item in review.reviews}
+    if len(reviews) != len(review.reviews):
+        raise ValueError("人工复核包含重复 case_id")
+    failure_ids = {case.case_id for case in dataset.cases if case.scenario != "answerable"}
+    answerable_ids = {case.case_id for case in dataset.cases if case.scenario == "answerable"}
+    missing_failures = failure_ids - set(reviews)
+    reviewed_answerable = answerable_ids & set(reviews)
+    required_answerable = max(1, (len(answerable_ids) + 4) // 5)
+    if missing_failures:
+        raise ValueError(f"人工复核缺少失败样本：{sorted(missing_failures)}")
+    if len(reviewed_answerable) < required_answerable:
+        raise ValueError(f"人工复核至少需要 {required_answerable} 个通过样本")
+    rejected = sorted(item.case_id for item in review.reviews if not item.accepted)
+    if rejected:
+        raise ValueError(f"人工复核未通过：{rejected}")
+    return report.model_copy(update={"official": True})
+
+
 def load_answer_dataset(path: Path) -> AnswerEvaluationDataset:
     return AnswerEvaluationDataset.model_validate_json(path.read_text(encoding="utf-8"))
 
