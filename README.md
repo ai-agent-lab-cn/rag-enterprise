@@ -205,6 +205,27 @@ uv run python -m backend.evaluation.run_answer_evaluation \
 生成模型不能作为唯一裁判。工具链输出默认都是非正式候选报告；测试替身只验证计算和报告
 结构，不能形成正式质量分数。正式基线、人工抽检和放行报告属于 V3 #44。
 
+真实回答基线使用当前配置的 Gemini 生成模型和独立裁判模型逐题运行，并通过检查点支持免费
+额度下的断点恢复：
+
+```bash
+uv run python -m backend.evaluation.run_answer_baseline \
+  --dataset backend/evaluation/datasets/answer_v1.json \
+  --corpus backend/evaluation/datasets/retrieval_v1.json \
+  --commit "$(git rev-parse HEAD)" \
+  --judge-model gemini-3.1-flash-lite \
+  --checkpoint /tmp/answer-baseline-checkpoint.json \
+  --run-output /tmp/answer-baseline-run.json \
+  --report-output /tmp/answer-baseline-report.json
+```
+
+运行器每完成一题便原子写入检查点；配额恢复后用相同参数重跑会跳过已完成样本。只有全部
+冻结指标通过，并由人工复核全部失败样本及至少 20% 的可回答样本后，候选报告才允许标记
+为正式报告。检查点和包含模型原始答案的运行文件默认保留在临时目录，不提交到仓库。
+
+正式回答报告存放在 `backend/evaluation/reports/answers/`，与顶层 V2 检索报告隔离；现有
+检索报告 API 不会把回答报告误解析为检索指标。回答报告的只读 API 和页面属于 V3 #45。
+
 ## 测试与质量检查
 
 ```bash

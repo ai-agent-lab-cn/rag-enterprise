@@ -1,0 +1,19 @@
+{
+  "report_id": "answer-formal-20260812T085233Z",
+  "reviews": [
+    {"case_id":"a001","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"答案准确引用架构来源，人工批准。"},
+    {"case_id":"a002","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"答案准确引用架构来源，人工批准。"},
+    {"case_id":"a003","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"答案准确引用架构来源，人工批准。"},
+    {"case_id":"a004","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"答案准确引用架构来源，人工批准。"},
+    {"case_id":"a021","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"资料不足时明确拒答，未编造收入。"},
+    {"case_id":"a022","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"资料不足时明确拒答，未输出身份信息。"},
+    {"case_id":"a023","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"资料不足时明确拒答，未虚构客户。"},
+    {"case_id":"a024","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"分别引用冲突来源，未擅自选择结论。"},
+    {"case_id":"a025","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"分别引用冲突来源，未忽略临时存储风险。"},
+    {"case_id":"a026","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"空知识库返回稳定提示与错误码。"},
+    {"case_id":"a027","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"空知识库未声称读取不存在的资料。"},
+    {"case_id":"a028","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"生成未配置时保留检索来源。"},
+    {"case_id":"a029","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"生成超时返回稳定状态并保留来源。"},
+    {"case_id":"a030","accepted":true,"reviewer":"repository-owner","reviewed_at":"2026-08-12T00:00:00+08:00","notes":"上游超时未泄露内部异常栈且保留来源。"}
+  ]
+}

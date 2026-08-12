@@ -6,17 +6,24 @@ import pytest
 from pydantic import ValidationError
 
 from backend.evaluation.answer_quality import (
+    AnswerEvaluationReport,
     AnswerEvaluationRun,
     AnswerMetric,
     AnswerObservation,
     ClaimJudgement,
     EvaluatedSource,
+    HumanReviewItem,
+    HumanReviewRecord,
     SemanticJudgement,
     evaluate_answers,
     load_answer_dataset,
+    promote_official_report,
 )
+from backend.evaluation.run_answer_baseline import _load_checkpoint, _save_checkpoint
 
 DATASET_PATH = Path("backend/evaluation/datasets/answer_v1.json")
+BASELINE_REPORT_PATH = Path("backend/evaluation/reports/answers/answer_v1_baseline.json")
+HUMAN_REVIEW_PATH = Path("backend/evaluation/reports/answers/answer_v1_human_review.json")
 
 
 def _source(chunk_id: str = "architecture:chunk:00000") -> EvaluatedSource:
@@ -181,3 +188,65 @@ def test_dataset_json_remains_human_reviewable() -> None:
         }
         for case in payload["cases"]
     )
+
+
+def test_official_promotion_requires_all_failures_and_twenty_percent_of_passes() -> None:
+    dataset = load_answer_dataset(DATASET_PATH)
+    report = evaluate_answers(dataset, _run(with_judgements=True), "formal")
+    failure_ids = [case.case_id for case in dataset.cases if case.scenario != "answerable"]
+    pass_ids = [case.case_id for case in dataset.cases if case.scenario == "answerable"][:4]
+    review = HumanReviewRecord(
+        report_id=report.report_id,
+        reviews=[
+            HumanReviewItem(
+                case_id=case_id,
+                accepted=True,
+                reviewer="人工复核人",
+                reviewed_at=datetime(2026, 8, 12, tzinfo=UTC),
+                notes="状态、答案与来源均已核对。",
+            )
+            for case_id in failure_ids + pass_ids
+        ],
+    )
+
+    promoted = promote_official_report(dataset, report, review)
+    assert promoted.official is True
+
+    review.reviews = review.reviews[:-1]
+    with pytest.raises(ValueError, match="至少需要 4 个通过样本"):
+        promote_official_report(dataset, report, review)
+
+
+def test_baseline_checkpoint_is_atomic_and_resumable(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    observation = _observations(with_judgements=True)[0]
+
+    _save_checkpoint(checkpoint, {observation.case_id: observation}, {observation.case_id: "a" * 64})
+    observations, hashes = _load_checkpoint(checkpoint)
+
+    assert observations["a001"].judgement is not None
+    assert hashes == {"a001": "a" * 64}
+    assert not checkpoint.with_suffix(".json.tmp").exists()
+
+
+def test_official_answer_baseline_is_complete_passed_and_human_reviewed() -> None:
+    dataset = load_answer_dataset(DATASET_PATH)
+    report = AnswerEvaluationReport.model_validate_json(
+        BASELINE_REPORT_PATH.read_text(encoding="utf-8")
+    )
+    review = HumanReviewRecord.model_validate_json(
+        HUMAN_REVIEW_PATH.read_text(encoding="utf-8")
+    )
+
+    assert report.official is True
+    assert report.passed is True
+    assert report.commit == "daca18509ca8f447aa00395ca88a58543ffb2cd4"
+    assert report.dataset_version == dataset.version == "1.0.0"
+    assert report.prompt_version == "v3-grounded-answer-1"
+    assert report.models == {
+        "generation": "gemini-3.6-flash",
+        "judge": "gemini-3.1-flash-lite",
+    }
+    assert report.case_count == len(report.deterministic_results) == 30
+    assert len(review.reviews) == 14
+    assert promote_official_report(dataset, report.model_copy(update={"official": False}), review)

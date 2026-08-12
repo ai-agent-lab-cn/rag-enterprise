@@ -1,0 +1,1270 @@
+{
+  "report_id": "answer-formal-20260812T085233Z",
+  "mode": "formal",
+  "official": true,
+  "dataset_id": "rag-enterprise-answer-quality",
+  "dataset_version": "1.0.0",
+  "commit": "daca18509ca8f447aa00395ca88a58543ffb2cd4",
+  "run_at": "2026-08-12T08:52:33.555622Z",
+  "prompt_version": "v3-grounded-answer-1",
+  "prompt_hash": "2dac09395cfa17e529e40ec8540201fc55282af873c55bd27970256248ec30c9",
+  "models": {
+    "generation": "gemini-3.6-flash",
+    "judge": "gemini-3.1-flash-lite"
+  },
+  "parameters": {
+    "temperature": 0,
+    "evaluation_scope": "fixed_evidence_generation",
+    "judge_rubric": "v1"
+  },
+  "case_count": 30,
+  "deterministic_results": [
+    {
+      "case_id": "a001",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a002",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a003",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a004",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a005",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a006",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a007",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a008",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a009",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1,
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a010",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a011",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1,
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a012",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a013",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1,
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a014",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a015",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a016",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a017",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1,
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a018",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a019",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a020",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "citation_indices": [
+        1
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a021",
+      "expected_status": "insufficient_evidence",
+      "actual_status": "insufficient_evidence",
+      "citation_indices": [],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a022",
+      "expected_status": "insufficient_evidence",
+      "actual_status": "insufficient_evidence",
+      "citation_indices": [],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a023",
+      "expected_status": "insufficient_evidence",
+      "actual_status": "insufficient_evidence",
+      "citation_indices": [],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a024",
+      "expected_status": "source_conflict",
+      "actual_status": "source_conflict",
+      "citation_indices": [
+        1,
+        2
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a025",
+      "expected_status": "source_conflict",
+      "actual_status": "source_conflict",
+      "citation_indices": [
+        1,
+        2
+      ],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a026",
+      "expected_status": "retrieval_empty",
+      "actual_status": "retrieval_empty",
+      "citation_indices": [],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a027",
+      "expected_status": "retrieval_empty",
+      "actual_status": "retrieval_empty",
+      "citation_indices": [],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a028",
+      "expected_status": "retrieval_only",
+      "actual_status": "retrieval_only",
+      "citation_indices": [],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a029",
+      "expected_status": "generation_failed",
+      "actual_status": "generation_failed",
+      "citation_indices": [],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    },
+    {
+      "case_id": "a030",
+      "expected_status": "generation_failed",
+      "actual_status": "generation_failed",
+      "citation_indices": [],
+      "invalid_citation_indices": [],
+      "unexpected_source_ids": [],
+      "status_correct": true,
+      "response_stable": true
+    }
+  ],
+  "semantic_judgements": {
+    "a001": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点中关于相对路径和Nginx反向代理的内容，且未包含禁止断言的内容。",
+      "evidence": [
+        "前端通过相对路径 /api 调用后端，由 Nginx 在容器环境中反向代理。"
+      ],
+      "claims": [
+        {
+          "claim": "前端通过相对路径 /api 调用后端",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明与参考要点及来源内容完全一致。",
+          "evidence": [
+            "前端通过相对路径 /api 调用后端"
+          ]
+        },
+        {
+          "claim": "由 Nginx 在容器环境中进行反向代理",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明准确反映了参考要点中关于Nginx反向代理的描述。",
+          "evidence": [
+            "由 Nginx 在容器环境中反向代理"
+          ]
+        }
+      ]
+    },
+    "a002": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点中的所有步骤，且未包含禁止断言的内容，引用归因正确。",
+      "evidence": [
+        "一次 RAG 查询依次包含问题向量化、Chroma 向量召回、CrossEncoder 精排和生成模型回答 [来源 1]。",
+        "RAG 查询依次执行问题向量化、Chroma 向量召回、CrossEncoder 精排和生成模型回答。"
+      ],
+      "claims": [
+        {
+          "claim": "一次 RAG 查询依次包含问题向量化、Chroma 向量召回、CrossEncoder 精排和生成模型回答。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明完整对应了参考要点中的所有步骤，并与来源内容完全一致。",
+          "evidence": [
+            "RAG 查询依次执行问题向量化、Chroma 向量召回、CrossEncoder 精排和生成模型回答。"
+          ]
+        }
+      ]
+    },
+    "a003": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点，明确指出不需要单独部署网络服务，并解释了其使用进程内持久化目录的机制，与来源完全一致。",
+      "evidence": [
+        "Chroma 不需要单独部署网络服务，它使用进程内持久化目录保存索引，不依赖独立的 Chroma 网络服务"
+      ],
+      "claims": [
+        {
+          "claim": "Chroma 不需要单独部署网络服务。",
+          "citation_indices": [
+            0
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明直接对应参考要点，且被来源明确支持。",
+          "evidence": [
+            "ChromaStore 使用进程内持久化目录保存索引，不依赖独立的 Chroma 网络服务。"
+          ]
+        },
+        {
+          "claim": "Chroma 使用进程内持久化目录保存索引。",
+          "citation_indices": [
+            0
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明准确描述了 Chroma 的运行机制，与来源一致。",
+          "evidence": [
+            "ChromaStore 使用进程内持久化目录保存索引"
+          ]
+        },
+        {
+          "claim": "Chroma 不依赖独立的 Chroma 网络服务。",
+          "citation_indices": [
+            0
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明重申了不需要独立服务的观点，与来源一致。",
+          "evidence": [
+            "不依赖独立的 Chroma 网络服务。"
+          ]
+        }
+      ]
+    },
+    "a004": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点中提到的所有内容，且未包含禁止断言的内容。",
+      "evidence": [
+        "Docker Compose 编排前后端两个镜像，上传文件和 Chroma 索引分别使用后端命名卷持久化。"
+      ],
+      "claims": [
+        {
+          "claim": "Compose 中使用命名卷进行持久化的数据包括上传文件。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出上传文件使用命名卷持久化。",
+          "evidence": [
+            "上传文件和 Chroma 索引分别使用后端命名卷持久化。"
+          ]
+        },
+        {
+          "claim": "Compose 中使用命名卷进行持久化的数据包括 Chroma 索引。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出 Chroma 索引使用命名卷持久化。",
+          "evidence": [
+            "上传文件和 Chroma 索引分别使用后端命名卷持久化。"
+          ]
+        }
+      ]
+    },
+    "a005": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点中提到的所有文件格式，且未包含任何禁止断言的内容。",
+      "evidence": [
+        "系统支持上传 Markdown、TXT 和 PDF 格式的文档"
+      ],
+      "claims": [
+        {
+          "claim": "系统支持上传 Markdown、TXT 和 PDF 格式的文档",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确列出了这三种格式，回答与来源完全一致。",
+          "evidence": [
+            "系统接受 Markdown、TXT 和 PDF 文档"
+          ]
+        }
+      ]
+    },
+    "a006": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点中提到的固定 chunk_size 和 overlap，且未包含禁止断言的内容。",
+      "evidence": [
+        "解析后的段落按照固定 chunk_size 和 overlap 切片，每个分块获得稳定的 chunk_id [来源 1]。"
+      ],
+      "claims": [
+        {
+          "claim": "解析后的段落按照固定 chunk_size 切片。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出按照固定 chunk_size 切片。",
+          "evidence": [
+            "解析后的段落按照固定 chunk_size 和 overlap 切片"
+          ]
+        },
+        {
+          "claim": "解析后的段落按照 overlap 切片。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出按照 overlap 切片。",
+          "evidence": [
+            "解析后的段落按照固定 chunk_size 和 overlap 切片"
+          ]
+        }
+      ]
+    },
+    "a007": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点中提到的文件名和内容摘要，且未包含禁止断言的内容。",
+      "evidence": [
+        "文档标识由文件名和内容摘要共同生成，相同文件名但内容不同会得到不同 document_id。"
+      ],
+      "claims": [
+        {
+          "claim": "document_id 由文件名和内容摘要共同生成",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明与来源 1 的描述完全一致。",
+          "evidence": [
+            "文档标识由文件名和内容摘要共同生成"
+          ]
+        }
+      ]
+    },
+    "a008": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点中提到的向量分块和原始文件删除，且未包含禁止断言的内容。",
+      "evidence": [
+        "删除文档时同时删除向量索引中的相关分块以及上传目录中的原始文件。"
+      ],
+      "claims": [
+        {
+          "claim": "删除文档时会同时删除向量索引中的相关分块",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明直接对应参考要点中的向量分块，并被来源支持。",
+          "evidence": [
+            "删除文档时同时删除向量索引中的相关分块"
+          ]
+        },
+        {
+          "claim": "删除文档时会同时删除上传目录中的原始文件",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明直接对应参考要点中的上传的原始文件，并被来源支持。",
+          "evidence": [
+            "以及上传目录中的原始文件"
+          ]
+        }
+      ]
+    },
+    "a009": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点中关于召回数量和精排数量的规定，且未包含禁止断言的内容。",
+      "evidence": [
+        "默认先召回十个候选分块，再由精排模型选出前五个来源。"
+      ],
+      "claims": [
+        {
+          "claim": "默认召回数量为十个候选分块",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "与来源描述一致。",
+          "evidence": [
+            "默认先召回十个候选分块"
+          ]
+        },
+        {
+          "claim": "精排数量为前五个来源",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "与来源描述一致。",
+          "evidence": [
+            "再由精排模型选出前五个来源"
+          ]
+        }
+      ]
+    },
+    "a010": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点中的余弦空间和一减距离计算方式，且未包含禁止断言的内容。",
+      "evidence": [
+        "向量检索使用余弦空间，检索分数由一减距离得到"
+      ],
+      "claims": [
+        {
+          "claim": "向量检索使用余弦空间",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出向量检索使用余弦空间。",
+          "evidence": [
+            "向量检索使用余弦空间"
+          ]
+        },
+        {
+          "claim": "检索分数由一减去距离得到",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出检索分数由一减距离得到。",
+          "evidence": [
+            "检索分数由一减距离得到"
+          ]
+        }
+      ]
+    },
+    "a011": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确地定义了 Recall@5 和 MRR，并与参考要点完全一致，没有包含任何禁止的断言。",
+      "evidence": [
+        "Recall@5 衡量前五个向量候选对相关分块的覆盖，MRR 衡量第一个相关结果的排名。"
+      ],
+      "claims": [
+        {
+          "claim": "Recall@5 衡量前五个向量候选对相关分块的覆盖",
+          "citation_indices": [
+            0
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明与参考要点及来源内容一致。",
+          "evidence": [
+            "Recall@5 衡量前五个向量候选对相关分块的覆盖"
+          ]
+        },
+        {
+          "claim": "MRR 衡量第一个相关结果的排名",
+          "citation_indices": [
+            0
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明与参考要点及来源内容一致。",
+          "evidence": [
+            "MRR 衡量第一个相关结果的排名"
+          ]
+        }
+      ]
+    },
+    "a012": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了所有参考要点，且与来源完全一致，没有包含任何禁止断言。",
+      "evidence": [
+        "V2 质量门要求 Recall@5 不低于 0.80、向量 MRR 不低于 0.60、精排 MRR 不低于 0.70。"
+      ],
+      "claims": [
+        {
+          "claim": "V2 的检索质量门要求 Recall@5 不低于 0.80。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出 Recall@5 不低于 0.80。",
+          "evidence": [
+            "V2 质量门要求 Recall@5 不低于 0.80"
+          ]
+        },
+        {
+          "claim": "V2 的检索质量门要求向量 MRR 不低于 0.60。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出向量 MRR 不低于 0.60。",
+          "evidence": [
+            "向量 MRR 不低于 0.60"
+          ]
+        },
+        {
+          "claim": "V2 的检索质量门要求精排 MRR 不低于 0.70。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出精排 MRR 不低于 0.70。",
+          "evidence": [
+            "精排 MRR 不低于 0.70"
+          ]
+        }
+      ]
+    },
+    "a013": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点中提到的所有前后端质量检查工具和流程，且未包含任何禁止断言的内容。",
+      "evidence": [
+        "后端质量门运行 pytest 和 Ruff，前端质量门运行测试、ESLint 和生产构建。"
+      ],
+      "claims": [
+        {
+          "claim": "后端质量门运行 pytest 和 Ruff",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明与来源 1 中的描述完全一致。",
+          "evidence": [
+            "后端质量门运行 pytest 和 Ruff"
+          ]
+        },
+        {
+          "claim": "前端质量门运行测试、ESLint 和生产构建",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明与来源 1 中的描述完全一致。",
+          "evidence": [
+            "前端质量门运行测试、ESLint 和生产构建"
+          ]
+        }
+      ]
+    },
+    "a014": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点中的所有步骤，且未包含禁止的断言。",
+      "evidence": [
+        "容器质量门构建两个镜像，启动 Compose，等待健康状态并通过前端入口检查 /api/health。"
+      ],
+      "claims": [
+        {
+          "claim": "容器质量门构建两个镜像",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出构建两个镜像。",
+          "evidence": [
+            "容器质量门构建两个镜像"
+          ]
+        },
+        {
+          "claim": "启动 Compose",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出启动 Compose。",
+          "evidence": [
+            "启动 Compose"
+          ]
+        },
+        {
+          "claim": "等待健康状态",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出等待健康状态。",
+          "evidence": [
+            "等待健康状态"
+          ]
+        },
+        {
+          "claim": "通过前端入口检查 /api/health",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出检查 /api/health。",
+          "evidence": [
+            "并通过前端入口检查 /api/health"
+          ]
+        }
+      ]
+    },
+    "a015": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确地反映了参考要点，并正确引用了来源。",
+      "evidence": [
+        "健康接口不得触发重量模型下载或初始化，它只返回服务、集合和模型配置状态。"
+      ],
+      "claims": [
+        {
+          "claim": "健康接口不得触发重量模型下载或初始化",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出健康接口不得触发重量模型下载或初始化。",
+          "evidence": [
+            "健康接口不得触发重量模型下载或初始化"
+          ]
+        },
+        {
+          "claim": "因为它只返回服务、集合和模型配置状态",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出健康接口只返回服务、集合和模型配置状态。",
+          "evidence": [
+            "它只返回服务、集合和模型配置状态。"
+          ]
+        }
+      ]
+    },
+    "a016": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点中的所有内容，且未包含禁止的断言。",
+      "evidence": [
+        "每个阶段使用短期 feature 分支和独立 PR，合入 main 且 CI 通过后才启动后续任务。"
+      ],
+      "claims": [
+        {
+          "claim": "阶段任务使用短期 feature 分支和独立 PR 合入 main",
+          "citation_indices": [
+            0
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明与参考要点及来源内容一致。",
+          "evidence": [
+            "每个阶段使用短期 feature 分支和独立 PR，合入 main"
+          ]
+        },
+        {
+          "claim": "需要在 CI 通过后才启动后续任务",
+          "citation_indices": [
+            0
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明与参考要点及来源内容一致。",
+          "evidence": [
+            "CI 通过后才启动后续任务"
+          ]
+        }
+      ]
+    },
+    "a017": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了所有参考要点，且未包含禁止断言的内容，符合要求。",
+      "evidence": [
+        "固定评测集必须记录数据版本、稳定问题 ID、问题文本和相关分块 ID，不得包含真实敏感数据。"
+      ],
+      "claims": [
+        {
+          "claim": "固定评测集需要记录数据版本、稳定问题 ID、问题文本和相关分块 ID。",
+          "citation_indices": [
+            0
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明完全符合参考要点。",
+          "evidence": [
+            "固定评测集必须记录数据版本、稳定问题 ID、问题文本和相关分块 ID"
+          ]
+        },
+        {
+          "claim": "固定评测集不得包含真实敏感数据。",
+          "citation_indices": [
+            0
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明符合来源要求，且未违反禁止断言。",
+          "evidence": [
+            "不得包含真实敏感数据"
+          ]
+        }
+      ]
+    },
+    "a018": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确涵盖了参考要点中列出的所有项目，且未包含禁止断言的内容。",
+      "evidence": [
+        "正式报告必须记录模型标识、代码提交、运行时间、检索参数和三项检索指标。"
+      ],
+      "claims": [
+        {
+          "claim": "正式报告必须记录模型标识、代码提交、运行时间、检索参数和三项检索指标。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明完全符合参考要点，并由来源 1 直接支持。",
+          "evidence": [
+            "正式报告必须记录模型标识、代码提交、运行时间、检索参数和三项检索指标。"
+          ]
+        }
+      ]
+    },
+    "a019": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确地传达了参考要点，明确指出测试替身分数不能作为正式结果，并说明了其仅用于快速集成测试的用途，且引用了正确的来源。",
+      "evidence": [
+        "确定性模型替身只用于快速集成测试，替身产生的分数不能作为正式检索质量结果。"
+      ],
+      "claims": [
+        {
+          "claim": "测试替身分数不能作为正式结果。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确指出替身产生的分数不能作为正式检索质量结果。",
+          "evidence": [
+            "替身产生的分数不能作为正式检索质量结果。"
+          ]
+        },
+        {
+          "claim": "确定性模型替身只用于快速集成测试。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源明确说明了确定性模型替身的用途。",
+          "evidence": [
+            "确定性模型替身只用于快速集成测试"
+          ]
+        }
+      ]
+    },
+    "a020": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确地引用了参考要点中关于指标下降超过0.02即视为回退的定义，且与来源内容完全一致。",
+      "evidence": [
+        "相对已接受基线的任一指标下降超过 0.02 即视为回退"
+      ],
+      "claims": [
+        {
+          "claim": "相对已接受基线的任一指标下降超过 0.02 即视为回退。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "该声明直接对应参考要点，且被来源1明确支持。",
+          "evidence": [
+            "相对已接受基线的任一指标下降超过 0.02 即视为回退"
+          ]
+        }
+      ]
+    },
+    "a024": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "The answer correctly identifies the conflict between the provided sources and accurately reports the information from each source without taking a side.",
+      "evidence": [
+        "来源 1 默认精排数量为三条。",
+        "来源 2 默认精排数量为五条。"
+      ],
+      "claims": [
+        {
+          "claim": "关于默认精排数量，资料存在冲突。",
+          "citation_indices": [
+            1,
+            2
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "The sources provide contradictory information regarding the default ranking quantity.",
+          "evidence": [
+            "来源 1 默认精排数量为三条。",
+            "来源 2 默认精排数量为五条。"
+          ]
+        },
+        {
+          "claim": "来源 1 说明默认精排数量为三条。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "This matches the content of Source 1.",
+          "evidence": [
+            "来源 1 默认精排数量为三条。"
+          ]
+        },
+        {
+          "claim": "来源 2 说明默认精排数量为五条。",
+          "citation_indices": [
+            2
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "This matches the content of Source 2.",
+          "evidence": [
+            "来源 2 默认精排数量为五条。"
+          ]
+        }
+      ]
+    },
+    "a025": {
+      "correctness": 1.0,
+      "completeness": 1.0,
+      "reason": "回答准确识别了来源之间的冲突，并分别引用了两个来源的观点，符合事实情况。",
+      "evidence": [
+        "资料关于演示数据是否会永久保存存在冲突。",
+        "[来源 1] 指出演示数据会永久保存，而 [来源 2] 则指出演示数据会在实例重建后清空。"
+      ],
+      "claims": [
+        {
+          "claim": "资料关于演示数据是否会永久保存存在冲突。",
+          "citation_indices": [
+            1,
+            2
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源1和来源2的陈述直接矛盾，确认存在冲突。",
+          "evidence": [
+            "演示数据会永久保存。",
+            "演示数据会在实例重建后清空。"
+          ]
+        },
+        {
+          "claim": "来源 1 指出演示数据会永久保存。",
+          "citation_indices": [
+            1
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源1明确陈述了该观点。",
+          "evidence": [
+            "演示数据会永久保存。"
+          ]
+        },
+        {
+          "claim": "来源 2 指出演示数据会在实例重建后清空。",
+          "citation_indices": [
+            2
+          ],
+          "supported": true,
+          "contradicted": false,
+          "attribution_correct": true,
+          "reason": "来源2明确陈述了该观点。",
+          "evidence": [
+            "演示数据会在实例重建后清空。"
+          ]
+        }
+      ]
+    }
+  },
+  "metrics": {
+    "answer_correctness": {
+      "value": 1.0,
+      "threshold": 0.8,
+      "direction": "minimum",
+      "baseline": null,
+      "passed": true,
+      "regressed": false
+    },
+    "completeness": {
+      "value": 1.0,
+      "threshold": 0.8,
+      "direction": "minimum",
+      "baseline": null,
+      "passed": true,
+      "regressed": false
+    },
+    "faithfulness": {
+      "value": 1.0,
+      "threshold": 0.9,
+      "direction": "minimum",
+      "baseline": null,
+      "passed": true,
+      "regressed": false
+    },
+    "citation_validity": {
+      "value": 1.0,
+      "threshold": 1.0,
+      "direction": "minimum",
+      "baseline": null,
+      "passed": true,
+      "regressed": false
+    },
+    "citation_support": {
+      "value": 1.0,
+      "threshold": 0.95,
+      "direction": "minimum",
+      "baseline": null,
+      "passed": true,
+      "regressed": false
+    },
+    "claim_citation_coverage": {
+      "value": 1.0,
+      "threshold": 0.9,
+      "direction": "minimum",
+      "baseline": null,
+      "passed": true,
+      "regressed": false
+    },
+    "unsupported_claim_rate": {
+      "value": 0.0,
+      "threshold": 0.05,
+      "direction": "maximum",
+      "baseline": null,
+      "passed": true,
+      "regressed": false
+    },
+    "contradiction_rate": {
+      "value": 0.0,
+      "threshold": 0.0,
+      "direction": "maximum",
+      "baseline": null,
+      "passed": true,
+      "regressed": false
+    },
+    "refusal_accuracy": {
+      "value": 1.0,
+      "threshold": 0.9,
+      "direction": "minimum",
+      "baseline": null,
+      "passed": true,
+      "regressed": false
+    },
+    "failure_strategy_stability": {
+      "value": 1.0,
+      "threshold": 1.0,
+      "direction": "minimum",
+      "baseline": null,
+      "passed": true,
+      "regressed": false
+    }
+  },
+  "passed": true
+}

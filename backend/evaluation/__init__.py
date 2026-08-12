@@ -5,9 +5,11 @@ from .answer_quality import (
     AnswerEvaluationReport,
     AnswerEvaluationRun,
     AnswerMetric,
+    HumanReviewRecord,
     evaluate_answers,
     load_answer_dataset,
     load_answer_run,
+    promote_official_report,
 )
 from .dataset import EvaluationDataset, EvaluationQuery, load_dataset
 from .metrics import RetrievalMetrics, evaluate_rankings, recall_at_k, reciprocal_rank
@@ -18,6 +20,7 @@ __all__ = [
     "AnswerEvaluationReport",
     "AnswerEvaluationRun",
     "AnswerMetric",
+    "HumanReviewRecord",
     "EvaluationDataset",
     "EvaluationMetric",
     "EvaluationQuery",
@@ -29,6 +32,7 @@ __all__ = [
     "load_dataset",
     "load_answer_dataset",
     "load_answer_run",
+    "promote_official_report",
     "recall_at_k",
     "reciprocal_rank",
 ]
