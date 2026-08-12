@@ -19,6 +19,8 @@ from .knowledge_bases import (
 )
 from .models import get_embedding_model, get_generator, get_reranker
 from .schemas import (
+    AnswerEvaluationReportResponse,
+    AnswerEvaluationReportSummary,
     AnswerRecordResponse,
     ConversationDetailResponse,
     ConversationSummaryResponse,
@@ -239,6 +241,25 @@ def create_app() -> FastAPI:
         reports: EvaluationReportsDependency,
     ) -> EvaluationReportResponse:
         return await run_in_threadpool(reports.get_official, report_id)
+
+    @app.get(
+        "/api/evaluations/answers/reports",
+        response_model=list[AnswerEvaluationReportSummary],
+    )
+    async def list_answer_evaluations(
+        reports: EvaluationReportsDependency,
+    ) -> list[AnswerEvaluationReportSummary]:
+        return await run_in_threadpool(reports.list_official_answers)
+
+    @app.get(
+        "/api/evaluations/answers/reports/{report_id}",
+        response_model=AnswerEvaluationReportResponse,
+    )
+    async def get_answer_evaluation(
+        report_id: str,
+        reports: EvaluationReportsDependency,
+    ) -> AnswerEvaluationReportResponse:
+        return await run_in_threadpool(reports.get_official_answer, report_id)
 
     @app.delete("/api/documents/{document_id}", status_code=204)
     async def delete_document(
