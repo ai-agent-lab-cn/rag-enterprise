@@ -106,3 +106,26 @@ def test_invalid_evaluation_report_returns_stable_error(client, tmp_path) -> Non
             "details": {"filename": "broken.json"},
         }
     }
+
+
+def test_answer_evaluation_api_only_exposes_official_report(client, tmp_path) -> None:
+    answers = tmp_path / "answers"
+    answers.mkdir()
+    source = Path("backend/evaluation/reports/answers/answer_v1_baseline.json")
+    official = json.loads(source.read_text(encoding="utf-8"))
+    (answers / "official.json").write_text(json.dumps(official), encoding="utf-8")
+    hidden = {**official, "report_id": "answer-hidden", "official": False}
+    (answers / "hidden.json").write_text(json.dumps(hidden), encoding="utf-8")
+    _use_reports(client, tmp_path)
+
+    listed = client.get("/api/evaluations/answers/reports")
+    detail = client.get(f"/api/evaluations/answers/reports/{official['report_id']}")
+    missing = client.get("/api/evaluations/answers/reports/answer-hidden")
+
+    assert listed.status_code == 200
+    assert [item["report_id"] for item in listed.json()] == [official["report_id"]]
+    assert detail.status_code == 200
+    assert detail.json()["case_count"] == 30
+    assert detail.json()["metrics"]["answer_correctness"]["value"] == 1.0
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "ANSWER_EVALUATION_REPORT_NOT_FOUND"

@@ -159,6 +159,28 @@ class EvaluationReportResponse(EvaluationReportSummary):
     rerank_mrr: EvaluationMetricResponse
 
 
+class AnswerEvaluationMetricResponse(EvaluationMetricResponse):
+    direction: str
+
+
+class AnswerEvaluationReportSummary(BaseModel):
+    report_id: str
+    dataset_id: str
+    dataset_version: str
+    commit: str
+    run_at: datetime
+    prompt_version: str
+    models: dict[str, str]
+    passed: bool
+
+
+class AnswerEvaluationReportResponse(AnswerEvaluationReportSummary):
+    prompt_hash: str
+    parameters: dict[str, int | float | str | bool]
+    case_count: int
+    metrics: dict[str, AnswerEvaluationMetricResponse | None]
+
+
 class ErrorBody(BaseModel):
     code: str
     message: str

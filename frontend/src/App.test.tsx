@@ -3,140 +3,96 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
 
-const documents = [{ document_id: "doc_1", filename: "profile.md", chunk_count: 3, status: "ready" }];
+const base = { knowledge_base_id: "kb_default", name: "默认知识库", description: "V2 迁移资料", created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-12T00:00:00Z", is_default: true, document_count: 1, chunk_count: 3 };
+const document = { knowledge_base_id: "kb_default", document_id: "doc_1", filename: "profile.md", chunk_count: 3, status: "ready" };
+const answerSummary = { report_id: "answer-official", dataset_id: "answers", dataset_version: "1.0.0", commit: "daca18509ca8f447aa00395ca88a58543ffb2cd4", run_at: "2026-08-12T08:52:33Z", models: { generation: "gemini-test", judge: "judge-test" }, prompt_version: "v3-grounded-answer-1", passed: true };
 
-beforeEach(() => {
-  window.scrollTo = vi.fn();
+beforeEach(() => { window.scrollTo = vi.fn(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); window.history.replaceState({}, "", "/"); });
+
+function json(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } }); }
+function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const url = String(input);
+  if (url === "/api/knowledge-bases" && init?.method === "POST") return Promise.resolve(json({ ...base, knowledge_base_id: "kb_created", name: "产品资料", is_default: false, document_count: 0, chunk_count: 0 }));
+  if (url === "/api/knowledge-bases/kb_default/documents/doc_1" && init?.method === "DELETE") return Promise.resolve(new Response(null, { status: 204 }));
+  if (url === "/api/knowledge-bases") return Promise.resolve(json([base]));
+  if (url === "/api/knowledge-bases/kb_default") return Promise.resolve(json(base));
+  if (url === "/api/knowledge-bases/kb_default/documents") return Promise.resolve(json([document]));
+  if (url === "/api/knowledge-bases/kb_default/conversations") return Promise.resolve(json([]));
+  if (url === "/api/evaluations/answers/reports") return Promise.resolve(json([answerSummary]));
+  if (url === "/api/knowledge-bases/kb_default/query" && init?.method === "POST") return Promise.resolve(json({ answer: "系统使用可追溯检索。[来源 1]", answer_status: "answered", error_code: null, error_message: null, model: "gemini-test", latency_ms: { retrieval: 10, rerank: 5, generation: 20, total: 35 }, conversation_id: "conv_1234567890abcdef", record_id: "ans_1", models: {}, model_metadata: {}, prompt_version: "v3", prompt_hash: "abc", sources: [{ knowledge_base_id: "kb_default", chunk_id: "chunk_1", document_id: "doc_1", filename: "profile.md", page: null, paragraph: 0, chunk_index: 0, char_count: 12, summary: "系统资料", text: "系统资料全文", retrieval_score: .82, rerank_score: 1.31 }] }));
+  return Promise.resolve(json({ error: { message: "未找到" } }, 404));
+}
+
+test("默认进入概览并汇总知识库、资料、会话和回答质量", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  render(<App/>);
+  expect(await screen.findByRole("heading", { name: "项目概览" })).toBeInTheDocument();
+  expect(screen.getByText("默认知识库")).toBeInTheDocument();
+  expect(screen.getByText("全部指标通过")).toBeInTheDocument();
 });
 
-afterEach(() => {
-  cleanup();
-  vi.restoreAllMocks();
-  window.history.replaceState({}, "", "/");
-});
-
-test("loads documents and renders query sources", async () => {
-  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-    const url = String(input);
-    if (url === "/api/documents") return new Response(JSON.stringify(documents), { status: 200 });
-    if (url === "/api/query" && init?.method === "POST") {
-      return new Response(JSON.stringify({
-        answer: "系统使用可解释的检索流程。[来源 1]",
-        answer_status: "answered",
-        error_code: null,
-        error_message: null,
-        model: "gemini-test",
-        latency_ms: { retrieval: 10, rerank: 5, generation: 20, total: 35 },
-        sources: [{
-          chunk_id: "chunk_1", document_id: "doc_1", filename: "profile.md", page: null,
-          paragraph: 0, chunk_index: 0, char_count: 12, summary: "系统资料", text: "系统资料全文",
-          retrieval_score: 0.82, rerank_score: 1.31,
-        }],
-      }), { status: 200 });
-    }
-    return new Response(null, { status: 404 });
-  });
-
-  render(<App />);
+test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases"); render(<App/>);
+  await userEvent.click(await screen.findByRole("button", { name: /进入知识库/ }));
   expect(await screen.findByText("profile.md")).toBeInTheDocument();
-  await userEvent.type(screen.getByLabelText("向知识库提问"), "系统如何工作？");
-  await userEvent.click(screen.getByRole("button", { name: /提问/ }));
-  expect(await screen.findByText("系统使用可解释的检索流程。")).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "[来源 1]" })).toHaveAttribute("href", "#source-1");
-  expect(screen.getByText("召回 0.820")).toBeInTheDocument();
-  expect(screen.getByText("召回")).toBeInTheDocument();
-  expect(screen.getByText("精排")).toBeInTheDocument();
-  expect(screen.getByText("生成")).toBeInTheDocument();
-  expect(screen.getAllByText("总耗时")).toHaveLength(2);
-  expect(screen.getByText("模型")).toBeInTheDocument();
-  expect(screen.getByText("第 1 段 · 片段 0")).toBeInTheDocument();
-  expect(screen.getByText("查看技术细节")).toBeInTheDocument();
-  expect(fetchMock).toHaveBeenCalledWith("/api/query", expect.objectContaining({ method: "POST" }));
+  expect(window.location.pathname).toBe("/knowledge-bases/kb_default");
 });
 
-test("renders the localized interface without legacy English labels", async () => {
-  vi.spyOn(globalThis, "fetch").mockResolvedValue(
-    new Response(JSON.stringify([]), { status: 200 }),
-  );
-  render(<App />);
-  expect(await screen.findByText("资料库")).toBeInTheDocument();
-  expect(screen.getByText("单知识库问答工作台")).toBeInTheDocument();
-  expect(screen.getByRole("navigation", { name: "主导航" })).toBeInTheDocument();
-  expect(screen.queryByText("STUDIO")).not.toBeInTheDocument();
-  expect(screen.queryByText("KNOWLEDGE BASE")).not.toBeInTheDocument();
-  expect(screen.queryByText("RETRIEVE · RERANK · RESPOND")).not.toBeInTheDocument();
+test("通过弹框创建知识库并支持取消", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases"); render(<App/>);
+  await userEvent.click(await screen.findByRole("button", { name: "＋ 新建知识库" }));
+  expect(screen.getByRole("dialog", { name: "新建知识库" })).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("知识库名称"), "产品资料");
+  await userEvent.click(screen.getByRole("button", { name: "确认创建" }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases", expect.objectContaining({ method: "POST" })));
 });
 
-test("navigates to retrieval evaluation and renders the frozen quality gate", async () => {
-  const summary = {
-    report_id: "retrieval-official",
-    dataset_id: "rag-enterprise-retrieval",
-    dataset_version: "1.0.0",
-    commit: "88c5e1e825f1678c74c193591621a26ae05c84ab",
-    run_at: "2026-08-08T15:39:41Z",
-    models: { embedding: "embedding@revision", reranker: "reranker@revision" },
-    passed: true,
-  };
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-    const url = String(input);
-    if (url === "/api/documents") return new Response(JSON.stringify([]), { status: 200 });
-    if (url === "/api/evaluations") return new Response(JSON.stringify([summary]), { status: 200 });
-    if (url === "/api/evaluations/retrieval-official") {
-      return new Response(JSON.stringify({
-        ...summary,
-        parameters: { retrieve_k: 10, rerank_k: 5 },
-        query_count: 20,
-        recall_at_5: { value: 1, threshold: .8, baseline: 1, passed: true, regressed: false },
-        vector_mrr: { value: .9083, threshold: .6, baseline: .9083, passed: true, regressed: false },
-        rerank_mrr: { value: .975, threshold: .7, baseline: .9667, passed: true, regressed: false },
-      }), { status: 200 });
-    }
-    return new Response(null, { status: 404 });
-  });
-
-  render(<App />);
-  await userEvent.click(screen.getByRole("button", { name: "检索评测" }));
-
-  expect(await screen.findByText("质量门已通过")).toBeInTheDocument();
-  expect(screen.getByText("Recall@5")).toBeInTheDocument();
-  expect(screen.getByText("最终排序 MRR")).toBeInTheDocument();
-  expect(screen.getAllByText("通过")).toHaveLength(3);
-  expect(screen.getByText(/页面只读取已生成的正式报告/)).toBeInTheDocument();
-  expect(window.location.pathname).toBe("/evaluation/retrieval");
-  expect(screen.queryByText("系统状态")).not.toBeInTheDocument();
-});
-
-test("shows the evaluation empty state", async () => {
-  window.history.replaceState({}, "", "/evaluation/retrieval");
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-    const url = String(input);
-    if (url === "/api/evaluations") return new Response(JSON.stringify([]), { status: 200 });
-    return new Response(JSON.stringify([]), { status: 200 });
-  });
-
-  render(<App />);
-
-  expect(await screen.findByText("还没有正式评测报告")).toBeInTheDocument();
-  expect(screen.getByText(/页面不会启动重量评测任务/)).toBeInTheDocument();
-});
-
-test("shows API errors", async () => {
-  vi.spyOn(globalThis, "fetch").mockResolvedValue(
-    new Response(JSON.stringify({ error: { message: "后端不可用" } }), { status: 503 }),
-  );
-  render(<App />);
-  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("后端不可用"));
-});
-
-test("requires confirmation before deleting a document", async () => {
-  const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(false);
-  const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-    new Response(JSON.stringify(documents), { status: 200 }),
-  );
-  render(<App />);
-
+test("删除资料使用站内确认弹框", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default"); render(<App/>);
   await userEvent.click(await screen.findByRole("button", { name: "删除 profile.md" }));
+  expect(screen.getByRole("dialog", { name: "删除资料" })).toHaveTextContent("profile.md");
+  await userEvent.click(screen.getByRole("button", { name: "确认删除" }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/documents/doc_1", { method: "DELETE" }));
+});
 
-  expect(confirmMock).toHaveBeenCalledWith("确认删除“profile.md”及其索引吗？");
-  expect(fetchMock).not.toHaveBeenCalledWith("/api/documents/doc_1", expect.anything());
+test("问答工作台使用所选知识库接口并渲染来源", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/chat?knowledge_base_id=kb_default"); render(<App/>);
+  await userEvent.type(await screen.findByLabelText("向知识库提问"), "系统如何工作？");
+  await userEvent.click(screen.getByRole("button", { name: /提问/ }));
+  expect(await screen.findByText("系统使用可追溯检索。")).toBeInTheDocument();
+  expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/query", expect.objectContaining({ method: "POST" }));
+});
+
+test("回答评测页只读展示正式指标", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    if (String(input) === "/api/evaluations/answers/reports") return Promise.resolve(json([answerSummary]));
+    if (String(input) === "/api/evaluations/answers/reports/answer-official") return Promise.resolve(json({ ...answerSummary, prompt_hash: "a".repeat(64), parameters: { temperature: 0 }, case_count: 30, metrics: { answer_correctness: { value: 1, threshold: .8, baseline: null, passed: true, regressed: false, direction: "minimum" }, unsupported_claim_rate: { value: 0, threshold: .05, baseline: null, passed: true, regressed: false, direction: "maximum" } } }));
+    return Promise.resolve(json({}, 404));
+  });
+  window.history.replaceState({}, "", "/evaluation/answers"); render(<App/>);
+  expect(await screen.findByText("回答质量门已通过")).toBeInTheDocument();
+  expect(screen.getByText("回答正确性")).toBeInTheDocument();
+  expect(screen.getByText("无支持声明率")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "回答质量" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "证据质量" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "幻觉风险" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "失败控制" })).toBeInTheDocument();
+  expect(screen.getByText(/页面不会启动模型评测/)).toBeInTheDocument();
+});
+
+test("保留检索评测页且可直接访问", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input) => String(input) === "/api/evaluations" ? Promise.resolve(json([])) : Promise.resolve(json({}, 404)));
+  window.history.replaceState({}, "", "/evaluation/retrieval"); render(<App/>);
+  expect(await screen.findByText("还没有正式评测报告")).toBeInTheDocument();
+});
+
+test("页面显示稳定 API 错误", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(json({ error: { message: "后端不可用" } }, 503)));
+  render(<App/>);
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("后端不可用"));
 });

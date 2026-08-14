@@ -5,6 +5,7 @@ import { TechnicalDrawer } from "./TechnicalDrawer";
 interface AnswerPanelProps {
   result: QueryResult | null;
   loading: boolean;
+  showSources?: boolean;
 }
 
 const METRICS = [
@@ -35,7 +36,7 @@ function answerWithSourceLinks(answer: string, sourceCount: number) {
   });
 }
 
-export function AnswerPanel({ result, loading }: AnswerPanelProps) {
+export function AnswerPanel({ result, loading, showSources = true }: AnswerPanelProps) {
   if (loading) {
     return <div className="answer-placeholder pulse">正在检索、精排并组织答案…</div>;
   }
@@ -67,7 +68,7 @@ export function AnswerPanel({ result, loading }: AnswerPanelProps) {
         })}
         <div><span>模型</span><strong title={result.model}>{result.model}</strong></div>
       </div>
-      <div className="sources-heading">
+      {showSources ? <><div className="sources-heading">
         <h3>引用证据</h3>
         <span>{result.sources.length} 条</span>
       </div>
@@ -76,6 +77,7 @@ export function AnswerPanel({ result, loading }: AnswerPanelProps) {
           <SourceCard key={source.chunk_id} source={source} index={index} />
         ))}
       </div>
+      </> : null}
       <TechnicalDrawer result={result} />
     </section>
   );

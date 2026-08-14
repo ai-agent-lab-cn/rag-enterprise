@@ -3,6 +3,11 @@ import type {
   DocumentInfo,
   EvaluationReport,
   EvaluationReportSummary,
+  AnswerEvaluationReport,
+  AnswerEvaluationSummary,
+  ConversationDetail,
+  ConversationSummary,
+  KnowledgeBase,
   QueryResult,
 } from "./types";
 
@@ -33,4 +38,42 @@ export const api = {
   listEvaluations: () => request<EvaluationReportSummary[]>("/api/evaluations"),
   getEvaluation: (reportId: string) =>
     request<EvaluationReport>(`/api/evaluations/${encodeURIComponent(reportId)}`),
+  listKnowledgeBases: () => request<KnowledgeBase[]>("/api/knowledge-bases"),
+  getKnowledgeBase: (id: string) => request<KnowledgeBase>(`/api/knowledge-bases/${id}`),
+  createKnowledgeBase: (name: string, description: string) =>
+    request<KnowledgeBase>("/api/knowledge-bases", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, description }),
+    }),
+  updateKnowledgeBase: (id: string, name: string, description: string) =>
+    request<KnowledgeBase>(`/api/knowledge-bases/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, description }),
+    }),
+  deleteKnowledgeBase: (id: string) => request<void>(`/api/knowledge-bases/${id}`, { method: "DELETE" }),
+  listKnowledgeBaseDocuments: (id: string) => request<DocumentInfo[]>(`/api/knowledge-bases/${id}/documents`),
+  uploadKnowledgeBaseDocument: (id: string, file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    return request<DocumentInfo>(`/api/knowledge-bases/${id}/documents`, { method: "POST", body });
+  },
+  deleteKnowledgeBaseDocument: (knowledgeBaseId: string, documentId: string) =>
+    request<void>(`/api/knowledge-bases/${knowledgeBaseId}/documents/${documentId}`, { method: "DELETE" }),
+  queryKnowledgeBase: (id: string, question: string, conversationId?: string) =>
+    request<QueryResult>(`/api/knowledge-bases/${id}/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, retrieve_k: 10, rerank_k: 5, conversation_id: conversationId || null }),
+    }),
+  listConversations: (id: string) =>
+    request<ConversationSummary[]>(`/api/knowledge-bases/${id}/conversations`),
+  getConversation: (knowledgeBaseId: string, conversationId: string) =>
+    request<ConversationDetail>(`/api/knowledge-bases/${knowledgeBaseId}/conversations/${conversationId}`),
+  deleteConversation: (knowledgeBaseId: string, conversationId: string) =>
+    request<void>(`/api/knowledge-bases/${knowledgeBaseId}/conversations/${conversationId}`, { method: "DELETE" }),
+  listAnswerEvaluations: () => request<AnswerEvaluationSummary[]>("/api/evaluations/answers/reports"),
+  getAnswerEvaluation: (reportId: string) =>
+    request<AnswerEvaluationReport>(`/api/evaluations/answers/reports/${encodeURIComponent(reportId)}`),
 };

@@ -11,22 +11,42 @@ from .errors import AppError
 class EmbeddingModel:
     def __init__(self, model_name: str):
         self.model_name = model_name
-        self._model = SentenceTransformer(model_name)
+        # 只读接口不应因为加载重量模型而失败。首次真正检索时再初始化，
+        # 并关闭 transformers 的 meta tensor 低内存路径，兼容本地 CPU 环境。
+        self._model: SentenceTransformer | None = None
+
+    def _get_model(self) -> SentenceTransformer:
+        if self._model is None:
+            self._model = SentenceTransformer(
+                self.model_name,
+                device="cpu",
+                model_kwargs={"low_cpu_mem_usage": False},
+            )
+        return self._model
 
     def encode(self, texts: list[str]) -> list[list[float]]:
-        vectors = self._model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+        vectors = self._get_model().encode(texts, normalize_embeddings=True, show_progress_bar=False)
         return vectors.tolist()
 
 
 class Reranker:
     def __init__(self, model_name: str):
         self.model_name = model_name
-        self._model = CrossEncoder(model_name)
+        self._model: CrossEncoder | None = None
+
+    def _get_model(self) -> CrossEncoder:
+        if self._model is None:
+            self._model = CrossEncoder(
+                self.model_name,
+                device="cpu",
+                model_kwargs={"low_cpu_mem_usage": False},
+            )
+        return self._model
 
     def score(self, question: str, chunks: list[str]) -> list[float]:
         if not chunks:
             return []
-        scores = self._model.predict([(question, chunk) for chunk in chunks])
+        scores = self._get_model().predict([(question, chunk) for chunk in chunks])
         return [float(score) for score in scores]
 
 

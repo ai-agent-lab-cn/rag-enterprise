@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import type { DocumentInfo } from "../types";
+import { Modal } from "./Modal";
 
 interface DocumentPanelProps {
   documents: DocumentInfo[];
@@ -11,6 +12,8 @@ interface DocumentPanelProps {
 export function DocumentPanel({ documents, loading, onUpload, onDelete }: DocumentPanelProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<DocumentInfo | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const acceptFile = async (file?: File) => {
     if (file) await onUpload(file);
@@ -68,11 +71,7 @@ export function DocumentPanel({ documents, loading, onUpload, onDelete }: Docume
                 className="icon-button"
                 type="button"
                 aria-label={`删除 ${document.filename}`}
-                onClick={() => {
-                  if (window.confirm(`确认删除“${document.filename}”及其索引吗？`)) {
-                    void onDelete(document.document_id);
-                  }
-                }}
+                onClick={() => setPendingDelete(document)}
               >
                 ×
               </button>
@@ -80,6 +79,7 @@ export function DocumentPanel({ documents, loading, onUpload, onDelete }: Docume
           ))
         )}
       </div>
+      {pendingDelete ? <Modal title="删除资料" description="此操作会同时删除原始文件和对应向量索引。" onClose={() => { if (!deleting) setPendingDelete(null); }}><div className="confirm-copy">确认删除 <strong>{pendingDelete.filename}</strong> 吗？删除后无法在当前知识库中检索该资料。</div><footer className="modal-actions"><button className="secondary-action" type="button" onClick={() => setPendingDelete(null)} disabled={deleting}>取消</button><button className="danger-action" autoFocus type="button" disabled={deleting} onClick={async () => { setDeleting(true); try { await onDelete(pendingDelete.document_id); setPendingDelete(null); } finally { setDeleting(false); } }}>{deleting ? "删除中…" : "确认删除"}</button></footer></Modal> : null}
     </aside>
   );
 }

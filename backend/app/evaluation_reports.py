@@ -4,10 +4,16 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from backend.evaluation.answer_quality import AnswerEvaluationReport
 from backend.evaluation.report import RetrievalEvaluationReport
 
 from .errors import AppError
-from .schemas import EvaluationReportResponse, EvaluationReportSummary
+from .schemas import (
+    AnswerEvaluationReportResponse,
+    AnswerEvaluationReportSummary,
+    EvaluationReportResponse,
+    EvaluationReportSummary,
+)
 
 
 class EvaluationReportRepository:
@@ -29,6 +35,26 @@ class EvaluationReportRepository:
                 return self._detail(report)
         raise AppError("EVALUATION_REPORT_NOT_FOUND", "未找到该正式评测报告。", 404)
 
+    def list_official_answers(self) -> list[AnswerEvaluationReportSummary]:
+        """回答报告独立存放，只公开经过人工复核后标记 official 的正式报告。"""
+        reports = [
+            self._load_answer(path)
+            for path in sorted((self.reports_path / "answers").glob("*.json"))
+            if "human_review" not in path.name
+        ]
+        official = [report for report in reports if report.official]
+        newest_first = sorted(official, key=lambda item: item.run_at, reverse=True)
+        return [self._answer_summary(report) for report in newest_first]
+
+    def get_official_answer(self, report_id: str) -> AnswerEvaluationReportResponse:
+        for path in sorted((self.reports_path / "answers").glob("*.json")):
+            if "human_review" in path.name:
+                continue
+            report = self._load_answer(path)
+            if report.official and report.report_id == report_id:
+                return self._answer_detail(report)
+        raise AppError("ANSWER_EVALUATION_REPORT_NOT_FOUND", "未找到该正式回答评测报告。", 404)
+
     @staticmethod
     def _load(path: Path) -> RetrievalEvaluationReport:
         try:
@@ -38,6 +64,18 @@ class EvaluationReportRepository:
             raise AppError(
                 "EVALUATION_REPORT_INVALID",
                 "评测报告格式无效。",
+                500,
+                {"filename": path.name},
+            ) from exc
+
+    @staticmethod
+    def _load_answer(path: Path) -> AnswerEvaluationReport:
+        try:
+            return AnswerEvaluationReport.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValidationError) as exc:
+            raise AppError(
+                "ANSWER_EVALUATION_REPORT_INVALID",
+                "回答评测报告格式无效。",
                 500,
                 {"filename": path.name},
             ) from exc
@@ -63,4 +101,27 @@ class EvaluationReportRepository:
             recall_at_5=report.recall_at_5.model_dump(),
             vector_mrr=report.vector_mrr.model_dump(),
             rerank_mrr=report.rerank_mrr.model_dump(),
+        )
+
+    @staticmethod
+    def _answer_summary(report: AnswerEvaluationReport) -> AnswerEvaluationReportSummary:
+        return AnswerEvaluationReportSummary(
+            report_id=report.report_id,
+            dataset_id=report.dataset_id,
+            dataset_version=report.dataset_version,
+            commit=report.commit,
+            run_at=report.run_at,
+            prompt_version=report.prompt_version,
+            models=report.models,
+            passed=report.passed,
+        )
+
+    @classmethod
+    def _answer_detail(cls, report: AnswerEvaluationReport) -> AnswerEvaluationReportResponse:
+        return AnswerEvaluationReportResponse(
+            **cls._answer_summary(report).model_dump(),
+            prompt_hash=report.prompt_hash,
+            parameters=report.parameters,
+            case_count=report.case_count,
+            metrics={key: value.model_dump() if value else None for key, value in report.metrics},
         )
