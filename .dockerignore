@@ -11,6 +11,6 @@ assets
 data
 evaluations
 frontend
-knowledge
+knowledge/*
+!knowledge/project-profile.md
 README.md
-

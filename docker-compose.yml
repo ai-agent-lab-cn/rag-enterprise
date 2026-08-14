@@ -5,6 +5,14 @@ services:
       dockerfile: backend/Dockerfile
     environment:
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-shibing624/text2vec-base-chinese}"
+      RERANKER_MODEL: "${RERANKER_MODEL:-cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}"
+      DEMO_SEED_PATH: "${DEMO_SEED_PATH:-}"
+      OMP_NUM_THREADS: "${OMP_NUM_THREADS:-}"
+      MKL_NUM_THREADS: "${MKL_NUM_THREADS:-}"
+      OPENBLAS_NUM_THREADS: "${OPENBLAS_NUM_THREADS:-}"
+      TOKENIZERS_PARALLELISM: "${TOKENIZERS_PARALLELISM:-}"
+      MALLOC_ARENA_MAX: "${MALLOC_ARENA_MAX:-}"
     expose:
       - "8000"
     volumes:

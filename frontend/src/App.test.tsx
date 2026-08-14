@@ -8,7 +8,7 @@ const document = { knowledge_base_id: "kb_default", document_id: "doc_1", filena
 const answerSummary = { report_id: "answer-official", dataset_id: "answers", dataset_version: "1.0.0", commit: "daca18509ca8f447aa00395ca88a58543ffb2cd4", run_at: "2026-08-12T08:52:33Z", models: { generation: "gemini-test", judge: "judge-test" }, prompt_version: "v3-grounded-answer-1", passed: true };
 
 beforeEach(() => { window.scrollTo = vi.fn(); });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); window.history.replaceState({}, "", "/"); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllEnvs(); window.history.replaceState({}, "", "/"); });
 
 function json(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } }); }
 function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -30,6 +30,16 @@ test("默认进入概览并汇总知识库、资料、会话和回答质量", as
   expect(await screen.findByRole("heading", { name: "项目概览" })).toBeInTheDocument();
   expect(screen.getByText("默认知识库")).toBeInTheDocument();
   expect(screen.getByText("全部指标通过")).toBeInTheDocument();
+});
+
+test("Demo 构建明确提示数据可能重置", async () => {
+  vi.stubEnv("VITE_DEPLOYMENT_MODE", "demo");
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+
+  render(<App/>);
+
+  expect(await screen.findByText("演示环境 · 数据可能重置")).toBeInTheDocument();
+  expect(screen.getByText("Demo · 数据会重置")).toBeInTheDocument();
 });
 
 test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {

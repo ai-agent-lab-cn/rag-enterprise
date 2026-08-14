@@ -8,6 +8,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
+from .demo import seed_demo_document
 from .errors import AppError, install_error_handlers
 from .evaluation_reports import EvaluationReportRepository
 from .history import ConversationRepository
@@ -90,6 +91,8 @@ def create_app() -> FastAPI:
         KnowledgeBaseScope(DEFAULT_KNOWLEDGE_BASE_ID, settings.upload_path).migrate_legacy_uploads()
         get_knowledge_bases()
         get_conversations()
+        if settings.demo_seed_path is not None:
+            await run_in_threadpool(seed_demo_document, settings.demo_seed_path, get_service())
         yield
 
     app = FastAPI(
