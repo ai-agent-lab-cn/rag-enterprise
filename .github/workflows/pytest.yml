@@ -75,10 +75,19 @@ jobs:
         run: docker compose build
 
       - name: 启动并等待容器健康
-        run: docker compose up --detach --wait --wait-timeout 120
+        env:
+          EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
+          RERANKER_MODEL: demo/lexical-overlap-v1
+          DEMO_SEED_PATH: /app/knowledge/project-profile.md
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          TOKENIZERS_PARALLELISM: "false"
+          MALLOC_ARENA_MAX: "2"
+        run: docker compose up --detach --wait --wait-timeout 600
 
-      - name: 验证反向代理健康接口
-        run: curl --fail --silent --show-error http://127.0.0.1:5173/api/health
+      - name: 验证健康、演示资料与基础问答
+        run: python scripts/smoke_demo.py http://127.0.0.1:5173 --allow-retrieval-only
 
       - name: 输出失败诊断信息
         if: failure()

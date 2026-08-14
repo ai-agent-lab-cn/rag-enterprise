@@ -1,3 +1,4 @@
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -6,8 +7,10 @@ from sentence_transformers import CrossEncoder, SentenceTransformer
 from .config import get_settings
 from .errors import AppError
 
-
 # Embedding、CrossEncoder、Gemini 封装
+DEMO_LEXICAL_RERANKER = "demo/lexical-overlap-v1"
+
+
 class EmbeddingModel:
     def __init__(self, model_name: str):
         self.model_name = model_name
@@ -46,8 +49,20 @@ class Reranker:
     def score(self, question: str, chunks: list[str]) -> list[float]:
         if not chunks:
             return []
+        if self.model_name == DEMO_LEXICAL_RERANKER:
+            question_tokens = _lexical_tokens(question)
+            if not question_tokens:
+                return [0.0 for _ in chunks]
+            return [
+                len(question_tokens & _lexical_tokens(chunk)) / len(question_tokens)
+                for chunk in chunks
+            ]
         scores = self._get_model().predict([(question, chunk) for chunk in chunks])
         return [float(score) for score in scores]
+
+
+def _lexical_tokens(text: str) -> set[str]:
+    return set(re.findall(r"[\u4e00-\u9fff]|[a-z0-9]+", text.lower()))
 
 
 class GeminiGenerator:

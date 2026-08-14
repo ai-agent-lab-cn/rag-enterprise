@@ -1,0 +1,61 @@
+services:
+  - type: web
+    name: rag-enterprise-cn-api
+    runtime: docker
+    plan: free
+    region: singapore
+    branch: main
+    autoDeployTrigger: checksPass
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: FRONTEND_ORIGIN
+        value: https://rag-enterprise-cn-web.onrender.com
+      - key: EMBEDDING_MODEL
+        value: BAAI/bge-small-zh-v1.5
+      - key: RERANKER_MODEL
+        value: demo/lexical-overlap-v1
+      - key: DEMO_SEED_PATH
+        value: /app/knowledge/project-profile.md
+      - key: CHROMA_PATH
+        value: /app/data/chroma
+      - key: UPLOAD_PATH
+        value: /app/data/uploads
+      - key: KNOWLEDGE_BASES_PATH
+        value: /app/data/knowledge_bases/registry.json
+      - key: CONVERSATIONS_PATH
+        value: /app/data/conversations/records.json
+      - key: HF_HOME
+        value: /app/data/huggingface
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
+      - key: TOKENIZERS_PARALLELISM
+        value: "false"
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+
+  - type: web
+    name: rag-enterprise-cn-web
+    runtime: static
+    branch: main
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: VITE_DEPLOYMENT_MODE
+        value: demo
+    routes:
+      - type: rewrite
+        source: /api/*
+        destination: https://rag-enterprise-cn-api.onrender.com/api/*
+      - type: rewrite
+        source: /*
+        destination: /index.html

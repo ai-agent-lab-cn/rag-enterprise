@@ -91,6 +91,13 @@ docker compose down
 
 上述命令默认保留命名卷。如需同时删除本地容器数据，请明确执行 `docker compose down --volumes`。
 
+### 部署 Render 免费 Demo
+
+仓库根目录提供 `render.yaml`，用于创建前端静态站点和后端免费 Web Service，并在
+`main` CI 通过后自动部署。首次创建 Blueprint 时需要在 Render 页面安全填写
+`GEMINI_API_KEY`。完整创建步骤、临时数据边界、Demo 专用轻量模型和部署后冒烟验证见
+[Render 免费 Demo 部署说明](docs/deployment/render-demo.md)。
+
 ## API
 
 | 方法 | 地址 | 用途 |
