@@ -3,12 +3,13 @@ import type { Source } from "../types";
 interface SourceCardProps {
   source: Source;
   index: number;
+  defaultOpen?: boolean;
 }
 
-export function SourceCard({ source, index }: SourceCardProps) {
+export function SourceCard({ source, index, defaultOpen = false }: SourceCardProps) {
   const location = source.page ? `第 ${source.page} 页` : `第 ${source.paragraph + 1} 段`;
   return (
-    <details className="source-card" id={`source-${index + 1}`}>
+    <details className="source-card" id={`source-${index + 1}`} open={defaultOpen}>
       <summary>
         <span className="source-number">{index + 1}</span>
         <span className="source-main">

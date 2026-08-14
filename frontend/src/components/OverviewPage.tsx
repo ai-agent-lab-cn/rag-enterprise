@@ -27,7 +27,7 @@ export function OverviewPage({ onOpen }: { onOpen: (path: string) => void }) {
   const chunkCount = bases?.reduce((total, item) => total + item.chunk_count, 0) ?? 0;
   return (
     <section className="product-page" aria-labelledby="overview-title">
-      <header className="page-heading"><div><span className="eyebrow">工作空间概览</span><h1 id="overview-title">早上好，知识正在生长。</h1><p>集中查看知识库、资料、会话和回答质量状态。</p></div></header>
+      <header className="page-heading"><div><h1 id="overview-title">项目概览</h1><p>查看知识库、已索引资料、历史会话和回答质量状态。</p></div></header>
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
       {bases === null && !error ? <div className="evaluation-state pulse">正在汇总工作空间…</div> : null}
       {bases ? <>

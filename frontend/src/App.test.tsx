@@ -13,6 +13,8 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); window.history.replaceState({
 function json(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } }); }
 function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const url = String(input);
+  if (url === "/api/knowledge-bases" && init?.method === "POST") return Promise.resolve(json({ ...base, knowledge_base_id: "kb_created", name: "产品资料", is_default: false, document_count: 0, chunk_count: 0 }));
+  if (url === "/api/knowledge-bases/kb_default/documents/doc_1" && init?.method === "DELETE") return Promise.resolve(new Response(null, { status: 204 }));
   if (url === "/api/knowledge-bases") return Promise.resolve(json([base]));
   if (url === "/api/knowledge-bases/kb_default") return Promise.resolve(json(base));
   if (url === "/api/knowledge-bases/kb_default/documents") return Promise.resolve(json([document]));
@@ -25,7 +27,7 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
 test("默认进入概览并汇总知识库、资料、会话和回答质量", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
   render(<App/>);
-  expect(await screen.findByText("工作空间概览")).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "项目概览" })).toBeInTheDocument();
   expect(screen.getByText("默认知识库")).toBeInTheDocument();
   expect(screen.getByText("全部指标通过")).toBeInTheDocument();
 });
@@ -36,6 +38,25 @@ test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
   await userEvent.click(await screen.findByRole("button", { name: /进入知识库/ }));
   expect(await screen.findByText("profile.md")).toBeInTheDocument();
   expect(window.location.pathname).toBe("/knowledge-bases/kb_default");
+});
+
+test("通过弹框创建知识库并支持取消", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases"); render(<App/>);
+  await userEvent.click(await screen.findByRole("button", { name: "＋ 新建知识库" }));
+  expect(screen.getByRole("dialog", { name: "新建知识库" })).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("知识库名称"), "产品资料");
+  await userEvent.click(screen.getByRole("button", { name: "确认创建" }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases", expect.objectContaining({ method: "POST" })));
+});
+
+test("删除资料使用站内确认弹框", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default"); render(<App/>);
+  await userEvent.click(await screen.findByRole("button", { name: "删除 profile.md" }));
+  expect(screen.getByRole("dialog", { name: "删除资料" })).toHaveTextContent("profile.md");
+  await userEvent.click(screen.getByRole("button", { name: "确认删除" }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/documents/doc_1", { method: "DELETE" }));
 });
 
 test("问答工作台使用所选知识库接口并渲染来源", async () => {
@@ -57,6 +78,10 @@ test("回答评测页只读展示正式指标", async () => {
   expect(await screen.findByText("回答质量门已通过")).toBeInTheDocument();
   expect(screen.getByText("回答正确性")).toBeInTheDocument();
   expect(screen.getByText("无支持声明率")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "回答质量" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "证据质量" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "幻觉风险" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "失败控制" })).toBeInTheDocument();
   expect(screen.getByText(/页面不会启动模型评测/)).toBeInTheDocument();
 });
 

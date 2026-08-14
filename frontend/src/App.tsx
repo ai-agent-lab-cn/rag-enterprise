@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Bot, Circle } from "lucide-react";
 import { AnswerEvaluationPage } from "./components/AnswerEvaluationPage";
 import { AppNavigation, type AppPage } from "./components/AppNavigation";
 import { ChatPage } from "./components/ChatPage";
@@ -32,5 +33,5 @@ export default function App() {
   else if (pathname === "/evaluation/answers") content = <AnswerEvaluationPage/>;
   else if (pathname.startsWith("/chat")) content = <ChatPage conversationId={conversationMatch?.[1]} onOpen={navigate}/>;
   else content = <OverviewPage onOpen={navigate}/>;
-  return <main className="app-shell"><header className="topbar"><button className="brand" onClick={() => navigate("/overview")} aria-label="RongRAG 概览"><span className="brand-symbol">R</span><strong>RongRAG</strong></button><AppNavigation page={page} onNavigate={navigate}/><div className="system-state"><span/> 本地检索引擎</div></header>{content}</main>;
+  return <main className="app-shell"><aside className="app-sidebar"><button className="brand" onClick={() => navigate("/overview")} aria-label="RongRAG 概览"><span className="brand-symbol"><Bot size={19}/></span><span><strong>RAG 系统</strong><small>Enterprise</small></span></button><AppNavigation page={page} onNavigate={navigate}/><div className="sidebar-foot"><Circle size={8} fill="currentColor"/> 服务运行正常</div></aside><div className="app-main"><header className="topbar"><div className="breadcrumb">{page === "overview" ? "项目概览" : page === "knowledge-bases" ? "知识库管理" : page === "chat" ? "对话助手" : page === "answer-evaluation" ? "回答评测" : "检索评测"}{page === "chat" ? <span className="online-badge"><Circle size={7} fill="currentColor"/> 在线</span> : null}</div><div className="system-state"><span/> 本地环境</div></header>{content}</div></main>;
 }
