@@ -1,9 +1,78 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
+
+
+class AuthBootstrapRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    password: str = Field(min_length=12, max_length=128)
+    display_name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str) -> str:
+        if not (normalized := value.strip()):
+            raise ValueError("显示名称不能为空")
+        return normalized
+
+
+class AuthBootstrapStatus(BaseModel):
+    required: bool
+
+
+class AuthLoginRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class UserResponse(BaseModel):
+    user_id: str
+    username: str
+    display_name: str
+    role: Literal["admin", "member"]
+    active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class AuthTokenResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_at: datetime
+    user: UserResponse
+
+
+class MemberCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    password: str = Field(min_length=12, max_length=128)
+    display_name: str = Field(min_length=1, max_length=80)
+    role: Literal["admin", "member"] = "member"
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str) -> str:
+        if not (normalized := value.strip()):
+            raise ValueError("显示名称不能为空")
+        return normalized
+
+
+class MemberUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=80)
+    role: Literal["admin", "member"] | None = None
+    active: bool | None = None
+    password: str | None = Field(default=None, min_length=12, max_length=128)
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_optional_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not (normalized := value.strip()):
+            raise ValueError("显示名称不能为空")
+        return normalized
 
 
 class DocumentInfo(BaseModel):

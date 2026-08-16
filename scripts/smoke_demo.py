@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -15,13 +16,17 @@ def request_json(
     path: str,
     *,
     payload: dict[str, Any] | None = None,
+    token: str | None = None,
     timeout: float = 30,
 ) -> Any:
     data = json.dumps(payload).encode() if payload is not None else None
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}{path}",
         data=data,
-        headers={"Content-Type": "application/json"} if data is not None else {},
+        headers={
+            **({"Content-Type": "application/json"} if data is not None else {}),
+            **({"Authorization": f"Bearer {token}"} if token is not None else {}),
+        },
         method="POST" if data is not None else "GET",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -45,9 +50,29 @@ def wait_for_health(base_url: str, deadline_seconds: int) -> dict[str, Any]:
     raise RuntimeError(f"等待 Demo 健康检查超时：{last_error}")
 
 
-def run_smoke(base_url: str, deadline_seconds: int, allow_retrieval_only: bool) -> dict[str, Any]:
+def authenticate(base_url: str, username: str, password: str) -> str:
+    status = request_json(base_url, "/api/auth/bootstrap")
+    path = "/api/auth/bootstrap" if status.get("required") else "/api/auth/login"
+    payload = {"username": username, "password": password}
+    if status.get("required"):
+        payload["display_name"] = "CI 冒烟管理员"
+    response = request_json(base_url, path, payload=payload)
+    token = response.get("access_token")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("认证接口未返回会话令牌")
+    return token
+
+
+def run_smoke(
+    base_url: str,
+    deadline_seconds: int,
+    allow_retrieval_only: bool,
+    username: str,
+    password: str,
+) -> dict[str, Any]:
     health = wait_for_health(base_url, deadline_seconds)
-    knowledge_bases = request_json(base_url, "/api/knowledge-bases", timeout=30)
+    token = authenticate(base_url, username, password)
+    knowledge_bases = request_json(base_url, "/api/knowledge-bases", token=token, timeout=30)
     default = next(
         (item for item in knowledge_bases if item.get("knowledge_base_id") == "kb_default"),
         None,
@@ -63,6 +88,7 @@ def run_smoke(base_url: str, deadline_seconds: int, allow_retrieval_only: bool) 
             "retrieve_k": 5,
             "rerank_k": 3,
         },
+        token=token,
         timeout=deadline_seconds,
     )
     allowed_statuses = {"answered"}
@@ -95,8 +121,26 @@ def main() -> None:
         action="store_true",
         help="仅用于未配置 Gemini 的本地/CI 容器验证",
     )
+    parser.add_argument(
+        "--username",
+        default=os.getenv("SMOKE_ADMIN_USERNAME"),
+        help="冒烟管理员用户名，也可通过 SMOKE_ADMIN_USERNAME 提供",
+    )
+    parser.add_argument(
+        "--password",
+        default=os.getenv("SMOKE_ADMIN_PASSWORD"),
+        help="冒烟管理员密码，也可通过 SMOKE_ADMIN_PASSWORD 提供",
+    )
     args = parser.parse_args()
-    evidence = run_smoke(args.base_url, args.deadline, args.allow_retrieval_only)
+    if not args.username or not args.password:
+        parser.error("必须提供冒烟管理员用户名和密码")
+    evidence = run_smoke(
+        args.base_url,
+        args.deadline,
+        args.allow_retrieval_only,
+        args.username,
+        args.password,
+    )
     print(json.dumps(evidence, ensure_ascii=False, indent=2))
 
 

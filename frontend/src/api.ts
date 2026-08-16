@@ -1,5 +1,6 @@
 import type {
   ApiErrorPayload,
+  AuthToken,
   DocumentInfo,
   EvaluationReport,
   EvaluationReportSummary,
@@ -9,12 +10,33 @@ import type {
   ConversationSummary,
   KnowledgeBase,
   QueryResult,
+  User,
 } from "./types";
 
+let accessToken: string | null = null;
+
+export function setAccessToken(token: string | null) {
+  accessToken = token;
+}
+
+export function hasAccessToken() {
+  return accessToken !== null;
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  let requestInit = init;
+  if (accessToken) {
+    const headers = new Headers(init?.headers);
+    headers.set("Authorization", `Bearer ${accessToken}`);
+    requestInit = { ...init, headers };
+  }
+  const response = await fetch(url, requestInit);
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as ApiErrorPayload;
+    if (response.status === 401 && !url.startsWith("/api/auth/")) {
+      setAccessToken(null);
+      window.dispatchEvent(new Event("rag-auth-expired"));
+    }
     throw new Error(payload.error?.message ?? `请求失败（${response.status}）`);
   }
   if (response.status === 204) return undefined as T;
@@ -22,6 +44,21 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getBootstrapStatus: () => request<{ required: boolean }>("/api/auth/bootstrap"),
+  bootstrap: (username: string, password: string, displayName: string) =>
+    request<AuthToken>("/api/auth/bootstrap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, display_name: displayName }),
+    }),
+  login: (username: string, password: string) =>
+    request<AuthToken>("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    }),
+  logout: () => request<void>("/api/auth/logout", { method: "POST" }),
+  me: () => request<User>("/api/auth/me"),
   listDocuments: () => request<DocumentInfo[]>("/api/documents"),
   uploadDocument: (file: File) => {
     const body = new FormData();

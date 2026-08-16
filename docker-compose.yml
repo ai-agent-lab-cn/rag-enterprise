@@ -20,6 +20,7 @@ services:
       - uploads_data:/app/data/uploads
       - knowledge_bases_data:/app/data/knowledge_bases
       - conversations_data:/app/data/conversations
+      - auth_data:/app/data/auth
     healthcheck:
       test:
         - CMD
@@ -57,3 +58,4 @@ volumes:
   uploads_data:
   knowledge_bases_data:
   conversations_data:
+  auth_data:
