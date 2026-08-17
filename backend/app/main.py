@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, UploadFile
+from fastapi import Depends, FastAPI, File, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -44,6 +44,7 @@ from .schemas import (
     QueryResponse,
     UserResponse,
 )
+from .security import AbuseProtection, SecurityBoundaryMiddleware, validate_upload, write_private_file
 from .service import RAGService, RAGServiceProtocol
 from .store import ChromaStore
 
@@ -103,6 +104,8 @@ BearerCredentials = Annotated[
     HTTPAuthorizationCredentials | None,
     Depends(bearer_scheme),
 ]
+PageOffset = Annotated[int, Query(ge=0, le=100_000)]
+PageLimit = Annotated[int, Query(ge=1, le=100)]
 
 
 def get_current_session(
@@ -124,6 +127,12 @@ CurrentSessionDependency = Annotated[AuthenticatedSession, Depends(get_current_s
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    abuse_protection = AbuseProtection(
+        login_limit=settings.login_rate_limit,
+        expensive_limit=settings.expensive_rate_limit,
+        window_seconds=settings.rate_limit_window_seconds,
+        concurrency_limit=settings.max_concurrent_expensive_requests,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -139,15 +148,21 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
         version="1.0.0",
-        docs_url="/api/docs",
+        docs_url=None if settings.app_environment == "production" else "/api/docs",
+        redoc_url=None,
+        openapi_url=None if settings.app_environment == "production" else "/openapi.json",
         lifespan=lifespan,
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.frontend_origin],
+        allow_origins=settings.frontend_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Content-Type", "Authorization"],
+    )
+    app.add_middleware(
+        SecurityBoundaryMiddleware,
+        max_body_bytes=settings.max_request_body_mb * 1024 * 1024,
     )
     install_error_handlers(app)
 
@@ -187,8 +202,10 @@ def create_app() -> FastAPI:
     @app.post("/api/auth/login", response_model=AuthTokenResponse)
     async def login(
         payload: AuthLoginRequest,
+        request: Request,
         auth: AuthRepositoryDependency,
     ) -> AuthTokenResponse:
+        abuse_protection.check_login(_client_key(request), payload.username)
         session = await run_in_threadpool(auth.authenticate, payload.username, payload.password)
         if session is None:
             raise AppError("INVALID_CREDENTIALS", "用户名或密码错误。", 401)
@@ -209,10 +226,12 @@ def create_app() -> FastAPI:
     async def list_members(
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        offset: PageOffset = 0,
+        limit: PageLimit = 50,
     ) -> list[UserResponse]:
         _require_admin(current.user)
         users = await run_in_threadpool(auth.list_users)
-        return [_user_response(item) for item in users]
+        return [_user_response(item) for item in _page(users, offset, limit)]
 
     @app.post("/api/members", response_model=UserResponse, status_code=201)
     async def create_member(
@@ -266,16 +285,26 @@ def create_app() -> FastAPI:
         auth: AuthRepositoryDependency,
     ) -> DocumentInfo:
         _require_knowledge_base_access(auth, current.user, DEFAULT_KNOWLEDGE_BASE_ID)
-        return await _upload_document(file, service, DEFAULT_KNOWLEDGE_BASE_ID, settings)
+        return await _upload_document(
+            file,
+            service,
+            DEFAULT_KNOWLEDGE_BASE_ID,
+            settings,
+            abuse_protection,
+            current.user.user_id,
+        )
 
     @app.get("/api/documents", response_model=list[DocumentInfo])
     async def list_documents(
         service: ServiceDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        offset: PageOffset = 0,
+        limit: PageLimit = 50,
     ) -> list[DocumentInfo]:
         _require_knowledge_base_access(auth, current.user, DEFAULT_KNOWLEDGE_BASE_ID)
-        return await run_in_threadpool(service.list_documents, DEFAULT_KNOWLEDGE_BASE_ID)
+        documents = await run_in_threadpool(service.list_documents, DEFAULT_KNOWLEDGE_BASE_ID)
+        return _page(documents, offset, limit)
 
     @app.get("/api/knowledge-bases", response_model=list[KnowledgeBaseResponse])
     async def list_knowledge_bases(
@@ -283,12 +312,14 @@ def create_app() -> FastAPI:
         service: ServiceDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        offset: PageOffset = 0,
+        limit: PageLimit = 50,
     ) -> list[KnowledgeBaseResponse]:
         records = await run_in_threadpool(knowledge_bases.list)
         accessible_ids = await run_in_threadpool(auth.accessible_knowledge_base_ids, current.user)
         if accessible_ids is not None:
             records = [item for item in records if item.knowledge_base_id in accessible_ids]
-        return [await _knowledge_base_response(item, service) for item in records]
+        return [await _knowledge_base_response(item, service) for item in _page(records, offset, limit)]
 
     @app.post("/api/knowledge-bases", response_model=KnowledgeBaseResponse, status_code=201)
     async def create_knowledge_base(
@@ -333,11 +364,13 @@ def create_app() -> FastAPI:
         knowledge_bases: KnowledgeBasesDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        offset: PageOffset = 0,
+        limit: PageLimit = 50,
     ) -> list[UserResponse]:
         _require_admin(current.user)
         await _require_knowledge_base(knowledge_bases, knowledge_base_id)
         users = await run_in_threadpool(auth.list_knowledge_base_users, knowledge_base_id)
-        return [_user_response(item) for item in users]
+        return [_user_response(item) for item in _page(users, offset, limit)]
 
     @app.put(
         "/api/knowledge-bases/{knowledge_base_id}/members/{user_id}",
@@ -436,7 +469,14 @@ def create_app() -> FastAPI:
         await _require_accessible_knowledge_base(
             knowledge_bases, auth, current.user, knowledge_base_id
         )
-        return await _upload_document(file, service, knowledge_base_id, settings)
+        return await _upload_document(
+            file,
+            service,
+            knowledge_base_id,
+            settings,
+            abuse_protection,
+            current.user.user_id,
+        )
 
     @app.get(
         "/api/knowledge-bases/{knowledge_base_id}/documents",
@@ -448,19 +488,25 @@ def create_app() -> FastAPI:
         service: ServiceDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        offset: PageOffset = 0,
+        limit: PageLimit = 50,
     ) -> list[DocumentInfo]:
         await _require_accessible_knowledge_base(
             knowledge_bases, auth, current.user, knowledge_base_id
         )
-        return await run_in_threadpool(service.list_documents, knowledge_base_id)
+        documents = await run_in_threadpool(service.list_documents, knowledge_base_id)
+        return _page(documents, offset, limit)
 
     @app.get("/api/evaluations", response_model=list[EvaluationReportSummary])
     async def list_evaluations(
         reports: EvaluationReportsDependency,
         current: CurrentSessionDependency,
+        offset: PageOffset = 0,
+        limit: PageLimit = 50,
     ) -> list[EvaluationReportSummary]:
         _require_admin(current.user)
-        return await run_in_threadpool(reports.list_official)
+        items = await run_in_threadpool(reports.list_official)
+        return _page(items, offset, limit)
 
     @app.get("/api/evaluations/{report_id}", response_model=EvaluationReportResponse)
     async def get_evaluation(
@@ -478,9 +524,12 @@ def create_app() -> FastAPI:
     async def list_answer_evaluations(
         reports: EvaluationReportsDependency,
         current: CurrentSessionDependency,
+        offset: PageOffset = 0,
+        limit: PageLimit = 50,
     ) -> list[AnswerEvaluationReportSummary]:
         _require_admin(current.user)
-        return await run_in_threadpool(reports.list_official_answers)
+        items = await run_in_threadpool(reports.list_official_answers)
+        return _page(items, offset, limit)
 
     @app.get(
         "/api/evaluations/answers/reports/{report_id}",
@@ -538,6 +587,8 @@ def create_app() -> FastAPI:
             conversations,
             DEFAULT_KNOWLEDGE_BASE_ID,
             settings,
+            abuse_protection,
+            current.user.user_id,
         )
 
     @app.post(
@@ -564,6 +615,8 @@ def create_app() -> FastAPI:
             conversations,
             knowledge_base_id,
             settings,
+            abuse_protection,
+            current.user.user_id,
         )
 
     @app.get(
@@ -576,12 +629,14 @@ def create_app() -> FastAPI:
         conversations: ConversationsDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        offset: PageOffset = 0,
+        limit: PageLimit = 50,
     ) -> list[ConversationSummaryResponse]:
         await _require_accessible_knowledge_base(
             knowledge_bases, auth, current.user, knowledge_base_id
         )
         items = await run_in_threadpool(conversations.list_conversations, knowledge_base_id)
-        return [ConversationSummaryResponse(**item) for item in items]
+        return [ConversationSummaryResponse(**item) for item in _page(items, offset, limit)]
 
     @app.get(
         "/api/knowledge-bases/{knowledge_base_id}/conversations/{conversation_id}",
@@ -681,6 +736,14 @@ def _auth_token_response(session: AuthenticatedSession) -> AuthTokenResponse:
     )
 
 
+def _client_key(request: Request) -> str:
+    return request.client.host if request.client is not None else "unknown"
+
+
+def _page[T](items: list[T], offset: int, limit: int) -> list[T]:
+    return items[offset : offset + limit]
+
+
 def _require_admin(user: UserRecord) -> None:
     if user.role != "admin":
         raise AppError("ADMIN_REQUIRED", "该操作仅限管理员。", 403)
@@ -740,17 +803,34 @@ async def _upload_document(
     service: RAGServiceProtocol,
     knowledge_base_id: str,
     settings,
+    abuse_protection: AbuseProtection,
+    user_id: str,
 ) -> DocumentInfo:
-    filename = file.filename or "document.txt"
+    abuse_protection.check_expensive(user_id)
     content = await file.read(settings.max_upload_mb * 1024 * 1024 + 1)
     if len(content) > settings.max_upload_mb * 1024 * 1024:
         raise AppError("FILE_TOO_LARGE", f"文件不能超过 {settings.max_upload_mb} MB。", 413)
-    result = await run_in_threadpool(service.index_document, filename, content, knowledge_base_id)
+    filename = validate_upload(
+        file.filename,
+        file.content_type,
+        content,
+        max_filename_chars=settings.max_filename_chars,
+    )
+    with abuse_protection.concurrency.slot():
+        result = await run_in_threadpool(
+            service.index_document,
+            filename,
+            content,
+            knowledge_base_id,
+        )
     scope = KnowledgeBaseScope(knowledge_base_id, settings.upload_path)
     scope.migrate_legacy_uploads()
-    scope.upload_path.mkdir(parents=True, exist_ok=True)
-    extension = filename.rsplit(".", maxsplit=1)[-1].lower() if "." in filename else "txt"
-    (scope.upload_path / f"{result.document_id}.{extension}").write_bytes(content)
+    extension = filename.rsplit(".", maxsplit=1)[-1].lower()
+    await run_in_threadpool(
+        write_private_file,
+        scope.upload_path / f"{result.document_id}.{extension}",
+        content,
+    )
     return result
 
 
@@ -775,7 +855,10 @@ async def _execute_recorded_query(
     conversations: ConversationRepository,
     knowledge_base_id: str,
     settings,
+    abuse_protection: AbuseProtection,
+    user_id: str,
 ) -> QueryResponse:
+    abuse_protection.check_expensive(user_id)
     question = payload.question.strip()
     try:
         conversation = await run_in_threadpool(
@@ -789,13 +872,14 @@ async def _execute_recorded_query(
 
     started = time.perf_counter()
     try:
-        result = await run_in_threadpool(
-            service.query,
-            question,
-            payload.retrieve_k,
-            payload.rerank_k,
-            knowledge_base_id,
-        )
+        with abuse_protection.concurrency.slot():
+            result = await run_in_threadpool(
+                service.query,
+                question,
+                payload.retrieve_k,
+                payload.rerank_k,
+                knowledge_base_id,
+            )
     except AppError as exc:
         record = await run_in_threadpool(
             conversations.record,

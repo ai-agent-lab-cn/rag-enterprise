@@ -1,7 +1,8 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,8 +25,32 @@ class Settings(BaseSettings):
     chunk_size: int = Field(default=700, ge=100, le=4000)
     chunk_overlap: int = Field(default=100, ge=0, le=1000)
     max_upload_mb: int = Field(default=15, ge=1, le=100)
+    max_request_body_mb: int = Field(default=16, ge=1, le=101)
+    max_filename_chars: int = Field(default=160, ge=32, le=255)
+    login_rate_limit: int = Field(default=10, ge=1, le=100)
+    expensive_rate_limit: int = Field(default=60, ge=1, le=1000)
+    rate_limit_window_seconds: int = Field(default=60, ge=10, le=3600)
+    max_concurrent_expensive_requests: int = Field(default=4, ge=1, le=32)
     session_ttl_hours: int = Field(default=12, ge=1, le=168)
     frontend_origin: str = "http://localhost:5173"
+    app_environment: Literal["development", "test", "production"] = "development"
+
+    @model_validator(mode="after")
+    def validate_security_boundaries(self) -> "Settings":
+        origins = self.frontend_origins
+        if not origins or any(origin == "*" for origin in origins):
+            raise ValueError("FRONTEND_ORIGIN must contain explicit origins")
+        if self.app_environment == "production" and any(
+            not origin.startswith("https://") for origin in origins
+        ):
+            raise ValueError("production FRONTEND_ORIGIN values must use https")
+        if self.max_request_body_mb <= self.max_upload_mb:
+            raise ValueError("MAX_REQUEST_BODY_MB must be larger than MAX_UPLOAD_MB")
+        return self
+
+    @property
+    def frontend_origins(self) -> list[str]:
+        return [item.strip().rstrip("/") for item in self.frontend_origin.split(",") if item.strip()]
 
 
 @lru_cache
