@@ -31,7 +31,21 @@ jobs:
         run: uv run pytest
 
       - name: 运行 Ruff
-        run: uv run ruff check backend evaluations
+        run: uv run ruff check backend evaluations scripts
+
+      - name: 执行隔离备份恢复演练
+        run: |
+          mkdir -p /tmp/rongrag-source/{chroma,uploads,knowledge_bases,conversations,auth,audit}
+          printf 'index-fixture\n' > /tmp/rongrag-source/chroma/chroma.sqlite3
+          printf 'upload-fixture\n' > /tmp/rongrag-source/uploads/document.md
+          printf '{"version":1,"knowledge_bases":[]}\n' > /tmp/rongrag-source/knowledge_bases/registry.json
+          printf '{"version":1,"conversations":[],"answers":[]}\n' > /tmp/rongrag-source/conversations/records.json
+          printf '{"version":1,"users":[],"sessions":[],"memberships":[]}\n' > /tmp/rongrag-source/auth/store.json
+          printf '{"version":1,"events":[]}\n' > /tmp/rongrag-source/audit/events.json
+          uv run python scripts/backup_restore.py backup --data-root /tmp/rongrag-source --output /tmp/rongrag.tar.gz
+          uv run python scripts/backup_restore.py verify --backup /tmp/rongrag.tar.gz
+          uv run python scripts/backup_restore.py restore --backup /tmp/rongrag.tar.gz --target /tmp/rongrag-restored
+          diff -r /tmp/rongrag-source /tmp/rongrag-restored
 
   frontend:
     runs-on: ubuntu-latest
