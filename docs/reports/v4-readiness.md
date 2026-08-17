@@ -4,7 +4,7 @@
 
 V4 候选版本已具备创建最终版本制品的工程条件。最终放行以
 [#64](https://github.com/ai-agent-lab-cn/rag-enterprise/issues/64) 的关闭结论、
-[`v4.0.0` Release](https://github.com/ai-agent-lab-cn/rag-enterprise/releases/tag/v4.0.0) 及其附件为准。
+[`v4.0.1` Release](https://github.com/ai-agent-lab-cn/rag-enterprise/releases/tag/v4.0.1) 及其附件为准。
 本结论只覆盖当前单实例架构的可发布、可诊断和可恢复能力，不代表公网环境可用性或线上 SLO。
 Render 部署仍由 [#46](https://github.com/ai-agent-lab-cn/rag-enterprise/issues/46) 承载，须再次明确批准。
 
