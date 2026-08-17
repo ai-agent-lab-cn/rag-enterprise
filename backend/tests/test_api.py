@@ -14,6 +14,7 @@ def test_health_does_not_initialize_rag_service(client) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
+        "version": "1.0.0",
         "collection_ready": True,
         "generation_ready": bool(settings.gemini_api_key),
         "models": {

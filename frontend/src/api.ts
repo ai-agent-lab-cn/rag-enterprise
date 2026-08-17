@@ -11,6 +11,10 @@ import type {
   KnowledgeBase,
   QueryResult,
   User,
+  HealthStatus,
+  ReadinessStatus,
+  SystemMetrics,
+  AuditEvent,
 } from "./types";
 
 let accessToken: string | null = null;
@@ -59,6 +63,23 @@ export const api = {
     }),
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
   me: () => request<User>("/api/auth/me"),
+  health: () => request<HealthStatus>("/api/health"),
+  readiness: () => request<ReadinessStatus>("/api/health/ready"),
+  systemMetrics: () => request<SystemMetrics>("/api/system/metrics"),
+  listMembers: () => request<User[]>("/api/members?offset=0&limit=100"),
+  createMember: (username: string, displayName: string, password: string, role: User["role"]) =>
+    request<User>("/api/members", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, display_name: displayName, password, role }) }),
+  updateMember: (userId: string, payload: Partial<Pick<User, "display_name" | "role" | "active">> & { password?: string }) =>
+    request<User>(`/api/members/${userId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
+  listKnowledgeBaseMembers: (id: string) => request<User[]>(`/api/knowledge-bases/${id}/members?offset=0&limit=100`),
+  grantKnowledgeBaseMember: (id: string, userId: string) => request<void>(`/api/knowledge-bases/${id}/members/${userId}`, { method: "PUT" }),
+  revokeKnowledgeBaseMember: (id: string, userId: string) => request<void>(`/api/knowledge-bases/${id}/members/${userId}`, { method: "DELETE" }),
+  listAuditEvents: (result = "", action = "") => {
+    const params = new URLSearchParams({ offset: "0", limit: "100" });
+    if (result) params.set("result", result);
+    if (action) params.set("action", action);
+    return request<AuditEvent[]>(`/api/audit/events?${params}`);
+  },
   listDocuments: () => request<DocumentInfo[]>("/api/documents"),
   uploadDocument: (file: File) => {
     const body = new FormData();

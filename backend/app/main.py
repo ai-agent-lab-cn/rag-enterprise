@@ -189,6 +189,7 @@ def create_app() -> FastAPI:
     async def health() -> HealthResponse:
         return HealthResponse(
             status="ok",
+            version=app.version,
             collection_ready=True,
             generation_ready=bool(settings.gemini_api_key),
             models={

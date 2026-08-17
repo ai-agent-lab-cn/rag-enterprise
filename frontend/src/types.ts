@@ -58,6 +58,41 @@ export interface AuthToken {
   user: User;
 }
 
+export interface HealthStatus {
+  status: string;
+  version: string;
+  collection_ready: boolean;
+  generation_ready: boolean;
+  models: Record<string, string>;
+}
+
+export interface ReadinessStatus {
+  status: "ready" | "not_ready";
+  checks: Record<string, "ok" | "failed">;
+}
+
+export interface SystemMetrics {
+  generated_at: string;
+  requests: Record<string, unknown>;
+  rag: Record<string, number>;
+  indexing: Record<string, number>;
+}
+
+export interface AuditEvent {
+  event_id: string;
+  occurred_at: string;
+  action: string;
+  actor_hash: string | null;
+  actor_role: string | null;
+  resource_type: string;
+  resource_id: string | null;
+  result: "success" | "denied" | "failed";
+  request_id: string;
+  metadata: Record<string, string | boolean | number>;
+  previous_hash: string;
+  event_hash: string;
+}
+
 export interface EvaluationMetric {
   value: number;
   threshold: number;
