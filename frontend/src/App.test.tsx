@@ -8,6 +8,7 @@ const base = { knowledge_base_id: "kb_default", name: "默认知识库", descrip
 const document = { knowledge_base_id: "kb_default", document_id: "doc_1", filename: "profile.md", chunk_count: 3, status: "ready" };
 const answerSummary = { report_id: "answer-official", dataset_id: "answers", dataset_version: "1.0.0", commit: "daca18509ca8f447aa00395ca88a58543ffb2cd4", run_at: "2026-08-12T08:52:33Z", models: { generation: "gemini-test", judge: "judge-test" }, prompt_version: "v3-grounded-answer-1", passed: true };
 const admin = { user_id: "usr_1234567890abcdef", username: "test-admin", display_name: "测试管理员", role: "admin", active: true, created_at: "2026-08-16T00:00:00Z", updated_at: "2026-08-16T00:00:00Z" };
+const member = { user_id: "usr_abcdef1234567890", username: "reader", display_name: "资料成员", role: "member", active: true, created_at: "2026-08-16T00:00:00Z", updated_at: "2026-08-16T00:00:00Z" };
 
 beforeEach(() => { window.scrollTo = vi.fn(); setAccessToken("test-token"); });
 afterEach(() => { cleanup(); setAccessToken(null); vi.restoreAllMocks(); vi.unstubAllEnvs(); window.history.replaceState({}, "", "/"); });
@@ -17,6 +18,12 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   const url = String(input);
   if (url === "/api/auth/me") return Promise.resolve(json(admin));
   if (url === "/api/auth/logout") return Promise.resolve(new Response(null, { status: 204 }));
+  if (url === "/api/health") return Promise.resolve(json({ status: "ok", version: "1.0.0", collection_ready: true, generation_ready: false, models: { embedding: "embedding-test", reranker: "reranker-test", generation: "gemini-test" } }));
+  if (url === "/api/health/ready") return Promise.resolve(json({ status: "ready", checks: { auth_store: "ok", audit_store: "ok", knowledge_base_registry: "ok", conversation_store: "ok" } }));
+  if (url === "/api/system/metrics") return Promise.resolve(json({ generated_at: "2026-08-17T00:00:00Z", requests: { total: 10 }, rag: { queries: 2 }, indexing: { documents: 1 } }));
+  if (url === "/api/members?offset=0&limit=100") return Promise.resolve(json([admin, member]));
+  if (url === "/api/knowledge-bases/kb_default/members?offset=0&limit=100") return Promise.resolve(json([member]));
+  if (url === "/api/audit/events?offset=0&limit=100") return Promise.resolve(json([{ event_id: "audit_1234567890abcdef", occurred_at: "2026-08-17T00:00:00Z", action: "member.update", actor_hash: "a".repeat(64), actor_role: "admin", resource_type: "user", resource_id: member.user_id, result: "success", request_id: "req-test", metadata: {}, previous_hash: "0".repeat(64), event_hash: "b".repeat(64) }]));
   if (url === "/api/knowledge-bases" && init?.method === "POST") return Promise.resolve(json({ ...base, knowledge_base_id: "kb_created", name: "产品资料", is_default: false, document_count: 0, chunk_count: 0 }));
   if (url === "/api/knowledge-bases/kb_default/documents/doc_1" && init?.method === "DELETE") return Promise.resolve(new Response(null, { status: 204 }));
   if (url === "/api/knowledge-bases") return Promise.resolve(json([base]));
@@ -158,4 +165,38 @@ test("退出后清除当前会话并返回登录入口", async () => {
   await userEvent.click(screen.getByRole("button", { name: "退出登录" }));
 
   expect(await screen.findByRole("heading", { name: "登录 RAG 工作台" })).toBeInTheDocument();
+});
+
+test("管理员可查看系统状态、模型和恢复边界", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/system"); render(<App/>);
+  expect(await screen.findByRole("heading", { name: "系统状态" })).toBeInTheDocument();
+  expect(await screen.findByText("服务已就绪")).toBeInTheDocument();
+  expect(screen.getByText("隔离恢复")).toBeInTheDocument();
+  expect(screen.getAllByText("embedding-test")).toHaveLength(2);
+});
+
+test("管理员可查看成员授权并对敏感变更二次确认", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/settings/members"); render(<App/>);
+  expect(await screen.findByRole("heading", { name: "成员与权限" })).toBeInTheDocument();
+  expect(await screen.findByText("资料成员")).toBeInTheDocument();
+  await userEvent.click(screen.getAllByRole("button", { name: "停用" }).find((button) => !button.hasAttribute("disabled"))!);
+  expect(screen.getByRole("dialog", { name: "停用成员" })).toBeInTheDocument();
+});
+
+test("审计页展示哈希链事件且不展示业务正文", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/settings/audit"); render(<App/>);
+  expect(await screen.findByRole("heading", { name: "审计记录" })).toBeInTheDocument();
+  expect(await screen.findByText("更新成员")).toBeInTheDocument();
+  expect(screen.getByText("bbbbbbbbbbbbbbbb")).toBeInTheDocument();
+});
+
+test("普通成员不显示管理导航且直接访问时不请求管理接口", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => String(input) === "/api/auth/me" ? Promise.resolve(json(member)) : Promise.resolve(json({ error: { message: "不应请求" } }, 500)));
+  window.history.replaceState({}, "", "/system"); render(<App/>);
+  expect(await screen.findByRole("alert")).toHaveTextContent("无权访问管理页面");
+  expect(screen.queryByRole("button", { name: "系统状态" })).not.toBeInTheDocument();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
 });

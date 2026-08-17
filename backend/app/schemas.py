@@ -211,6 +211,7 @@ class ConversationDetailResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
+    version: str
     collection_ready: bool
     generation_ready: bool
     models: dict[str, str]
