@@ -140,10 +140,11 @@ jobs:
         run: |
           gh release create "${{ steps.version.outputs.tag }}" \
             --verify-tag \
+            --fail-on-no-commits \
             --title "RongRAG Studio ${{ steps.version.outputs.tag }}" \
             --generate-notes \
             --notes-start-tag "${{ steps.version.outputs.previous_tag }}" \
-            --notes-file release/release-notes.md \
+            --notes "$(cat release/release-notes.md)" \
             release/artifact-manifest.json release/rollback-evidence.json
 
       - name: 上传失败诊断证据
