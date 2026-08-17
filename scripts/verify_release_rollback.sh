@@ -37,6 +37,12 @@ curl --fail --silent --show-error \
   --header 'Content-Type: application/json' \
   --data '{"username":"release-admin","password":"release-check-only-password","display_name":"发布验证管理员"}' \
   http://127.0.0.1:5180/api/auth/bootstrap >/tmp/rongrag-current-bootstrap.json
+access_token="$(uv run python -c 'import json,sys; print(json.load(open(sys.argv[1]))["access_token"])' /tmp/rongrag-current-bootstrap.json)"
+curl --fail --silent --show-error \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer $access_token" \
+  --data '{"name":"release-rollback-evidence","description":"isolated compatibility record"}' \
+  http://127.0.0.1:5180/api/knowledge-bases >/tmp/rongrag-current-knowledge-base.json
 
 docker compose --project-name "$compose_project" --file "$compose_file" down --remove-orphans
 uv run python scripts/backup_restore.py backup --data-root "$release_root/current" --output "$release_root/backup.tar.gz"
@@ -51,7 +57,8 @@ export RELEASE_FRONTEND_IMAGE="$PREVIOUS_FRONTEND_IMAGE"
 export RELEASE_PORT="5181"
 docker compose --project-name "$compose_project" --file "$compose_file" up --detach --wait --wait-timeout 300
 curl --fail --silent --show-error http://127.0.0.1:5181/api/health >/tmp/rongrag-previous-health.json
-curl --fail --silent --show-error http://127.0.0.1:5181/api/documents >/tmp/rongrag-previous-documents.json
+curl --fail --silent --show-error http://127.0.0.1:5181/api/knowledge-bases >/tmp/rongrag-previous-knowledge-bases.json
+uv run python -c 'import json,sys; assert any(item["name"] == "release-rollback-evidence" for item in json.load(open(sys.argv[1])))' /tmp/rongrag-previous-knowledge-bases.json
 
 finished_at="$(date +%s)"
 backup_sha256="$(uv run python -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$release_root/backup.tar.gz")"
