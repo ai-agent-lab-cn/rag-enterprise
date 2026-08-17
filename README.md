@@ -286,6 +286,10 @@ npm run build
 V4 的 Tag 质量门、GHCR 不可变镜像、制品清单、GitHub Release 和前一版本隔离回滚流程见
 [V4 版本发布与受控回滚](docs/operations/release-rollback.md)。发布必须由明确批准的 `v4.x.y`
 Tag 触发；普通 PR 不创建版本制品，也不会触发 Render 部署。
+
+V4 的生产就绪验收范围、证据索引、已知限制与 V0→V4 总复盘见
+[V4 生产就绪验收报告](docs/reports/v4-readiness.md)。版本 commit、镜像摘要和回滚记录以
+GitHub Release 附件为准，不在报告中复制维护。
 - 管理员可访问全部知识库；普通成员只看到被明确授权的知识库。服务端对未授权知识库统一
   返回“未找到”，避免通过错误差异探测资源是否存在。正式评测和成员管理仅管理员可访问。
 - V3 起每个文档和来源都带有 `knowledge_base_id`；V2 数据统一迁入稳定的默认知识库
