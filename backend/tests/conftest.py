@@ -5,7 +5,13 @@ from fastapi.testclient import TestClient
 
 from backend.app.config import get_settings
 from backend.app.knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
-from backend.app.main import create_app, get_conversations, get_knowledge_bases, get_service
+from backend.app.main import (
+    create_app,
+    get_auth_repository,
+    get_conversations,
+    get_knowledge_bases,
+    get_service,
+)
 from backend.app.schemas import DocumentInfo, QueryResponse, Source
 
 
@@ -86,17 +92,32 @@ def client(fake_service: FakeService, tmp_path) -> Iterator[TestClient]:
     original_upload_path = settings.upload_path
     original_knowledge_bases_path = settings.knowledge_bases_path
     original_conversations_path = settings.conversations_path
+    original_auth_path = settings.auth_path
     settings.upload_path = tmp_path / "uploads"
     settings.knowledge_bases_path = tmp_path / "knowledge-bases" / "registry.json"
     settings.conversations_path = tmp_path / "conversations" / "records.json"
+    settings.auth_path = tmp_path / "auth" / "store.json"
     get_knowledge_bases.cache_clear()
     get_conversations.cache_clear()
+    get_auth_repository.cache_clear()
     app = create_app()
     app.dependency_overrides[get_service] = lambda: fake_service
     with TestClient(app) as test_client:
+        bootstrap = test_client.post(
+            "/api/auth/bootstrap",
+            json={
+                "username": "test-admin",
+                "password": "correct-horse-battery-staple",
+                "display_name": "测试管理员",
+            },
+        )
+        assert bootstrap.status_code == 201
+        test_client.headers["Authorization"] = f"Bearer {bootstrap.json()['access_token']}"
         yield test_client
     settings.upload_path = original_upload_path
     settings.knowledge_bases_path = original_knowledge_bases_path
     settings.conversations_path = original_conversations_path
+    settings.auth_path = original_auth_path
     get_knowledge_bases.cache_clear()
     get_conversations.cache_clear()
+    get_auth_repository.cache_clear()

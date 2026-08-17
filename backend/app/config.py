@@ -17,12 +17,14 @@ class Settings(BaseSettings):
     upload_path: Path = Path("data/uploads")
     knowledge_bases_path: Path = Path("data/knowledge_bases/registry.json")
     conversations_path: Path = Path("data/conversations/records.json")
+    auth_path: Path = Path("data/auth/store.json")
     evaluation_reports_path: Path = Path("backend/evaluation/reports")
     demo_seed_path: Path | None = None
     collection_name: str = "rongrag_documents"
     chunk_size: int = Field(default=700, ge=100, le=4000)
     chunk_overlap: int = Field(default=100, ge=0, le=1000)
     max_upload_mb: int = Field(default=15, ge=1, le=100)
+    session_ttl_hours: int = Field(default=12, ge=1, le=168)
     frontend_origin: str = "http://localhost:5173"
 
 

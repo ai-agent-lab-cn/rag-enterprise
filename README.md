@@ -71,7 +71,11 @@ cd frontend
 npm run dev
 ```
 
-打开 <http://localhost:5173>，上传 `knowledge/project-profile.md` 后即可使用。API 文档位于 <http://localhost:8000/api/docs>。
+首次打开 <http://localhost:5173> 时，页面会引导创建首位管理员；初始化只能执行一次，之后
+使用登录页进入工作台。也可在 API 文档 <http://localhost:8000/api/docs> 调用
+`POST /api/auth/bootstrap` 或 `POST /api/auth/login`，再把 Bearer 令牌填入右上角的
+**Authorize**。健康检查和初始化状态可匿名访问，其余业务 API 默认要求有效会话。当前提供
+最小认证入口；完整成员管理、系统状态和审计页面由后续 V4 页面任务实现。
 
 ### 使用 Docker Compose
 
@@ -102,6 +106,13 @@ docker compose down
 
 | 方法 | 地址 | 用途 |
 | --- | --- | --- |
+| `GET/POST` | `/api/auth/bootstrap` | 查询初始化状态或创建首位管理员；创建仅允许一次 |
+| `POST` | `/api/auth/login` | 登录并创建可撤销 Bearer 会话 |
+| `POST` | `/api/auth/logout` | 撤销当前会话 |
+| `GET` | `/api/auth/me` | 获取当前成员及角色 |
+| `GET/POST/PUT` | `/api/members` | 管理员查看、创建或更新成员 |
+| `GET` | `/api/knowledge-bases/{id}/members` | 管理员查看知识库成员 |
+| `PUT/DELETE` | `/api/knowledge-bases/{id}/members/{user_id}` | 管理员授予或撤销知识库成员 |
 | `POST` | `/api/documents` | 上传并索引 MD、TXT 或 PDF |
 | `GET` | `/api/documents` | 获取已索引文档及 chunk 数量 |
 | `DELETE` | `/api/documents/{id}` | 删除文档、向量与本地上传文件 |
@@ -247,6 +258,10 @@ npm run build
 ## 数据与隐私
 
 - `.env`、`data/uploads/` 和 `data/chroma/` 已加入 `.gitignore`。
+- 账号、密码摘要、会话摘要和知识库授权位于 `data/auth/`；密码使用带随机盐的 scrypt
+  摘要，会话只保存令牌 SHA-256 摘要，原始密码和原始令牌不会写入存储文件。
+- 管理员可访问全部知识库；普通成员只看到被明确授权的知识库。服务端对未授权知识库统一
+  返回“未找到”，避免通过错误差异探测资源是否存在。正式评测和成员管理仅管理员可访问。
 - V3 起每个文档和来源都带有 `knowledge_base_id`；V2 数据统一迁入稳定的默认知识库
   `kb_default`，原始文件存放于 `data/uploads/kb_default/`。
 - Chroma 启动时会为缺少 `knowledge_base_id` 的 V2 chunk 补上默认值；迁移可重复执行，

@@ -87,6 +87,9 @@ jobs:
         run: docker compose up --detach --wait --wait-timeout 600
 
       - name: 验证健康、演示资料与基础问答
+        env:
+          SMOKE_ADMIN_USERNAME: ci-smoke-admin
+          SMOKE_ADMIN_PASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}-temporary
         run: python scripts/smoke_demo.py http://127.0.0.1:5173 --allow-retrieval-only
 
       - name: 输出失败诊断信息

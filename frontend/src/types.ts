@@ -41,6 +41,23 @@ export interface ApiErrorPayload {
   error?: { code?: string; message?: string };
 }
 
+export interface User {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: "admin" | "member";
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AuthToken {
+  access_token: string;
+  token_type: "bearer";
+  expires_at: string;
+  user: User;
+}
+
 export interface EvaluationMetric {
   value: number;
   threshold: number;

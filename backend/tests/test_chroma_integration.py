@@ -6,7 +6,13 @@ from fastapi.testclient import TestClient
 
 from backend.app.config import Settings, get_settings
 from backend.app.errors import AppError
-from backend.app.main import create_app, get_conversations, get_knowledge_bases, get_service
+from backend.app.main import (
+    create_app,
+    get_auth_repository,
+    get_conversations,
+    get_knowledge_bases,
+    get_service,
+)
 from backend.app.service import RAGService
 from backend.app.store import ChromaStore
 
@@ -139,12 +145,27 @@ def test_retrieval_api_uses_isolated_real_chroma(
         "conversations_path",
         tmp_path / "conversations" / "records.json",
     )
+    monkeypatch.setattr(
+        get_settings(),
+        "auth_path",
+        tmp_path / "auth" / "store.json",
+    )
     get_knowledge_bases.cache_clear()
     get_conversations.cache_clear()
+    get_auth_repository.cache_clear()
     app = create_app()
     app.dependency_overrides[get_service] = lambda: isolated_service
 
     with TestClient(app) as client:
+        bootstrap = client.post(
+            "/api/auth/bootstrap",
+            json={
+                "username": "integration-admin",
+                "password": "integration-test-password",
+                "display_name": "集成测试管理员",
+            },
+        )
+        client.headers["Authorization"] = f"Bearer {bootstrap.json()['access_token']}"
         uploaded = client.post(
             "/api/documents",
             files={
@@ -192,6 +213,7 @@ def test_retrieval_api_uses_isolated_real_chroma(
         assert not list(default_upload_path.glob(f"{document_id}.*"))
     get_knowledge_bases.cache_clear()
     get_conversations.cache_clear()
+    get_auth_repository.cache_clear()
 
 
 def test_rag_service_keeps_documents_and_results_in_requested_knowledge_base(
