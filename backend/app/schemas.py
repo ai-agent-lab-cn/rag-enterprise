@@ -1,3 +1,4 @@
+import unicodedata
 from datetime import datetime
 from typing import Any, Literal
 
@@ -125,6 +126,19 @@ class QueryRequest(BaseModel):
     retrieve_k: int = Field(default=10, ge=1, le=50)
     rerank_k: int = Field(default=5, ge=1, le=20)
     conversation_id: str | None = Field(default=None, pattern=r"^conv_[a-f0-9]{16}$")
+
+    @field_validator("question")
+    @classmethod
+    def normalize_question(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 2:
+            raise ValueError("问题不能为空")
+        if any(
+            unicodedata.category(character) == "Cc" and character not in {"\n", "\t"}
+            for character in normalized
+        ):
+            raise ValueError("问题包含不支持的控制字符")
+        return normalized
 
 
 class Source(BaseModel):
