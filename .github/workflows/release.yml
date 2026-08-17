@@ -1,0 +1,158 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v4.*.*"
+
+permissions:
+  contents: write
+  packages: write
+  actions: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BACKEND_REPOSITORY: ghcr.io/${{ github.repository }}/backend
+      FRONTEND_REPOSITORY: ghcr.io/${{ github.repository }}/frontend
+    steps:
+      - name: 检出完整版本历史
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: 验证 Tag、主分支与质量门
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v4\.[0-9]+\.[0-9]+$ ]]; then
+            echo "仅允许 v4.x.y 版本 Tag" >&2
+            exit 1
+          fi
+          git fetch origin main --tags --force
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          previous_tag="$(git describe --tags --abbrev=0 "${GITHUB_SHA}^")"
+          previous_sha="$(git rev-list -n 1 "$previous_tag")"
+          successful_runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?branch=main&head_sha=${GITHUB_SHA}&status=success" --jq '[.workflow_runs[] | select(.name == "quality" and .event == "push")] | length')"
+          if [ "$successful_runs" -lt 1 ]; then
+            echo "Tag 提交没有通过 main quality 工作流" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha_short=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
+          echo "previous_sha=$previous_sha" >> "$GITHUB_OUTPUT"
+          echo "previous_sha_short=${previous_sha::12}" >> "$GITHUB_OUTPUT"
+
+      - name: 登录 GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: 配置 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 构建并推送当前版本镜像
+        run: |
+          docker buildx build --platform linux/amd64 --push --file backend/Dockerfile \
+            --tag "$BACKEND_REPOSITORY:${{ steps.version.outputs.tag }}" \
+            --tag "$BACKEND_REPOSITORY:sha-${{ steps.version.outputs.sha_short }}" \
+            --metadata-file /tmp/current-backend.json .
+          docker buildx build --platform linux/amd64 --push --file frontend/Dockerfile \
+            --tag "$FRONTEND_REPOSITORY:${{ steps.version.outputs.tag }}" \
+            --tag "$FRONTEND_REPOSITORY:sha-${{ steps.version.outputs.sha_short }}" \
+            --metadata-file /tmp/current-frontend.json frontend
+
+      - name: 构建并推送前一版本回滚镜像
+        run: |
+          git worktree add /tmp/rongrag-previous "${{ steps.version.outputs.previous_sha }}"
+          docker buildx build --platform linux/amd64 --push --file /tmp/rongrag-previous/backend/Dockerfile \
+            --tag "$BACKEND_REPOSITORY:rollback-${{ steps.version.outputs.previous_tag }}-sha-${{ steps.version.outputs.previous_sha_short }}" \
+            --metadata-file /tmp/previous-backend.json /tmp/rongrag-previous
+          docker buildx build --platform linux/amd64 --push --file /tmp/rongrag-previous/frontend/Dockerfile \
+            --tag "$FRONTEND_REPOSITORY:rollback-${{ steps.version.outputs.previous_tag }}-sha-${{ steps.version.outputs.previous_sha_short }}" \
+            --metadata-file /tmp/previous-frontend.json /tmp/rongrag-previous/frontend
+
+      - name: 生成不可变镜像引用
+        id: images
+        run: |
+          current_backend_digest="$(jq -r '."containerimage.digest"' /tmp/current-backend.json)"
+          current_frontend_digest="$(jq -r '."containerimage.digest"' /tmp/current-frontend.json)"
+          previous_backend_digest="$(jq -r '."containerimage.digest"' /tmp/previous-backend.json)"
+          previous_frontend_digest="$(jq -r '."containerimage.digest"' /tmp/previous-frontend.json)"
+          echo "current_backend=$BACKEND_REPOSITORY@$current_backend_digest" >> "$GITHUB_OUTPUT"
+          echo "current_frontend=$FRONTEND_REPOSITORY@$current_frontend_digest" >> "$GITHUB_OUTPUT"
+          echo "previous_backend=$BACKEND_REPOSITORY@$previous_backend_digest" >> "$GITHUB_OUTPUT"
+          echo "previous_frontend=$FRONTEND_REPOSITORY@$previous_frontend_digest" >> "$GITHUB_OUTPUT"
+
+      - name: 安装恢复演练依赖
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: 执行隔离恢复与前一版本回滚
+        env:
+          CURRENT_BACKEND_IMAGE: ${{ steps.images.outputs.current_backend }}
+          CURRENT_FRONTEND_IMAGE: ${{ steps.images.outputs.current_frontend }}
+          PREVIOUS_BACKEND_IMAGE: ${{ steps.images.outputs.previous_backend }}
+          PREVIOUS_FRONTEND_IMAGE: ${{ steps.images.outputs.previous_frontend }}
+          ROLLBACK_EVIDENCE_PATH: release/rollback-evidence.json
+        run: |
+          uv sync --locked --dev
+          scripts/verify_release_rollback.sh
+
+      - name: 生成制品清单与发布说明
+        run: |
+          mkdir -p release
+          jq -n \
+            --arg tag "${{ steps.version.outputs.tag }}" \
+            --arg commit "$GITHUB_SHA" \
+            --arg previous_tag "${{ steps.version.outputs.previous_tag }}" \
+            --arg previous_commit "${{ steps.version.outputs.previous_sha }}" \
+            --arg backend "${{ steps.images.outputs.current_backend }}" \
+            --arg frontend "${{ steps.images.outputs.current_frontend }}" \
+            --arg rollback_backend "${{ steps.images.outputs.previous_backend }}" \
+            --arg rollback_frontend "${{ steps.images.outputs.previous_frontend }}" \
+            '{tag:$tag,commit:$commit,images:{backend:$backend,frontend:$frontend},rollback:{tag:$previous_tag,commit:$previous_commit,backend:$rollback_backend,frontend:$rollback_frontend}}' \
+            > release/artifact-manifest.json
+          {
+            echo "## 不可变制品"
+            echo
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- Backend: \`${{ steps.images.outputs.current_backend }}\`"
+            echo "- Frontend: \`${{ steps.images.outputs.current_frontend }}\`"
+            echo "- 回滚版本: \`${{ steps.version.outputs.previous_tag }}\`"
+            echo
+            echo "隔离备份恢复和前一版本回滚验证已通过。此 Release 不包含 Render 部署或公网环境 SLO。"
+          } > release/release-notes.md
+
+      - name: 创建 GitHub Release
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --verify-tag \
+            --title "RongRAG Studio ${{ steps.version.outputs.tag }}" \
+            --generate-notes \
+            --notes-start-tag "${{ steps.version.outputs.previous_tag }}" \
+            --notes-file release/release-notes.md \
+            release/artifact-manifest.json release/rollback-evidence.json
+
+      - name: 上传失败诊断证据
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-failure-${{ github.run_id }}
+          path: |
+            /tmp/*backend.json
+            /tmp/*frontend.json
+            release/
+          if-no-files-found: ignore
