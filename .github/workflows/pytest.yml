@@ -115,3 +115,18 @@ jobs:
       - name: 清理容器与测试数据卷
         if: always()
         run: docker compose down --volumes --remove-orphans
+
+  release-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v7
+
+      - name: 校验发布编排与回滚脚本
+        env:
+          RELEASE_BACKEND_IMAGE: example.invalid/backend@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          RELEASE_FRONTEND_IMAGE: example.invalid/frontend@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          ACTIVE_DATA_ROOT: /tmp/rongrag-release-contract
+        run: |
+          docker compose --file docker-compose.release.yml config --quiet
+          bash -n scripts/verify_release_rollback.sh

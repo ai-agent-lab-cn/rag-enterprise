@@ -1,0 +1,34 @@
+services:
+  backend:
+    image: "${RELEASE_BACKEND_IMAGE:?RELEASE_BACKEND_IMAGE is required}"
+    environment:
+      GEMINI_API_KEY: ""
+      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}"
+      RERANKER_MODEL: "${RERANKER_MODEL:-demo/lexical-overlap-v1}"
+    volumes:
+      - "${ACTIVE_DATA_ROOT:?ACTIVE_DATA_ROOT is required}/chroma:/app/data/chroma"
+      - "${ACTIVE_DATA_ROOT}/uploads:/app/data/uploads"
+      - "${ACTIVE_DATA_ROOT}/knowledge_bases:/app/data/knowledge_bases"
+      - "${ACTIVE_DATA_ROOT}/conversations:/app/data/conversations"
+      - "${ACTIVE_DATA_ROOT}/auth:/app/data/auth"
+      - "${ACTIVE_DATA_ROOT}/audit:/app/data/audit"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 24
+
+  frontend:
+    image: "${RELEASE_FRONTEND_IMAGE:?RELEASE_FRONTEND_IMAGE is required}"
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${RELEASE_PORT:-5180}:80"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/api/health"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 12
