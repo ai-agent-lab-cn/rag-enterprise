@@ -7,6 +7,7 @@ from backend.app.config import get_settings
 from backend.app.knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
 from backend.app.main import (
     create_app,
+    get_audit_repository,
     get_auth_repository,
     get_conversations,
     get_knowledge_bases,
@@ -93,13 +94,16 @@ def client(fake_service: FakeService, tmp_path) -> Iterator[TestClient]:
     original_knowledge_bases_path = settings.knowledge_bases_path
     original_conversations_path = settings.conversations_path
     original_auth_path = settings.auth_path
+    original_audit_path = settings.audit_path
     settings.upload_path = tmp_path / "uploads"
     settings.knowledge_bases_path = tmp_path / "knowledge-bases" / "registry.json"
     settings.conversations_path = tmp_path / "conversations" / "records.json"
     settings.auth_path = tmp_path / "auth" / "store.json"
+    settings.audit_path = tmp_path / "audit" / "events.json"
     get_knowledge_bases.cache_clear()
     get_conversations.cache_clear()
     get_auth_repository.cache_clear()
+    get_audit_repository.cache_clear()
     app = create_app()
     app.dependency_overrides[get_service] = lambda: fake_service
     with TestClient(app) as test_client:
@@ -118,6 +122,8 @@ def client(fake_service: FakeService, tmp_path) -> Iterator[TestClient]:
     settings.knowledge_bases_path = original_knowledge_bases_path
     settings.conversations_path = original_conversations_path
     settings.auth_path = original_auth_path
+    settings.audit_path = original_audit_path
     get_knowledge_bases.cache_clear()
     get_conversations.cache_clear()
     get_auth_repository.cache_clear()
+    get_audit_repository.cache_clear()

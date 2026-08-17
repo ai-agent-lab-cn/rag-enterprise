@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     knowledge_bases_path: Path = Path("data/knowledge_bases/registry.json")
     conversations_path: Path = Path("data/conversations/records.json")
     auth_path: Path = Path("data/auth/store.json")
+    audit_path: Path = Path("data/audit/events.json")
     evaluation_reports_path: Path = Path("backend/evaluation/reports")
     demo_seed_path: Path | None = None
     collection_name: str = "rongrag_documents"

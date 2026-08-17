@@ -197,6 +197,8 @@ def test_invalid_credentials_and_unknown_member_are_stable_errors(client) -> Non
 def test_every_business_route_declares_bearer_security(client) -> None:
     public_operations = {
         ("/api/health", "get"),
+        ("/api/health/live", "get"),
+        ("/api/health/ready", "get"),
         ("/api/auth/bootstrap", "get"),
         ("/api/auth/bootstrap", "post"),
         ("/api/auth/login", "post"),
