@@ -216,6 +216,37 @@ class HealthResponse(BaseModel):
     models: dict[str, str]
 
 
+class LivenessResponse(BaseModel):
+    status: Literal["alive"] = "alive"
+
+
+class ReadinessResponse(BaseModel):
+    status: Literal["ready", "not_ready"]
+    checks: dict[str, Literal["ok", "failed"]]
+
+
+class MetricsResponse(BaseModel):
+    generated_at: datetime
+    requests: dict[str, Any]
+    rag: dict[str, int | float]
+    indexing: dict[str, int | float]
+
+
+class AuditEventResponse(BaseModel):
+    event_id: str
+    occurred_at: datetime
+    action: str
+    actor_hash: str | None
+    actor_role: str | None
+    resource_type: str
+    resource_id: str | None
+    result: Literal["success", "denied", "failed"]
+    request_id: str
+    metadata: dict[str, str | bool | int | float]
+    previous_hash: str
+    event_hash: str
+
+
 class EvaluationMetricResponse(BaseModel):
     value: float
     threshold: float

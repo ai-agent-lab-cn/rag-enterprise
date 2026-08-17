@@ -125,6 +125,10 @@ docker compose down
 | `GET` | `/api/evaluations` | 按运行时间倒序获取正式检索评测报告 |
 | `GET` | `/api/evaluations/{report_id}` | 获取单次正式检索评测报告详情 |
 | `GET` | `/api/health` | 检查索引与模型配置状态 |
+| `GET` | `/api/health/live` | 存活检查，不初始化重量模型 |
+| `GET` | `/api/health/ready` | 检查认证、审计和业务存储是否就绪 |
+| `GET` | `/api/system/metrics` | 管理员读取进程内请求、RAG 和索引指标 |
+| `GET` | `/api/audit/events` | 管理员分页查询追加式审计事件 |
 | `GET/POST` | `/api/knowledge-bases` | 列出或创建知识库 |
 | `GET/PUT/DELETE` | `/api/knowledge-bases/{id}` | 查看、更新或删除空知识库 |
 | `GET/POST` | `/api/knowledge-bases/{id}/documents` | 列出或上传指定知识库的文档 |
@@ -268,6 +272,10 @@ npm run build
 - 登录和上传/问答等高成本请求设置进程内滑动窗口限流；高成本任务还受并发上限保护。
   这是单实例基础保护，不冒充外部 WAF 或多实例共享限流。
 - 参数校验和未预期异常只返回稳定错误码，不回传密码、令牌、请求原文或内部异常文本。
+- 每个 API 请求都有 `X-Request-ID`，结构化日志只记录路由模板、状态、耗时和匿名主体；
+  不记录查询字符串、请求体或业务正文。管理员可读取请求、RAG 与索引聚合指标。
+- 审计事件以哈希链追加保存于 `data/audit/`，覆盖登录、成员/权限、知识库和文档变更；
+  只读接口仅管理员可访问。审计记录不包含问题、答案、Prompt、令牌、密钥或文件正文。
 - 账号、密码摘要、会话摘要和知识库授权位于 `data/auth/`；密码使用带随机盐的 scrypt
   摘要，会话只保存令牌 SHA-256 摘要，原始密码和原始令牌不会写入存储文件。
 - 管理员可访问全部知识库；普通成员只看到被明确授权的知识库。服务端对未授权知识库统一

@@ -4,6 +4,8 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from .observability import structured_log
+
 
 class AppError(Exception):
     def __init__(
@@ -25,6 +27,12 @@ class AppError(Exception):
 def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:
+        structured_log(
+            "request.error",
+            status_code=exc.status_code,
+            error_code=exc.code,
+            result="error",
+        )
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": {"code": exc.code, "message": exc.message, "details": exc.details}},
@@ -40,6 +48,12 @@ def install_error_handlers(app: FastAPI) -> None:
             }
             for item in exc.errors()
         ]
+        structured_log(
+            "request.validation_error",
+            status_code=422,
+            error_count=len(details),
+            result="error",
+        )
         return JSONResponse(
             status_code=422,
             content={
@@ -53,6 +67,13 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def handle_unexpected_error(_: Request, _exc: Exception) -> JSONResponse:
+        structured_log(
+            "request.unexpected_error",
+            level=40,
+            status_code=500,
+            error_type=type(_exc).__name__,
+            result="error",
+        )
         return JSONResponse(
             status_code=500,
             content={

@@ -3,11 +3,12 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Query, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from .audit import AuditRepository
 from .auth import AuthenticatedSession, AuthRepository, UserRecord
 from .config import get_settings
 from .demo import seed_demo_document
@@ -21,10 +22,12 @@ from .knowledge_bases import (
     KnowledgeBaseScope,
 )
 from .models import get_embedding_model, get_generator, get_reranker
+from .observability import MetricsRegistry, ObservabilityMiddleware, bind_actor, hash_identifier
 from .schemas import (
     AnswerEvaluationReportResponse,
     AnswerEvaluationReportSummary,
     AnswerRecordResponse,
+    AuditEventResponse,
     AuthBootstrapRequest,
     AuthBootstrapStatus,
     AuthLoginRequest,
@@ -38,10 +41,13 @@ from .schemas import (
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
     KnowledgeBaseUpdate,
+    LivenessResponse,
     MemberCreate,
     MemberUpdate,
+    MetricsResponse,
     QueryRequest,
     QueryResponse,
+    ReadinessResponse,
     UserResponse,
 )
 from .security import AbuseProtection, SecurityBoundaryMiddleware, validate_upload, write_private_file
@@ -99,6 +105,14 @@ def get_auth_repository() -> AuthRepository:
 
 
 AuthRepositoryDependency = Annotated[AuthRepository, Depends(get_auth_repository)]
+
+
+@lru_cache
+def get_audit_repository() -> AuditRepository:
+    return AuditRepository(get_settings().audit_path)
+
+
+AuditRepositoryDependency = Annotated[AuditRepository, Depends(get_audit_repository)]
 bearer_scheme = HTTPBearer(auto_error=False)
 BearerCredentials = Annotated[
     HTTPAuthorizationCredentials | None,
@@ -108,7 +122,7 @@ PageOffset = Annotated[int, Query(ge=0, le=100_000)]
 PageLimit = Annotated[int, Query(ge=1, le=100)]
 
 
-def get_current_session(
+async def get_current_session(
     auth: AuthRepositoryDependency,
     credentials: BearerCredentials,
 ) -> AuthenticatedSession:
@@ -116,9 +130,10 @@ def get_current_session(
         raise AppError("AUTHENTICATION_REQUIRED", "请先登录。", 401)
     if credentials.scheme.casefold() != "bearer" or not credentials.credentials.strip():
         raise AppError("AUTHENTICATION_REQUIRED", "登录凭据无效，请重新登录。", 401)
-    session = auth.resolve_session(credentials.credentials.strip())
+    session = await run_in_threadpool(auth.resolve_session, credentials.credentials.strip())
     if session is None:
         raise AppError("SESSION_INVALID", "登录已过期或失效，请重新登录。", 401)
+    bind_actor(session.user.user_id)
     return session
 
 
@@ -127,6 +142,7 @@ CurrentSessionDependency = Annotated[AuthenticatedSession, Depends(get_current_s
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    metrics = MetricsRegistry()
     abuse_protection = AbuseProtection(
         login_limit=settings.login_rate_limit,
         expensive_limit=settings.expensive_rate_limit,
@@ -141,6 +157,7 @@ def create_app() -> FastAPI:
         get_knowledge_bases()
         get_conversations()
         get_auth_repository()
+        get_audit_repository()
         if settings.demo_seed_path is not None:
             await run_in_threadpool(seed_demo_document, settings.demo_seed_path, get_service())
         yield
@@ -158,12 +175,14 @@ def create_app() -> FastAPI:
         allow_origins=settings.frontend_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "DELETE"],
-        allow_headers=["Content-Type", "Authorization"],
+        allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
+        expose_headers=["X-Request-ID"],
     )
     app.add_middleware(
         SecurityBoundaryMiddleware,
         max_body_bytes=settings.max_request_body_mb * 1024 * 1024,
     )
+    app.add_middleware(ObservabilityMiddleware, metrics=metrics)
     install_error_handlers(app)
 
     @app.get("/api/health", response_model=HealthResponse)
@@ -179,6 +198,62 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/api/health/live", response_model=LivenessResponse)
+    async def liveness() -> LivenessResponse:
+        return LivenessResponse()
+
+    @app.get("/api/health/ready", response_model=ReadinessResponse)
+    async def readiness(
+        response: Response,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+        knowledge_bases: KnowledgeBasesDependency,
+        conversations: ConversationsDependency,
+    ) -> ReadinessResponse:
+        checks: dict[str, str] = {}
+        for name, check in (
+            ("auth_store", auth.has_users),
+            ("audit_store", audit.verify),
+            ("knowledge_base_registry", knowledge_bases.list),
+            (
+                "conversation_store",
+                lambda: conversations.list_conversations(DEFAULT_KNOWLEDGE_BASE_ID),
+            ),
+        ):
+            try:
+                await run_in_threadpool(check)
+                checks[name] = "ok"
+            except Exception:
+                checks[name] = "failed"
+        status = "ready" if all(value == "ok" for value in checks.values()) else "not_ready"
+        if status == "not_ready":
+            response.status_code = 503
+        return ReadinessResponse(status=status, checks=checks)
+
+    @app.get("/api/system/metrics", response_model=MetricsResponse)
+    async def system_metrics(current: CurrentSessionDependency) -> MetricsResponse:
+        _require_admin(current.user)
+        return MetricsResponse(**metrics.snapshot())
+
+    @app.get("/api/audit/events", response_model=list[AuditEventResponse])
+    async def list_audit_events(
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+        offset: PageOffset = 0,
+        limit: PageLimit = 50,
+        action: Annotated[str | None, Query(max_length=80, pattern=r"^[a-z][a-z0-9_.-]+$")] = None,
+        result: Annotated[str | None, Query(pattern=r"^(success|denied|failed)$")] = None,
+    ) -> list[AuditEventResponse]:
+        _require_admin(current.user)
+        events = await run_in_threadpool(
+            audit.list,
+            offset=offset,
+            limit=limit,
+            action=action,
+            result=result,
+        )
+        return [AuditEventResponse(**event) for event in events]
+
     @app.get("/api/auth/bootstrap", response_model=AuthBootstrapStatus)
     async def auth_bootstrap_status(auth: AuthRepositoryDependency) -> AuthBootstrapStatus:
         return AuthBootstrapStatus(required=not auth.has_users())
@@ -187,6 +262,7 @@ def create_app() -> FastAPI:
     async def bootstrap_auth(
         payload: AuthBootstrapRequest,
         auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
     ) -> AuthTokenResponse:
         try:
             session = await run_in_threadpool(
@@ -197,6 +273,13 @@ def create_app() -> FastAPI:
             )
         except ValueError as exc:
             raise AppError("AUTH_BOOTSTRAP_COMPLETED", "管理员初始化已经完成。", 409) from exc
+        await _record_audit(
+            audit,
+            "auth.bootstrap",
+            session.user,
+            "user",
+            session.user.user_id,
+        )
         return _auth_token_response(session)
 
     @app.post("/api/auth/login", response_model=AuthTokenResponse)
@@ -204,19 +287,51 @@ def create_app() -> FastAPI:
         payload: AuthLoginRequest,
         request: Request,
         auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
     ) -> AuthTokenResponse:
-        abuse_protection.check_login(_client_key(request), payload.username)
+        try:
+            abuse_protection.check_login(_client_key(request), payload.username)
+        except AppError:
+            await _record_audit(
+                audit,
+                "auth.login_rate_limited",
+                None,
+                "user",
+                None,
+                result="denied",
+                metadata={"target_actor_hash": _anonymous_actor(payload.username)},
+            )
+            raise
         session = await run_in_threadpool(auth.authenticate, payload.username, payload.password)
         if session is None:
+            await _record_audit(
+                audit,
+                "auth.login",
+                None,
+                "user",
+                None,
+                result="denied",
+                metadata={"target_actor_hash": _anonymous_actor(payload.username)},
+            )
             raise AppError("INVALID_CREDENTIALS", "用户名或密码错误。", 401)
+        bind_actor(session.user.user_id)
+        await _record_audit(
+            audit,
+            "auth.login",
+            session.user,
+            "session",
+            None,
+        )
         return _auth_token_response(session)
 
     @app.post("/api/auth/logout", status_code=204)
     async def logout(
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
     ) -> None:
         await run_in_threadpool(auth.revoke_session, current.token)
+        await _record_audit(audit, "auth.logout", current.user, "session", None)
 
     @app.get("/api/auth/me", response_model=UserResponse)
     async def current_user(current: CurrentSessionDependency) -> UserResponse:
@@ -238,6 +353,7 @@ def create_app() -> FastAPI:
         payload: MemberCreate,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
     ) -> UserResponse:
         _require_admin(current.user)
         try:
@@ -250,6 +366,14 @@ def create_app() -> FastAPI:
             )
         except ValueError as exc:
             raise AppError("USERNAME_CONFLICT", "用户名已存在。", 409) from exc
+        await _record_audit(
+            audit,
+            "member.create",
+            current.user,
+            "user",
+            user.user_id,
+            metadata={"role": user.role, "target_actor_hash": _anonymous_actor(user.user_id)},
+        )
         return _user_response(user)
 
     @app.put("/api/members/{user_id}", response_model=UserResponse)
@@ -258,6 +382,7 @@ def create_app() -> FastAPI:
         payload: MemberUpdate,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
     ) -> UserResponse:
         _require_admin(current.user)
         try:
@@ -275,6 +400,18 @@ def create_app() -> FastAPI:
             raise AppError("MEMBER_NOT_FOUND", "未找到该成员。", 404) from exc
         if user is None:
             raise AppError("MEMBER_NOT_FOUND", "未找到该成员。", 404)
+        await _record_audit(
+            audit,
+            "member.update",
+            current.user,
+            "user",
+            user.user_id,
+            metadata={
+                "role": user.role,
+                "active": user.active,
+                "target_actor_hash": _anonymous_actor(user.user_id),
+            },
+        )
         return _user_response(user)
 
     @app.post("/api/documents", response_model=DocumentInfo, status_code=201)
@@ -283,6 +420,7 @@ def create_app() -> FastAPI:
         service: ServiceDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
     ) -> DocumentInfo:
         _require_knowledge_base_access(auth, current.user, DEFAULT_KNOWLEDGE_BASE_ID)
         return await _upload_document(
@@ -291,7 +429,9 @@ def create_app() -> FastAPI:
             DEFAULT_KNOWLEDGE_BASE_ID,
             settings,
             abuse_protection,
-            current.user.user_id,
+            metrics,
+            audit,
+            current.user,
         )
 
     @app.get("/api/documents", response_model=list[DocumentInfo])
@@ -327,6 +467,7 @@ def create_app() -> FastAPI:
         knowledge_bases: KnowledgeBasesDependency,
         service: ServiceDependency,
         current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
     ) -> KnowledgeBaseResponse:
         _require_admin(current.user)
         try:
@@ -337,6 +478,13 @@ def create_app() -> FastAPI:
             )
         except ValueError as exc:
             raise AppError("KNOWLEDGE_BASE_NAME_CONFLICT", "知识库名称已存在。", 409) from exc
+        await _record_audit(
+            audit,
+            "knowledge_base.create",
+            current.user,
+            "knowledge_base",
+            record.knowledge_base_id,
+        )
         return await _knowledge_base_response(record, service)
 
     @app.get("/api/knowledge-bases/{knowledge_base_id}", response_model=KnowledgeBaseResponse)
@@ -382,6 +530,7 @@ def create_app() -> FastAPI:
         knowledge_bases: KnowledgeBasesDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
     ) -> None:
         _require_admin(current.user)
         await _require_knowledge_base(knowledge_bases, knowledge_base_id)
@@ -389,6 +538,14 @@ def create_app() -> FastAPI:
             await run_in_threadpool(auth.grant_knowledge_base, user_id, knowledge_base_id)
         except (LookupError, ValueError) as exc:
             raise AppError("MEMBER_NOT_FOUND", "未找到可授权的成员。", 404) from exc
+        await _record_audit(
+            audit,
+            "knowledge_base.member_grant",
+            current.user,
+            "knowledge_base",
+            knowledge_base_id,
+            metadata={"target_actor_hash": _anonymous_actor(user_id)},
+        )
 
     @app.delete(
         "/api/knowledge-bases/{knowledge_base_id}/members/{user_id}",
@@ -400,6 +557,7 @@ def create_app() -> FastAPI:
         knowledge_bases: KnowledgeBasesDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
     ) -> None:
         _require_admin(current.user)
         await _require_knowledge_base(knowledge_bases, knowledge_base_id)
@@ -407,6 +565,14 @@ def create_app() -> FastAPI:
             await run_in_threadpool(auth.revoke_knowledge_base, user_id, knowledge_base_id)
         except ValueError as exc:
             raise AppError("MEMBER_NOT_FOUND", "未找到可撤销的成员。", 404) from exc
+        await _record_audit(
+            audit,
+            "knowledge_base.member_revoke",
+            current.user,
+            "knowledge_base",
+            knowledge_base_id,
+            metadata={"target_actor_hash": _anonymous_actor(user_id)},
+        )
 
     @app.put("/api/knowledge-bases/{knowledge_base_id}", response_model=KnowledgeBaseResponse)
     async def update_knowledge_base(
@@ -415,6 +581,7 @@ def create_app() -> FastAPI:
         knowledge_bases: KnowledgeBasesDependency,
         service: ServiceDependency,
         current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
     ) -> KnowledgeBaseResponse:
         _require_admin(current.user)
         await _require_knowledge_base(knowledge_bases, knowledge_base_id)
@@ -429,6 +596,13 @@ def create_app() -> FastAPI:
             raise AppError("KNOWLEDGE_BASE_NAME_CONFLICT", "知识库名称已存在。", 409) from exc
         if record is None:
             raise AppError("KNOWLEDGE_BASE_NOT_FOUND", "未找到该知识库。", 404)
+        await _record_audit(
+            audit,
+            "knowledge_base.update",
+            current.user,
+            "knowledge_base",
+            knowledge_base_id,
+        )
         return await _knowledge_base_response(record, service)
 
     @app.delete("/api/knowledge-bases/{knowledge_base_id}", status_code=204)
@@ -439,6 +613,7 @@ def create_app() -> FastAPI:
         conversations: ConversationsDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
     ) -> None:
         _require_admin(current.user)
         await _require_knowledge_base(knowledge_bases, knowledge_base_id)
@@ -452,6 +627,13 @@ def create_app() -> FastAPI:
             raise AppError("KNOWLEDGE_BASE_NOT_EMPTY", "请先删除知识库中的文档和会话。", 409)
         await run_in_threadpool(knowledge_bases.delete, knowledge_base_id)
         await run_in_threadpool(auth.remove_knowledge_base, knowledge_base_id)
+        await _record_audit(
+            audit,
+            "knowledge_base.delete",
+            current.user,
+            "knowledge_base",
+            knowledge_base_id,
+        )
 
     @app.post(
         "/api/knowledge-bases/{knowledge_base_id}/documents",
@@ -465,6 +647,7 @@ def create_app() -> FastAPI:
         service: ServiceDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
     ) -> DocumentInfo:
         await _require_accessible_knowledge_base(
             knowledge_bases, auth, current.user, knowledge_base_id
@@ -475,7 +658,9 @@ def create_app() -> FastAPI:
             knowledge_base_id,
             settings,
             abuse_protection,
-            current.user.user_id,
+            metrics,
+            audit,
+            current.user,
         )
 
     @app.get(
@@ -549,9 +734,17 @@ def create_app() -> FastAPI:
         service: ServiceDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
     ) -> None:
         _require_knowledge_base_access(auth, current.user, DEFAULT_KNOWLEDGE_BASE_ID)
-        await _delete_document(document_id, service, DEFAULT_KNOWLEDGE_BASE_ID, settings)
+        await _delete_document(
+            document_id,
+            service,
+            DEFAULT_KNOWLEDGE_BASE_ID,
+            settings,
+            audit,
+            current.user,
+        )
 
     @app.delete(
         "/api/knowledge-bases/{knowledge_base_id}/documents/{document_id}",
@@ -564,11 +757,19 @@ def create_app() -> FastAPI:
         service: ServiceDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
     ) -> None:
         await _require_accessible_knowledge_base(
             knowledge_bases, auth, current.user, knowledge_base_id
         )
-        await _delete_document(document_id, service, knowledge_base_id, settings)
+        await _delete_document(
+            document_id,
+            service,
+            knowledge_base_id,
+            settings,
+            audit,
+            current.user,
+        )
 
     @app.post("/api/query", response_model=QueryResponse)
     async def query(
@@ -588,6 +789,7 @@ def create_app() -> FastAPI:
             DEFAULT_KNOWLEDGE_BASE_ID,
             settings,
             abuse_protection,
+            metrics,
             current.user.user_id,
         )
 
@@ -616,6 +818,7 @@ def create_app() -> FastAPI:
             knowledge_base_id,
             settings,
             abuse_protection,
+            metrics,
             current.user.user_id,
         )
 
@@ -804,33 +1007,50 @@ async def _upload_document(
     knowledge_base_id: str,
     settings,
     abuse_protection: AbuseProtection,
-    user_id: str,
+    metrics: MetricsRegistry,
+    audit: AuditRepository,
+    user: UserRecord,
 ) -> DocumentInfo:
-    abuse_protection.check_expensive(user_id)
-    content = await file.read(settings.max_upload_mb * 1024 * 1024 + 1)
-    if len(content) > settings.max_upload_mb * 1024 * 1024:
-        raise AppError("FILE_TOO_LARGE", f"文件不能超过 {settings.max_upload_mb} MB。", 413)
-    filename = validate_upload(
-        file.filename,
-        file.content_type,
-        content,
-        max_filename_chars=settings.max_filename_chars,
-    )
-    with abuse_protection.concurrency.slot():
-        result = await run_in_threadpool(
-            service.index_document,
-            filename,
+    abuse_protection.check_expensive(user.user_id)
+    started = time.perf_counter()
+    try:
+        content = await file.read(settings.max_upload_mb * 1024 * 1024 + 1)
+        if len(content) > settings.max_upload_mb * 1024 * 1024:
+            raise AppError("FILE_TOO_LARGE", f"文件不能超过 {settings.max_upload_mb} MB。", 413)
+        filename = validate_upload(
+            file.filename,
+            file.content_type,
             content,
-            knowledge_base_id,
+            max_filename_chars=settings.max_filename_chars,
         )
-    scope = KnowledgeBaseScope(knowledge_base_id, settings.upload_path)
-    scope.migrate_legacy_uploads()
-    extension = filename.rsplit(".", maxsplit=1)[-1].lower()
-    await run_in_threadpool(
-        write_private_file,
-        scope.upload_path / f"{result.document_id}.{extension}",
-        content,
-    )
+        with abuse_protection.concurrency.slot():
+            result = await run_in_threadpool(
+                service.index_document,
+                filename,
+                content,
+                knowledge_base_id,
+            )
+        scope = KnowledgeBaseScope(knowledge_base_id, settings.upload_path)
+        scope.migrate_legacy_uploads()
+        extension = filename.rsplit(".", maxsplit=1)[-1].lower()
+        await run_in_threadpool(
+            write_private_file,
+            scope.upload_path / f"{result.document_id}.{extension}",
+            content,
+        )
+    except Exception:
+        metrics.record_index(_duration_ms(started), failed=True)
+        await _record_audit(
+            audit,
+            "document.upload",
+            user,
+            "knowledge_base",
+            knowledge_base_id,
+            result="failed",
+        )
+        raise
+    metrics.record_index(_duration_ms(started), failed=False)
+    await _record_audit(audit, "document.upload", user, "document", result.document_id)
     return result
 
 
@@ -839,6 +1059,8 @@ async def _delete_document(
     service: RAGServiceProtocol,
     knowledge_base_id: str,
     settings,
+    audit: AuditRepository,
+    user: UserRecord,
 ) -> None:
     deleted = await run_in_threadpool(service.delete_document, document_id, knowledge_base_id)
     if not deleted:
@@ -847,6 +1069,7 @@ async def _delete_document(
     scope.migrate_legacy_uploads()
     for path in scope.upload_path.glob(f"{document_id}.*"):
         path.unlink(missing_ok=True)
+    await _record_audit(audit, "document.delete", user, "document", document_id)
 
 
 async def _execute_recorded_query(
@@ -856,6 +1079,7 @@ async def _execute_recorded_query(
     knowledge_base_id: str,
     settings,
     abuse_protection: AbuseProtection,
+    metrics: MetricsRegistry,
     user_id: str,
 ) -> QueryResponse:
     abuse_protection.check_expensive(user_id)
@@ -881,6 +1105,8 @@ async def _execute_recorded_query(
                 knowledge_base_id,
             )
     except AppError as exc:
+        failure_latency = {"total": _duration_ms(started)}
+        metrics.record_rag(failure_latency, failed=True)
         record = await run_in_threadpool(
             conversations.record,
             conversation_id=conversation["conversation_id"],
@@ -889,7 +1115,7 @@ async def _execute_recorded_query(
             status="failed",
             answer=None,
             sources=[],
-            latency_ms={"total": round((time.perf_counter() - started) * 1000, 2)},
+            latency_ms=failure_latency,
             models={
                 "embedding": settings.embedding_model,
                 "reranker": settings.reranker_model,
@@ -915,6 +1141,7 @@ async def _execute_recorded_query(
         if result.answer_status in {"answered", "insufficient_evidence", "source_conflict"}
         else "failed"
     )
+    metrics.record_rag(result.latency_ms, failed=record_status == "failed")
     record = await run_in_threadpool(
         conversations.record,
         conversation_id=conversation["conversation_id"],
@@ -937,3 +1164,33 @@ async def _execute_recorded_query(
             "record_id": record["record_id"],
         }
     )
+
+
+async def _record_audit(
+    audit: AuditRepository,
+    action: str,
+    actor: UserRecord | None,
+    resource_type: str,
+    resource_id: str | None,
+    *,
+    result: str = "success",
+    metadata: dict[str, str | bool | int | float] | None = None,
+) -> None:
+    await run_in_threadpool(
+        audit.record,
+        action,
+        actor_id=actor.user_id if actor is not None else None,
+        actor_role=actor.role if actor is not None else None,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        result=result,
+        metadata=metadata,
+    )
+
+
+def _anonymous_actor(value: str) -> str:
+    return hash_identifier(value.casefold())
+
+
+def _duration_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 2)
