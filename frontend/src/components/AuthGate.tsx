@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Bot, KeyRound, LoaderCircle, ShieldCheck } from "lucide-react";
+import { Bot, Eye, EyeOff, KeyRound, LoaderCircle, ShieldCheck } from "lucide-react";
 import { api, setAccessToken } from "../api";
 import type { User } from "../types";
 
@@ -13,6 +13,7 @@ export function AuthGate({ bootstrapRequired, checking = false, onAuthenticated 
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
+  const [passwordVisible, setPasswordVisible] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
@@ -48,7 +49,13 @@ export function AuthGate({ bootstrapRequired, checking = false, onAuthenticated 
         <form className="auth-form" onSubmit={submit}>
           {bootstrapRequired ? <label>显示名称<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} minLength={1} maxLength={80} autoComplete="name" required placeholder="例如：项目管理员"/></label> : null}
           <label>用户名<input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={64} pattern="[A-Za-z0-9._-]+" autoCapitalize="none" autoComplete="username" required placeholder="3–64 位字母、数字或 . _ -"/></label>
-          <label>密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={bootstrapRequired ? 12 : 1} maxLength={128} autoComplete={bootstrapRequired ? "new-password" : "current-password"} required placeholder={bootstrapRequired ? "至少 12 位" : "输入密码"}/></label>
+          <label htmlFor="auth-password">密码</label>
+          <div className="auth-password-field">
+            <input id="auth-password" type={passwordVisible ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} minLength={bootstrapRequired ? 12 : 1} maxLength={128} autoComplete={bootstrapRequired ? "new-password" : "current-password"} required placeholder={bootstrapRequired ? "至少 12 位" : "输入密码"}/>
+            <button type="button" className="auth-password-toggle" aria-label={passwordVisible ? "隐藏密码" : "显示密码"} aria-pressed={passwordVisible} onClick={() => setPasswordVisible((visible) => !visible)}>
+              {passwordVisible ? <EyeOff size={18}/> : <Eye size={18}/>}
+            </button>
+          </div>
           {error ? <div className="auth-error" role="alert">{error}</div> : null}
           <button type="submit" disabled={submitting}>{submitting ? <><span className="auth-spinner" aria-hidden="true"><LoaderCircle size={16}/></span>处理中…</> : bootstrapRequired ? "创建管理员并进入" : "登录"}</button>
         </form>

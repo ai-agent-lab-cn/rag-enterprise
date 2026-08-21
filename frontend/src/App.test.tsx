@@ -130,6 +130,12 @@ test("首次启动可创建管理员并进入工作台", async () => {
   render(<App/>);
 
   expect(await screen.findByRole("heading", { name: "创建首位管理员" })).toBeInTheDocument();
+  const passwordInput = screen.getByLabelText("密码");
+  expect(passwordInput).toHaveAttribute("type", "password");
+  await userEvent.click(screen.getByRole("button", { name: "显示密码" }));
+  expect(passwordInput).toHaveAttribute("type", "text");
+  await userEvent.click(screen.getByRole("button", { name: "隐藏密码" }));
+  expect(passwordInput).toHaveAttribute("type", "password");
   await userEvent.type(screen.getByLabelText("显示名称"), "测试管理员");
   await userEvent.type(screen.getByLabelText("用户名"), "test-admin");
   await userEvent.type(screen.getByLabelText("密码"), "correct-horse-battery-staple");
