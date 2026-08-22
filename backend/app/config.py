@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     conversations_path: Path = Path("data/conversations/records.json")
     auth_path: Path = Path("data/auth/store.json")
     audit_path: Path = Path("data/audit/events.json")
+    database_url: str | None = None
+    required_database_schema_version: int = Field(default=1, ge=1)
     evaluation_reports_path: Path = Path("backend/evaluation/reports")
     demo_seed_path: Path | None = None
     collection_name: str = "rongrag_documents"
