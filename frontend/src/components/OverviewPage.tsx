@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { BarChart3, Bot, BookOpen, ChevronRight, Database, FileText, Link2, MessageCircle, SearchCheck, ShieldCheck } from "lucide-react";
+import { BarChart3, BookOpen, ChevronRight, Database, FileText, Link2, MessageCircle, SearchCheck, ShieldCheck } from "lucide-react";
 import { api } from "../api";
 import type { AnswerEvaluationSummary, ConversationSummary, KnowledgeBase, User } from "../types";
 
@@ -55,10 +55,10 @@ export function OverviewPage({ onOpen, onLogout, user }: { onOpen: (path: string
         </div>
 
         <div className="overview-panels">
-          <section className="overview-panel knowledge-overview"><header><h2>知识库</h2><button onClick={() => onOpen("/knowledge-bases")}>查看全部 <ChevronRight/></button></header><h3>最近更新</h3>
+          <section className="overview-panel knowledge-overview"><header><h2>知识库</h2><button onClick={() => onOpen("/knowledge-bases")}>查看全部 <ChevronRight/></button></header>
             {latestBase ? <button className="latest-base" onClick={() => onOpen(`/knowledge-bases/${latestBase.knowledge_base_id}`)}><span className="latest-base-icon"><FileText/></span><span className="latest-base-copy"><span><b>{latestBase.name}</b><em>{latestBase.is_default ? "默认" : "独立"}</em></span><small>{latestBase.description || "暂无说明"}</small></span><span className="latest-base-meta"><small>更新时间：{new Date(latestBase.updated_at).toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })}</small><b>{latestBase.document_count} 份资料</b></span></button> : <p className="empty-copy">还没有知识库。</p>}
           </section>
-          <section className="overview-panel quality-overview"><h2>质量监控</h2>{quality ? <div className="quality-overview-body"><span className={quality.passed ? "quality-status" : "quality-status is-failed"}>{quality.passed ? "主指标通过" : "存在未通过指标"}</span><div className="quality-details"><div><strong>{quality.dataset_version}</strong><p>Prompt {quality.prompt_version}<br/>+ {quality.models.generation}</p></div><span className="quality-bot"><Bot/></span></div><button onClick={() => onOpen("/evaluation/answers")}>查看回答评测详情 <ChevronRight/></button></div> : <p className="empty-copy">还没有正式回答评测报告。</p>}</section>
+          <section className="overview-panel quality-overview"><header><h2>质量监控</h2>{quality ? <span className={quality.passed ? "quality-status" : "quality-status is-failed"}>{quality.passed ? "主指标通过" : "存在未通过指标"}</span> : null}</header>{quality ? <div className="quality-overview-body"><div className="quality-details"><div><strong>{quality.dataset_version}</strong><p>Prompt {quality.prompt_version}<br/>+ {quality.models.generation}</p></div></div><button onClick={() => onOpen("/evaluation/answers")}>查看回答评测详情 <ChevronRight/></button></div> : <p className="empty-copy">还没有正式回答评测报告。</p>}</section>
         </div>
 
         <section className="quick-actions"><h2>快捷操作</h2><div>{ACTIONS.filter((action) => user.role === "admin" || action.path !== "/system").map((action) => <button key={action.path} onClick={() => onOpen(action.path)}><span className={`action-icon ${action.tone}`}>{action.icon}</span><b>{action.label}</b><small>{action.note}</small></button>)}</div></section>

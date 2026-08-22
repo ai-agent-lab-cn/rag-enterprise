@@ -21,6 +21,13 @@ const document = {
   chunk_count: 3,
   status: "ready",
 };
+const dataSource = {
+  data_source_id: "src_1", name: "profile.md", source_type: "file",
+  knowledge_base_id: "kb_default", knowledge_base_name: "默认知识库", enabled: true,
+  sync_status: "succeeded", document_count: 1, source_file_bytes: 2048,
+  last_synced_at: "2026-08-12T00:00:00Z", failure_reason: null,
+  updated_at: "2026-08-12T00:00:00Z", allowed_actions: ["detail", "edit", "disable", "sync"],
+};
 const answerSummary = {
   report_id: "answer-official",
   dataset_id: "answers",
@@ -140,9 +147,11 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
       }),
     );
   if (url === "/api/knowledge-bases/kb_default/documents/doc_1" && init?.method === "DELETE") return Promise.resolve(new Response(null, { status: 204 }));
-  if (url === "/api/knowledge-bases") return Promise.resolve(json([base]));
+  if ((url === "/api/knowledge-bases" || url.startsWith("/api/knowledge-bases?")) && !init?.method) return Promise.resolve(json([base]));
+  if (url === "/api/data-sources?offset=0&limit=21") return Promise.resolve(json([dataSource]));
   if (url === "/api/knowledge-bases/kb_default") return Promise.resolve(json(base));
   if (url === "/api/knowledge-bases/kb_default/documents") return Promise.resolve(json([document]));
+  if (url === "/api/knowledge-bases/kb_default/document-versions?offset=0&limit=100") return Promise.resolve(json([]));
   if (url === "/api/knowledge-bases/kb_default/conversations") return Promise.resolve(json([]));
   if (url === "/api/evaluations/answers/reports") return Promise.resolve(json([answerSummary]));
   if (url === "/api/knowledge-bases/kb_default/query" && init?.method === "POST")
@@ -202,6 +211,16 @@ test("侧栏展示真实可用的数据源管理入口", async () => {
   expect(await screen.findByRole("button", { name: "数据源管理" })).toBeInTheDocument();
 });
 
+test("数据源管理使用独立列表而非复用默认知识库详情", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/data-sources");
+  render(<App />);
+  expect(await screen.findByRole("region", { name: "数据源管理" })).toBeInTheDocument();
+  expect(await screen.findByText("profile.md")).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "同步状态" })).toBeInTheDocument();
+  expect(screen.queryByText("会话历史")).not.toBeInTheDocument();
+});
+
 test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
   window.history.replaceState({}, "", "/knowledge-bases");
@@ -211,11 +230,11 @@ test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
   expect(globalThis.document.querySelector(".page-heading.bases-toolbar")).toBeNull();
   expect(screen.queryByText("为不同项目建立隔离的资料、索引与会话空间。")).not.toBeInTheDocument();
   expect(globalThis.document.querySelector(".base-icon")).toBeNull();
-  await waitFor(() => expect(globalThis.document.querySelector(".base-title-row")).not.toBeNull());
-  const baseTitleRow = globalThis.document.querySelector(".base-title-row");
-  expect(baseTitleRow?.firstElementChild?.tagName).toBe("H2");
-  expect(baseTitleRow?.lastElementChild).toHaveClass("base-type-tag", "is-default");
-  await userEvent.click(await screen.findByRole("button", { name: /进入知识库/ }));
+  expect(await screen.findByRole("columnheader", { name: "知识库名称" })).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "存储空间" })).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "状态" })).toBeInTheDocument();
+  expect(screen.getByText("默认知识库", { selector: ".base-type-tag" })).toHaveClass("is-default");
+  await userEvent.click(await screen.findByRole("button", { name: "详情" }));
   expect(await screen.findByText("profile.md")).toBeInTheDocument();
   expect(window.location.pathname).toBe("/knowledge-bases/kb_default");
 });
@@ -237,7 +256,7 @@ test("删除资料使用站内确认弹框", async () => {
   render(<App />);
   await userEvent.click(await screen.findByRole("button", { name: "删除 profile.md" }));
   expect(screen.getByRole("button", { name: "在此知识库提问 →" }).closest(".detail-toolbar")).not.toBeNull();
-  expect(screen.queryByText("V2 迁移资料")).not.toBeInTheDocument();
+  expect(screen.getByText("V2 迁移资料")).toBeInTheDocument();
   expect(screen.getByRole("dialog", { name: "删除资料" })).toHaveTextContent("profile.md");
   await userEvent.click(screen.getByRole("button", { name: "确认删除" }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/documents/doc_1", expect.objectContaining({ method: "DELETE" })));

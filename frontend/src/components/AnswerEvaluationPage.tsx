@@ -81,7 +81,7 @@ export function AnswerEvaluationPage() {
     api.getAnswerEvaluation(selected).then(setReport, (reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取回答评测详情。"));
   }, [selected]);
   return (
-    <section className="evaluation-page" aria-label="回答评测">
+    <section className="evaluation-page answer-evaluation-page" aria-label="回答评测">
       <TopbarPortal>{report ? <span className={report.passed ? "release-badge" : "release-badge is-failed"}>{report.passed ? "回答质量门已通过" : "回答质量门未通过"}</span> : null}</TopbarPortal>
       {error ? (
         <div className="error-banner" role="alert">

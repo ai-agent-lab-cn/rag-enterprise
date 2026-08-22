@@ -7,6 +7,7 @@ import { AppNavigation, type AppPage } from "./components/AppNavigation";
 import { AuthGate } from "./components/AuthGate";
 import { ChatPage } from "./components/ChatPage";
 import { EvaluationPage } from "./components/EvaluationPage";
+import { DataSourcesPage } from "./components/DataSourcesPage";
 import { KnowledgeBaseDetailPage } from "./components/KnowledgeBaseDetailPage";
 import { KnowledgeBasesPage } from "./components/KnowledgeBasesPage";
 import { MembersPage } from "./components/MembersPage";
@@ -101,7 +102,7 @@ export default function App() {
   else if (pathname === "/settings/audit") content = <AuditPage />;
   else if (detailMatch) content = <KnowledgeBaseDetailPage id={detailMatch[1]} onOpen={navigate} />;
   else if (pathname === "/knowledge-bases") content = <KnowledgeBasesPage onOpen={navigate} showCreate={showKnowledgeBaseCreate} onCloseCreate={() => setShowKnowledgeBaseCreate(false)} />;
-  else if (pathname === "/data-sources") content = <KnowledgeBaseDetailPage id="kb_default" onOpen={navigate} />;
+  else if (pathname === "/data-sources") content = <DataSourcesPage onOpen={navigate} />;
   else if (pathname === "/evaluation/retrieval") content = <EvaluationPage />;
   else if (pathname === "/evaluation/answers") content = <AnswerEvaluationPage />;
   else if (pathname.startsWith("/chat")) content = <ChatPage conversationId={conversationMatch?.[1]} onOpen={navigate} />;

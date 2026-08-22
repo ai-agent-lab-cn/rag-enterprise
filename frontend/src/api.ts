@@ -2,6 +2,7 @@ import type {
   ApiErrorPayload,
   AuthToken,
   DocumentInfo,
+  DocumentVersion,
   EvaluationReport,
   EvaluationReportSummary,
   AnswerEvaluationReport,
@@ -15,6 +16,7 @@ import type {
   ReadinessStatus,
   SystemMetrics,
   AuditEvent,
+  DataSource,
 } from "./types";
 
 let accessToken: string | null = null;
@@ -96,7 +98,16 @@ export const api = {
   listEvaluations: () => request<EvaluationReportSummary[]>("/api/evaluations"),
   getEvaluation: (reportId: string) =>
     request<EvaluationReport>(`/api/evaluations/${encodeURIComponent(reportId)}`),
-  listKnowledgeBases: () => request<KnowledgeBase[]>("/api/knowledge-bases"),
+  listKnowledgeBases: (options: { name?: string; status?: string; sort?: "updated_desc" | "updated_asc"; offset?: number; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (options.name) params.set("name", options.name);
+    if (options.status) params.set("status", options.status);
+    if (options.sort && options.sort !== "updated_desc") params.set("sort", options.sort);
+    if (options.offset !== undefined) params.set("offset", String(options.offset));
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return request<KnowledgeBase[]>(`/api/knowledge-bases${query ? `?${query}` : ""}`);
+  },
   getKnowledgeBase: (id: string) => request<KnowledgeBase>(`/api/knowledge-bases/${id}`),
   createKnowledgeBase: (name: string, description: string) =>
     request<KnowledgeBase>("/api/knowledge-bases", {
@@ -111,7 +122,12 @@ export const api = {
       body: JSON.stringify({ name, description }),
     }),
   deleteKnowledgeBase: (id: string) => request<void>(`/api/knowledge-bases/${id}`, { method: "DELETE" }),
+  listDataSources: (offset = 0, limit = 20) => request<DataSource[]>(`/api/data-sources?offset=${offset}&limit=${limit}`),
+  setDataSourceEnabled: (id: string, enabled: boolean) => request<void>(`/api/data-sources/${id}/enabled?enabled=${enabled}`, { method: "PUT" }),
+  syncDataSource: (id: string) => request<DocumentInfo>(`/api/data-sources/${id}/sync`, { method: "POST" }),
+  deleteDataSource: (id: string) => request<void>(`/api/data-sources/${id}`, { method: "DELETE" }),
   listKnowledgeBaseDocuments: (id: string) => request<DocumentInfo[]>(`/api/knowledge-bases/${id}/documents`),
+  listKnowledgeBaseDocumentVersions: (id: string) => request<DocumentVersion[]>(`/api/knowledge-bases/${id}/document-versions?offset=0&limit=100`),
   uploadKnowledgeBaseDocument: (id: string, file: File) => {
     const body = new FormData();
     body.append("file", file);

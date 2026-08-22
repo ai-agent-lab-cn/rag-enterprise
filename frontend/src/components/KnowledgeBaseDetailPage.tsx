@@ -1,20 +1,27 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
-import type { ConversationSummary, DocumentInfo, KnowledgeBase } from "../types";
+import type { ConversationSummary, DocumentInfo, DocumentVersion, KnowledgeBase, User } from "../types";
 import { DocumentPanel } from "./DocumentPanel";
 
+const STATUS = { empty: "空库", processing: "处理中", ready: "可用", failed: "失败" } as const;
+const VERSION_STATUS = { pending: "等待索引", indexing: "索引中", ready: "可用", failed: "失败", superseded: "历史版本" } as const;
+function formatBytes(value: number) { if (!value) return "0 KB"; const divisor = value >= 1024 ** 2 ? 1024 ** 2 : 1024; return `${(value / divisor).toFixed(1)} ${divisor === 1024 ? "KB" : "MB"}`; }
+
 export function KnowledgeBaseDetailPage({ id, onOpen }: { id: string; onOpen: (path: string) => void }) {
-  const [base, setBase] = useState<KnowledgeBase | null>(null);
-  const [documents, setDocuments] = useState<DocumentInfo[]>([]);
-  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const load = useCallback(async () => { const [detail, docs, history] = await Promise.all([api.getKnowledgeBase(id), api.listKnowledgeBaseDocuments(id), api.listConversations(id)]); setBase(detail); setDocuments(docs); setConversations(history); }, [id]);
+  const [base, setBase] = useState<KnowledgeBase | null>(null); const [documents, setDocuments] = useState<DocumentInfo[]>([]);
+  const [versions, setVersions] = useState<DocumentVersion[]>([]); const [members, setMembers] = useState<User[]>([]);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const load = useCallback(async () => { const detail = await api.getKnowledgeBase(id); const [docs, history, versionItems, memberItems] = await Promise.all([api.listKnowledgeBaseDocuments(id), api.listConversations(id), api.listKnowledgeBaseDocumentVersions(id), detail.current_user_permission === "admin" ? api.listKnowledgeBaseMembers(id) : Promise.resolve([])]); setBase(detail); setDocuments(docs); setConversations(history); setVersions(versionItems); setMembers(memberItems); }, [id]);
   useEffect(() => { Promise.resolve().then(load).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取知识库。")); }, [load]);
   const upload = async (file: File) => { setBusy(true); setError(""); try { await api.uploadKnowledgeBaseDocument(id, file); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "上传失败。"); } finally { setBusy(false); } };
   const remove = async (documentId: string) => { setError(""); try { await api.deleteKnowledgeBaseDocument(id, documentId); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "删除失败。"); } };
   if (!base && !error) return <section className="product-page"><div className="evaluation-state pulse">正在读取知识库详情…</div></section>;
   return <section className="product-page"><div className="detail-toolbar"><button className="back-link" onClick={() => onOpen("/knowledge-bases")}>← 返回知识库</button>{base ? <button className="primary-action" onClick={() => onOpen(`/chat?knowledge_base_id=${id}`)}>在此知识库提问 →</button> : null}</div>{error ? <div className="error-banner" role="alert">{error}</div> : null}{base ? <>
-    <div className="detail-layout"><DocumentPanel documents={documents} loading={busy} onUpload={upload} onDelete={remove} /><section className="surface-card"><div className="section-heading"><div><span className="section-kicker">会话历史</span><h2>{conversations.length} 个会话</h2></div></div>{conversations.length ? <div className="compact-list">{conversations.map((item) => <button key={item.conversation_id} onClick={() => onOpen(`/chat/${item.conversation_id}?knowledge_base_id=${id}`)}><span><b>{item.title}</b><small>{new Date(item.updated_at).toLocaleString("zh-CN")}</small></span><em>{item.turn_count} 轮</em></button>)}</div> : <div className="evaluation-state small"><h2>还没有会话</h2><p>从这个知识库开始第一次提问。</p></div>}</section></div>
+    <section className="knowledge-detail-summary"><div><span>名称</span><strong>{base.name}</strong><em className="base-type-tag">{base.is_default ? "默认知识库" : "独立知识库"}</em></div><div><span>描述</span><strong>{base.description || "—"}</strong></div><div><span>文件占用</span><strong>{formatBytes(base.source_file_bytes)}</strong></div><div><span>索引状态</span><strong><i className={`status-tag status-${base.index_status}`}>{STATUS[base.index_status]}</i></strong></div><div><span>更新时间</span><strong>{new Date(base.updated_at).toLocaleString("zh-CN")}</strong></div></section>
+    <div className="detail-layout"><DocumentPanel documents={documents} loading={busy} onUpload={upload} onDelete={remove}/><div className="detail-stack">
+      <section className="surface-card"><div className="section-heading"><div><h2>文档与版本</h2></div><span className="count-pill">{versions.length}</span></div>{versions.length ? <div className="version-list">{versions.map((item) => <article key={item.document_version_id}><div><b>{item.filename}</b><span>V{item.version_number}{item.is_current ? <em>当前版本</em> : null}</span></div><div><span>{formatBytes(item.source_file_bytes)} · {item.content_sha256.slice(0, 10)}</span><span>{new Date(item.created_at).toLocaleString("zh-CN")}</span></div><strong className={`status-tag status-${item.status === "failed" ? "failed" : item.status === "indexing" || item.status === "pending" ? "processing" : "ready"}`}>{VERSION_STATUS[item.status]}</strong>{item.failure_reason ? <small title={item.failure_reason}>{item.failure_reason}</small> : null}</article>)}</div> : <p className="empty-copy">还没有文档版本。</p>}</section>
+      {base.current_user_permission === "admin" ? <section className="surface-card"><div className="section-heading"><div><h2>授权成员</h2></div><span className="count-pill">{members.length}</span></div>{members.length ? <div className="member-chips">{members.map((item) => <span key={item.user_id}>{item.display_name}<small>{item.username}</small></span>)}</div> : <p className="empty-copy">尚未单独授权成员；管理员仍可访问。</p>}</section> : null}
+      <section className="surface-card"><div className="section-heading"><div><h2>会话历史</h2></div><span className="count-pill">{conversations.length}</span></div>{conversations.length ? <div className="compact-list">{conversations.map((item) => <button key={item.conversation_id} onClick={() => onOpen(`/chat/${item.conversation_id}?knowledge_base_id=${id}`)}><span><b>{item.title}</b><small>{new Date(item.updated_at).toLocaleString("zh-CN")}</small></span><em>{item.turn_count} 轮</em></button>)}</div> : <p className="empty-copy">还没有会话。</p>}</section>
+    </div></div>
   </> : null}</section>;
 }

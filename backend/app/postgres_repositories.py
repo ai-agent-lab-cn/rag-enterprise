@@ -120,6 +120,94 @@ class PostgresKnowledgeBaseRepository:
         )
 
 
+class PostgresDataSourceRepository:
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+
+    def list(self, accessible_ids: set[str] | None = None) -> list[dict[str, object]]:
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                """SELECT s.data_source_id, s.name, s.source_type, s.knowledge_base_id,
+                          k.name AS knowledge_base_name, s.enabled, s.updated_at,
+                          count(DISTINCT d.document_id) AS document_count,
+                          COALESCE(sum(v.source_file_bytes), 0) AS source_file_bytes,
+                          j.finished_at AS last_synced_at, j.status AS sync_status,
+                          j.failure_reason
+                   FROM data_sources s JOIN knowledge_bases k USING (knowledge_base_id)
+                   LEFT JOIN documents d ON d.data_source_id = s.data_source_id
+                   LEFT JOIN document_versions v ON v.document_version_id = d.current_version_id
+                   LEFT JOIN LATERAL (
+                     SELECT status, finished_at, failure_reason FROM index_jobs
+                     WHERE data_source_id = s.data_source_id
+                     ORDER BY created_at DESC LIMIT 1
+                   ) j ON true
+                   GROUP BY s.data_source_id, k.name, j.finished_at, j.status, j.failure_reason
+                   ORDER BY s.updated_at DESC"""
+            ).fetchall()
+        if accessible_ids is not None:
+            rows = [row for row in rows if row["knowledge_base_id"] in accessible_ids]
+        return [dict(row) for row in rows]
+
+    def list_document_versions(self, knowledge_base_id: str) -> list[dict[str, object]]:
+        validate_knowledge_base_id(knowledge_base_id)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                """SELECT v.document_version_id, v.document_id, d.filename,
+                          v.version_number, v.content_sha256, v.source_file_bytes,
+                          s.source_type, v.status, v.failure_reason, v.created_at,
+                          v.indexed_at,
+                          COALESCE(d.current_version_id = v.document_version_id, false) AS is_current
+                   FROM document_versions v
+                   JOIN documents d USING (knowledge_base_id, document_id)
+                   JOIN data_sources s USING (data_source_id)
+                   WHERE v.knowledge_base_id = %s
+                   ORDER BY d.filename, v.version_number DESC""",
+                (knowledge_base_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_enabled(self, data_source_id: str, enabled: bool) -> bool:
+        with psycopg.connect(self.database_url) as connection:
+            result = connection.execute(
+                "UPDATE data_sources SET enabled = %s, updated_at = now() WHERE data_source_id = %s",
+                (enabled, data_source_id),
+            )
+        return result.rowcount > 0
+
+    def sync_payload(self, data_source_id: str) -> dict[str, object] | None:
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """SELECT s.knowledge_base_id, s.name, s.enabled, v.source_path
+                   FROM data_sources s
+                   LEFT JOIN documents d ON d.data_source_id = s.data_source_id
+                   LEFT JOIN document_versions v ON v.document_version_id = d.current_version_id
+                   WHERE s.data_source_id = %s""",
+                (data_source_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete(self, data_source_id: str) -> bool:
+        with psycopg.connect(self.database_url) as connection, connection.transaction():
+            row = connection.execute(
+                "SELECT count(*) FROM documents WHERE data_source_id = %s", (data_source_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            if row[0]:
+                raise ValueError("data source has documents")
+            active = connection.execute(
+                """SELECT EXISTS (SELECT 1 FROM index_jobs
+                   WHERE data_source_id = %s AND status IN ('queued','running'))""",
+                (data_source_id,),
+            ).fetchone()[0]
+            if active:
+                raise ValueError("data source has active jobs")
+            result = connection.execute(
+                "DELETE FROM data_sources WHERE data_source_id = %s", (data_source_id,)
+            )
+        return result.rowcount > 0
+
+
 class PostgresAuthRepository:
     def __init__(self, database_url: str, session_ttl_hours: int = 12):
         self.database_url = database_url

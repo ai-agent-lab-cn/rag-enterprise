@@ -84,6 +84,21 @@ class DocumentInfo(BaseModel):
     status: str = "ready"
 
 
+class DocumentVersionResponse(BaseModel):
+    document_version_id: str
+    document_id: str
+    filename: str
+    version_number: int
+    content_sha256: str
+    source_file_bytes: int
+    source_type: str
+    status: Literal["pending", "indexing", "ready", "failed", "superseded"]
+    failure_reason: str | None
+    created_at: datetime
+    indexed_at: datetime | None
+    is_current: bool
+
+
 class KnowledgeBaseCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     description: str = Field(default="", max_length=500)
@@ -119,6 +134,26 @@ class KnowledgeBaseResponse(BaseModel):
     is_default: bool
     document_count: int
     chunk_count: int
+    source_file_bytes: int = 0
+    index_status: Literal["empty", "processing", "ready", "failed"] = "empty"
+    current_user_permission: Literal["admin", "use"] = "use"
+    allowed_actions: list[Literal["detail", "edit", "delete"]] = ["detail"]
+
+
+class DataSourceResponse(BaseModel):
+    data_source_id: str
+    name: str
+    source_type: Literal["file", "object_storage", "web", "connector"]
+    knowledge_base_id: str
+    knowledge_base_name: str
+    enabled: bool
+    sync_status: Literal["idle", "queued", "running", "succeeded", "failed"]
+    document_count: int
+    source_file_bytes: int
+    last_synced_at: datetime | None
+    failure_reason: str | None
+    updated_at: datetime
+    allowed_actions: list[Literal["detail", "edit", "disable", "enable", "sync", "delete"]]
 
 
 class QueryRequest(BaseModel):

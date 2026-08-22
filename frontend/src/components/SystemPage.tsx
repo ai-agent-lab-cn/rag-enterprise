@@ -50,13 +50,13 @@ export function SystemPage() {
               <Database />
               <span>向量集合</span>
               <strong>{data.health.collection_ready ? "可用" : "不可用"}</strong>
-              <small>{data.health.models.embedding}</small>
+              <small title={data.health.models.embedding}>{data.health.models.embedding}</small>
             </article>
             <article>
               <Activity />
               <span>生成能力</span>
               <strong>{data.health.generation_ready ? "已配置" : "仅检索"}</strong>
-              <small>{data.health.models.generation}</small>
+              <small title={data.health.models.generation}>{data.health.models.generation}</small>
             </article>
             <article>
               <HardDriveDownload />

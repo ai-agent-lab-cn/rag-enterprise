@@ -6,6 +6,13 @@ export interface DocumentInfo {
   status: string;
 }
 
+export interface DocumentVersion {
+  document_version_id: string; document_id: string; filename: string; version_number: number;
+  content_sha256: string; source_file_bytes: number; source_type: string;
+  status: "pending" | "indexing" | "ready" | "failed" | "superseded";
+  failure_reason: string | null; created_at: string; indexed_at: string | null; is_current: boolean;
+}
+
 export interface Source {
   knowledge_base_id: string;
   chunk_id: string;
@@ -128,6 +135,19 @@ export interface KnowledgeBase {
   is_default: boolean;
   document_count: number;
   chunk_count: number;
+  source_file_bytes: number;
+  index_status: "empty" | "processing" | "ready" | "failed";
+  current_user_permission: "admin" | "use";
+  allowed_actions: Array<"detail" | "edit" | "delete">;
+}
+
+export interface DataSource {
+  data_source_id: string; name: string; source_type: "file" | "object_storage" | "web" | "connector";
+  knowledge_base_id: string; knowledge_base_name: string; enabled: boolean;
+  sync_status: "idle" | "queued" | "running" | "succeeded" | "failed";
+  document_count: number; source_file_bytes: number; last_synced_at: string | null;
+  failure_reason: string | null; updated_at: string;
+  allowed_actions: Array<"detail" | "edit" | "disable" | "enable" | "sync" | "delete">;
 }
 
 export interface ConversationSummary {
