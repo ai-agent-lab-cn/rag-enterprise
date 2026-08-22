@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bot, Circle, LogOut } from "lucide-react";
+import { Circle, Cpu, LogOut } from "lucide-react";
 import { api, hasAccessToken, setAccessToken } from "./api";
 import { AnswerEvaluationPage } from "./components/AnswerEvaluationPage";
 import { AuditPage } from "./components/AuditPage";
@@ -19,6 +19,7 @@ import "./styles.css";
 function pageFromPath(path: string): AppPage {
   // 路由状态只由 URL 派生，保证刷新、前进/后退和可分享链接行为一致。
   if (path.startsWith("/knowledge-bases")) return "knowledge-bases";
+  if (path === "/data-sources") return "data-sources";
   if (path === "/evaluation/retrieval") return "retrieval-evaluation";
   if (path === "/evaluation/answers") return "answer-evaluation";
   if (path.startsWith("/chat")) return "chat";
@@ -29,7 +30,6 @@ function pageFromPath(path: string): AppPage {
 }
 
 export default function App() {
-  const isDemo = import.meta.env.VITE_DEPLOYMENT_MODE === "demo";
   const [auth, setAuth] = useState<{ checking: boolean; bootstrapRequired: boolean; user: User | null }>({ checking: true, bootstrapRequired: false, user: null });
   const [location, setLocation] = useState(() => window.location.pathname + window.location.search);
   const pathname = location.split("?")[0];
@@ -72,10 +72,11 @@ export default function App() {
   else if (pathname === "/settings/audit") content = <AuditPage/>;
   else if (detailMatch) content = <KnowledgeBaseDetailPage id={detailMatch[1]} onOpen={navigate}/>;
   else if (pathname === "/knowledge-bases") content = <KnowledgeBasesPage onOpen={navigate}/>;
+  else if (pathname === "/data-sources") content = <KnowledgeBaseDetailPage id="kb_default" onOpen={navigate}/>;
   else if (pathname === "/evaluation/retrieval") content = <EvaluationPage/>;
   else if (pathname === "/evaluation/answers") content = <AnswerEvaluationPage/>;
   else if (pathname.startsWith("/chat")) content = <ChatPage conversationId={conversationMatch?.[1]} onOpen={navigate}/>;
-  else content = <OverviewPage onOpen={navigate}/>;
-  const pageLabel: Record<AppPage, string> = { overview: "项目概览", "knowledge-bases": "知识库管理", chat: "对话助手", "answer-evaluation": "回答评测", "retrieval-evaluation": "检索评测", system: "系统状态", members: "成员与权限", audit: "审计记录" };
-  return <main className="app-shell"><aside className="app-sidebar"><button className="brand" onClick={() => navigate("/overview")} aria-label="RongRAG 概览"><span className="brand-symbol"><Bot size={19}/></span><span><strong>RAG 系统</strong><small>Enterprise</small></span></button><AppNavigation page={page} onNavigate={navigate} isAdmin={auth.user.role === "admin"}/><div className="sidebar-foot"><Circle size={8} fill="currentColor"/> 服务运行正常</div></aside><div className="app-main"><header className="topbar"><div className="breadcrumb">{pageLabel[page]}{page === "chat" ? <span className="online-badge"><Circle size={7} fill="currentColor"/> 在线</span> : null}</div><div className="topbar-actions"><div className="system-state" title={isDemo ? "免费演示环境会休眠，重启或重新部署后数据可能重置" : undefined}><span className="state-dot"/><span className="environment-label environment-label-desktop">{isDemo ? "演示环境 · 数据可能重置" : "本地环境"}</span><span className="environment-label environment-label-mobile">{isDemo ? "Demo · 数据会重置" : "本地"}</span></div><span className="current-user" title={`${auth.user.display_name} · ${auth.user.role === "admin" ? "管理员" : "成员"}`}>{auth.user.display_name}</span><button className="logout-button" onClick={() => void logout()} aria-label="退出登录" title="退出登录"><LogOut size={16}/></button></div></header>{content}</div></main>;
+  else content = <OverviewPage onOpen={navigate} onLogout={() => void logout()} user={auth.user}/>;
+  const pageLabel: Record<AppPage, string> = { overview: "项目概览", "knowledge-bases": "知识库管理", "data-sources": "数据源管理", chat: "对话助手", "answer-evaluation": "回答评测", "retrieval-evaluation": "检索评测", system: "系统状态", members: "成员与权限", audit: "审计记录" };
+  return <main className={`app-shell page-${page}`}><aside className="app-sidebar"><button className="brand" onClick={() => navigate("/overview")} aria-label="RongRAG 概览"><span className="brand-symbol"><Cpu size={19}/></span><span><strong>RAG 系统</strong></span></button><AppNavigation page={page} onNavigate={navigate} isAdmin={auth.user.role === "admin"}/></aside><div className="app-main">{page !== "overview" ? <header className="topbar"><div className="breadcrumb">{pageLabel[page]}{page === "chat" ? <span className="online-badge"><Circle size={7} fill="currentColor"/> 在线</span> : null}</div><div className="topbar-actions"><span className="current-user" title={`${auth.user.display_name} · ${auth.user.role === "admin" ? "管理员" : "成员"}`}>{auth.user.display_name}</span><button className="logout-button" onClick={() => void logout()} aria-label="退出登录" title="退出登录"><LogOut size={16}/></button></div></header> : null}{content}</div></main>;
 }

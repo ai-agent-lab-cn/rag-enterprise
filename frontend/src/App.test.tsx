@@ -39,18 +39,21 @@ test("默认进入概览并汇总知识库、资料、会话和回答质量", as
   vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
   render(<App/>);
   expect(await screen.findByRole("heading", { name: "项目概览" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "概览" })).toBeInTheDocument();
+  expect(screen.getByText("应用")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "问答工作台" })).toBeInTheDocument();
+  expect(screen.queryByText("工作空间")).not.toBeInTheDocument();
   expect(await screen.findByText("默认知识库")).toBeInTheDocument();
-  expect(await screen.findByText("全部指标通过")).toBeInTheDocument();
+  expect(await screen.findByText("主指标通过")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /^上传资料/ })).toBeInTheDocument();
 });
 
-test("Demo 构建明确提示数据可能重置", async () => {
-  vi.stubEnv("VITE_DEPLOYMENT_MODE", "demo");
+test("侧栏展示真实可用的数据源管理入口", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
 
   render(<App/>);
 
-  expect(await screen.findByText("演示环境 · 数据可能重置")).toBeInTheDocument();
-  expect(screen.getByText("Demo · 数据会重置")).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "数据源管理" })).toBeInTheDocument();
 });
 
 test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
@@ -83,6 +86,10 @@ test("删除资料使用站内确认弹框", async () => {
 test("问答工作台使用所选知识库接口并渲染来源", async () => {
   const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
   window.history.replaceState({}, "", "/chat?knowledge_base_id=kb_default"); render(<App/>);
+  const basePicker = await screen.findByLabelText("当前知识库");
+  expect(basePicker.closest(".question-box")).not.toBeNull();
+  expect(screen.getByRole("tab", { name: /引用来源/ })).toHaveAttribute("aria-selected", "true");
+  expect(screen.queryByRole("tab", { name: /资料库/ })).not.toBeInTheDocument();
   await userEvent.type(await screen.findByLabelText("向知识库提问"), "系统如何工作？");
   await userEvent.click(screen.getByRole("button", { name: /提问/ }));
   expect(await screen.findByText("系统使用可追溯检索。")).toBeInTheDocument();
@@ -200,9 +207,15 @@ test("审计页展示哈希链事件且不展示业务正文", async () => {
 });
 
 test("普通成员不显示管理导航且直接访问时不请求管理接口", async () => {
-  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => String(input) === "/api/auth/me" ? Promise.resolve(json(member)) : Promise.resolve(json({ error: { message: "不应请求" } }, 500)));
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    if (String(input) === "/api/auth/me") return Promise.resolve(json(member));
+    if (String(input) === "/api/health") return Promise.resolve(json({ status: "ok", version: "1.0.0", collection_ready: true, generation_ready: false, models: { embedding: "embedding-test", reranker: "reranker-test", generation: "gemini-test" } }));
+    return Promise.resolve(json({ error: { message: "不应请求" } }, 500));
+  });
   window.history.replaceState({}, "", "/system"); render(<App/>);
   expect(await screen.findByRole("alert")).toHaveTextContent("无权访问管理页面");
   expect(screen.queryByRole("button", { name: "系统状态" })).not.toBeInTheDocument();
-  expect(fetchMock).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+  expect(fetchMock).not.toHaveBeenCalledWith("/api/health/ready", expect.anything());
+  expect(fetchMock).not.toHaveBeenCalledWith("/api/system/metrics", expect.anything());
 });

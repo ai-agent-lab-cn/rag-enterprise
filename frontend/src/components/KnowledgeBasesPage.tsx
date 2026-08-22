@@ -20,7 +20,8 @@ export function KnowledgeBasesPage({ onOpen }: { onOpen: (path: string) => void 
     finally { setCreating(false); }
   };
   return <section className="product-page" aria-labelledby="bases-title">
-    <header className="page-heading"><div><span className="eyebrow">多知识库管理</span><h1 id="bases-title">知识库</h1><p>为不同项目建立隔离的资料、索引与会话空间。</p></div><button className="page-action" type="button" onClick={() => setShowCreate(true)}>＋ 新建知识库</button></header>
+    <header className="page-heading"><div>
+    <p>为不同项目建立隔离的资料、索引与会话空间。</p></div><button className="page-action" type="button" onClick={() => setShowCreate(true)}>＋ 新建知识库</button></header>
     {error ? <div className="error-banner" role="alert">{error}</div> : null}
     {items === null && !error ? <div className="evaluation-state pulse">正在读取知识库…</div> : null}
     {items?.length === 0 ? <div className="evaluation-state"><h2>还没有知识库</h2><p>创建一个知识库后即可上传资料并开始问答。</p></div> : null}
