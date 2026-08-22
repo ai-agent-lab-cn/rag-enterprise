@@ -262,6 +262,9 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
 
     restore_url = os.getenv("TEST_RESTORE_DATABASE_URL")
     if restore_url:
+        with psycopg.connect(database_url) as connection:
+            source_user_count = connection.execute("SELECT count(*) FROM users").fetchone()[0]
+            source_chunk_count = connection.execute("SELECT count(*) FROM chunks").fetchone()[0]
         restored_database = restore_url.rsplit("/", maxsplit=1)[1]
         admin_url = restore_url.rsplit("/", maxsplit=1)[0] + "/postgres"
         with psycopg.connect(admin_url, autocommit=True) as connection:
@@ -274,6 +277,6 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
         restored_uploads = tmp_path / "restored-uploads"
         postgres_backup.restore_backup(backup, restore_url, restored_uploads)
         with psycopg.connect(restore_url) as connection:
-            assert connection.execute("SELECT count(*) FROM users").fetchone()[0] == 2
-            assert connection.execute("SELECT count(*) FROM chunks").fetchone()[0] == 2
+            assert connection.execute("SELECT count(*) FROM users").fetchone()[0] == source_user_count
+            assert connection.execute("SELECT count(*) FROM chunks").fetchone()[0] == source_chunk_count
         assert (restored_uploads / "kb_default/guide.md").read_text() == "changed"
