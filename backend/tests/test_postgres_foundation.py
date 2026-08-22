@@ -11,12 +11,33 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from backend.app.config import Settings
 from backend.app.database import apply_migrations, check_schema_version, migration_files
+from backend.app.postgres_documents import IndexWorker, PostgresAsyncRAGService
+from backend.app.postgres_repositories import (
+    PostgresAuthRepository,
+    PostgresKnowledgeBaseRepository,
+)
 from scripts import legacy_to_postgres, postgres_backup
 
 
+class FakeEmbedder:
+    model_name = "test/embedding"
+
+    def encode(self, texts: list[str]) -> list[list[float]]:
+        return [[0.1, 0.2, 0.3] for _ in texts]
+
+
+class FailingEmbedder(FakeEmbedder):
+    def encode(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("embedding failed")
+
+
 def test_migration_files_are_contiguous() -> None:
-    assert [path.name for path in migration_files()] == ["0001_postgres_foundation.sql"]
+    assert [path.name for path in migration_files()] == [
+        "0001_postgres_foundation.sql",
+        "0002_runtime_defaults.sql",
+    ]
 
 
 def test_source_fingerprint_changes_with_content(tmp_path: Path) -> None:
@@ -64,8 +85,8 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 1
-    check_schema_version(database_url, 1)
+    assert apply_migrations(database_url) == 2
+    check_schema_version(database_url, 2)
 
     now = "2026-08-22T00:00:00+00:00"
     auth = tmp_path / "auth/store.json"
@@ -178,6 +199,63 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
         ).fetchone()
         assert version == (len(b"production guide"), "uploads/kb_default/guide.md")
 
+    auth_repository = PostgresAuthRepository(database_url)
+    member = auth_repository.create_user("member", "long-enough-password", "Member", "member")
+    session = auth_repository.authenticate("member", "long-enough-password")
+    assert session is not None
+    assert auth_repository.resolve_session(session.token).user.user_id == member.user_id
+    assert auth_repository.revoke_session(session.token) is True
+    assert auth_repository.resolve_session(session.token) is None
+    knowledge_bases = PostgresKnowledgeBaseRepository(database_url)
+    created_base = knowledge_bases.create("Runtime KB", "PostgreSQL runtime")
+    assert auth_repository.grant_knowledge_base(member.user_id, created_base.knowledge_base_id)
+    assert auth_repository.can_access_knowledge_base(member, created_base.knowledge_base_id)
+
+    settings = Settings(
+        database_url=database_url,
+        upload_path=tmp_path / "uploads",
+        index_worker_id="test-worker",
+    )
+    service = PostgresAsyncRAGService(settings, FakeEmbedder(), object(), object())
+    queued = service.index_document("guide.md", b"updated production guide", "kb_default")
+    duplicate = service.index_document("guide.md", b"updated production guide", "kb_default")
+    assert queued.status == duplicate.status == "pending"
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT count(*) FROM index_jobs").fetchone()[0] == 1
+    worker = IndexWorker(settings, FakeEmbedder())
+    assert worker.run_once() is True
+    current = service.list_documents("kb_default")[0]
+    assert current.status == "ready"
+    assert current.chunk_count > 0
+    retrieved = service.store.query([0.1, 0.2, 0.3], 5, "kb_default")
+    assert retrieved
+    assert retrieved[0].metadata["document_id"] == queued.document_id
+    with psycopg.connect(database_url) as connection:
+        current_version_before_failure = connection.execute(
+            "SELECT current_version_id FROM documents WHERE knowledge_base_id = 'kb_default'"
+        ).fetchone()[0]
+
+    failure_settings = Settings(
+        database_url=database_url,
+        upload_path=tmp_path / "uploads",
+        index_worker_id="failing-worker",
+        index_job_max_attempts=1,
+    )
+    failure_service = PostgresAsyncRAGService(failure_settings, FakeEmbedder(), object(), object())
+    failure_service.index_document("guide.md", b"broken update", "kb_default")
+    assert IndexWorker(failure_settings, FailingEmbedder()).run_once() is True
+    with psycopg.connect(database_url) as connection:
+        assert (
+            connection.execute(
+                "SELECT current_version_id FROM documents WHERE knowledge_base_id = 'kb_default'"
+            ).fetchone()[0]
+            == current_version_before_failure
+        )
+        assert (
+            connection.execute("SELECT count(*) FROM document_versions WHERE status = 'failed'").fetchone()[0]
+            == 1
+        )
+
     upload.write_text("changed", encoding="utf-8")
     with pytest.raises(RuntimeError, match="目标数据库不是空库"):
         legacy_to_postgres.migrate(tmp_path, database_url, "rongrag_documents")
@@ -196,6 +274,6 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
         restored_uploads = tmp_path / "restored-uploads"
         postgres_backup.restore_backup(backup, restore_url, restored_uploads)
         with psycopg.connect(restore_url) as connection:
-            assert connection.execute("SELECT count(*) FROM users").fetchone()[0] == 1
+            assert connection.execute("SELECT count(*) FROM users").fetchone()[0] == 2
             assert connection.execute("SELECT count(*) FROM chunks").fetchone()[0] == 2
         assert (restored_uploads / "kb_default/guide.md").read_text() == "changed"

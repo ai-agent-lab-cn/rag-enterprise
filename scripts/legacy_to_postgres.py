@@ -14,7 +14,7 @@ import psycopg
 from pgvector.psycopg import register_vector
 from psycopg.types.json import Jsonb
 
-from backend.app.database import check_schema_version
+from backend.app.database import check_schema_version, migration_files
 
 BUSINESS_TABLES = (
     "users",
@@ -134,7 +134,7 @@ def migrate(data_root: Path, database_url: str, collection_name: str) -> dict[st
         document_id = str(metadata["document_id"])
         grouped[(knowledge_base_id, document_id)].append(chunk)
 
-    check_schema_version(database_url, 1)
+    check_schema_version(database_url, len(migration_files()))
     with psycopg.connect(database_url) as connection:
         register_vector(connection)
         with connection.transaction():
