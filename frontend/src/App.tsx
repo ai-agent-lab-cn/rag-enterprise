@@ -30,11 +30,23 @@ function pageFromPath(path: string): AppPage {
 }
 
 export default function App() {
-  const [auth, setAuth] = useState<{ checking: boolean; bootstrapRequired: boolean; user: User | null }>({ checking: true, bootstrapRequired: false, user: null });
+  const [auth, setAuth] = useState<{
+    checking: boolean;
+    bootstrapRequired: boolean;
+    user: User | null;
+  }>({ checking: true, bootstrapRequired: false, user: null });
   const [location, setLocation] = useState(() => window.location.pathname + window.location.search);
+  const [showKnowledgeBaseCreate, setShowKnowledgeBaseCreate] = useState(false);
   const pathname = location.split("?")[0];
   const page = pageFromPath(pathname);
-  useEffect(() => { const sync = () => setLocation(window.location.pathname + window.location.search); window.addEventListener("popstate", sync); return () => window.removeEventListener("popstate", sync); }, []);
+  useEffect(() => {
+    const sync = () => {
+      setLocation(window.location.pathname + window.location.search);
+      if (window.location.pathname !== "/knowledge-bases") setShowKnowledgeBaseCreate(false);
+    };
+    window.addEventListener("popstate", sync);
+    return () => window.removeEventListener("popstate", sync);
+  }, []);
   useEffect(() => {
     let active = true;
     const check = async () => {
@@ -45,7 +57,12 @@ export default function App() {
           return;
         }
         const status = await api.getBootstrapStatus();
-        if (active) setAuth({ checking: false, bootstrapRequired: status.required, user: null });
+        if (active)
+          setAuth({
+            checking: false,
+            bootstrapRequired: status.required,
+            user: null,
+          });
       } catch {
         if (active) setAuth({ checking: false, bootstrapRequired: false, user: null });
       }
@@ -53,30 +70,97 @@ export default function App() {
     const expire = () => setAuth({ checking: false, bootstrapRequired: false, user: null });
     window.addEventListener("rag-auth-expired", expire);
     void check();
-    return () => { active = false; window.removeEventListener("rag-auth-expired", expire); };
+    return () => {
+      active = false;
+      window.removeEventListener("rag-auth-expired", expire);
+    };
   }, []);
-  const navigate = (path: string) => { if (path !== window.location.pathname + window.location.search) window.history.pushState({}, "", path); setLocation(window.location.pathname + window.location.search); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const navigate = (path: string) => {
+    if (path !== window.location.pathname + window.location.search) window.history.pushState({}, "", path);
+    setLocation(window.location.pathname + window.location.search);
+    if (window.location.pathname !== "/knowledge-bases") setShowKnowledgeBaseCreate(false);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
   const logout = async () => {
-    try { await api.logout(); } catch { /* 本地仍清除令牌，避免失效会话继续留在界面。 */ }
+    try {
+      await api.logout();
+    } catch {
+      /* 本地仍清除令牌，避免失效会话继续留在界面。 */
+    }
     setAccessToken(null);
     setAuth({ checking: false, bootstrapRequired: false, user: null });
   };
-  if (auth.checking || !auth.user) return <AuthGate checking={auth.checking} bootstrapRequired={auth.bootstrapRequired} onAuthenticated={(user) => setAuth({ checking: false, bootstrapRequired: false, user })}/>;
+  if (auth.checking || !auth.user) return <AuthGate checking={auth.checking} bootstrapRequired={auth.bootstrapRequired} onAuthenticated={(user) => setAuth({ checking: false, bootstrapRequired: false, user })} />;
   const detailMatch = pathname.match(/^\/knowledge-bases\/([^/]+)$/);
   const conversationMatch = pathname.match(/^\/chat\/(conv_[a-f0-9]{16})$/);
   const adminPath = pathname === "/system" || pathname.startsWith("/settings/");
   let content;
-  if (adminPath && auth.user.role !== "admin") content = <PermissionDeniedPage onBack={() => navigate("/overview")}/>;
-  else if (pathname === "/system") content = <SystemPage/>;
-  else if (pathname === "/settings/members") content = <MembersPage currentUser={auth.user}/>;
-  else if (pathname === "/settings/audit") content = <AuditPage/>;
-  else if (detailMatch) content = <KnowledgeBaseDetailPage id={detailMatch[1]} onOpen={navigate}/>;
-  else if (pathname === "/knowledge-bases") content = <KnowledgeBasesPage onOpen={navigate}/>;
-  else if (pathname === "/data-sources") content = <KnowledgeBaseDetailPage id="kb_default" onOpen={navigate}/>;
-  else if (pathname === "/evaluation/retrieval") content = <EvaluationPage/>;
-  else if (pathname === "/evaluation/answers") content = <AnswerEvaluationPage/>;
-  else if (pathname.startsWith("/chat")) content = <ChatPage conversationId={conversationMatch?.[1]} onOpen={navigate}/>;
-  else content = <OverviewPage onOpen={navigate} onLogout={() => void logout()} user={auth.user}/>;
-  const pageLabel: Record<AppPage, string> = { overview: "项目概览", "knowledge-bases": "知识库管理", "data-sources": "数据源管理", chat: "对话助手", "answer-evaluation": "回答评测", "retrieval-evaluation": "检索评测", system: "系统状态", members: "成员与权限", audit: "审计记录" };
-  return <main className={`app-shell page-${page}`}><aside className="app-sidebar"><button className="brand" onClick={() => navigate("/overview")} aria-label="RongRAG 概览"><span className="brand-symbol"><Cpu size={19}/></span><span><strong>RAG 系统</strong></span></button><AppNavigation page={page} onNavigate={navigate} isAdmin={auth.user.role === "admin"}/></aside><div className="app-main">{page !== "overview" ? <header className="topbar"><div className="breadcrumb">{pageLabel[page]}{page === "chat" ? <span className="online-badge"><Circle size={7} fill="currentColor"/> 在线</span> : null}</div><div className="topbar-actions"><span className="current-user" title={`${auth.user.display_name} · ${auth.user.role === "admin" ? "管理员" : "成员"}`}>{auth.user.display_name}</span><button className="logout-button" onClick={() => void logout()} aria-label="退出登录" title="退出登录"><LogOut size={16}/></button></div></header> : null}{content}</div></main>;
+  if (adminPath && auth.user.role !== "admin") content = <PermissionDeniedPage onBack={() => navigate("/overview")} />;
+  else if (pathname === "/system") content = <SystemPage />;
+  else if (pathname === "/settings/members") content = <MembersPage currentUser={auth.user} />;
+  else if (pathname === "/settings/audit") content = <AuditPage />;
+  else if (detailMatch) content = <KnowledgeBaseDetailPage id={detailMatch[1]} onOpen={navigate} />;
+  else if (pathname === "/knowledge-bases") content = <KnowledgeBasesPage onOpen={navigate} showCreate={showKnowledgeBaseCreate} onCloseCreate={() => setShowKnowledgeBaseCreate(false)} />;
+  else if (pathname === "/data-sources") content = <KnowledgeBaseDetailPage id="kb_default" onOpen={navigate} />;
+  else if (pathname === "/evaluation/retrieval") content = <EvaluationPage />;
+  else if (pathname === "/evaluation/answers") content = <AnswerEvaluationPage />;
+  else if (pathname.startsWith("/chat")) content = <ChatPage conversationId={conversationMatch?.[1]} onOpen={navigate} />;
+  else content = <OverviewPage onOpen={navigate} onLogout={() => void logout()} user={auth.user} />;
+  const pageLabel: Record<AppPage, string> = {
+    overview: "项目概览",
+    "knowledge-bases": "知识库管理",
+    "data-sources": "数据源管理",
+    chat: "对话助手",
+    "answer-evaluation": "回答评测",
+    "retrieval-evaluation": "检索评测",
+    system: "系统状态",
+    members: "成员与权限",
+    audit: "审计记录",
+  };
+  return (
+    <main className={`app-shell page-${page}`}>
+      <aside className="app-sidebar">
+        <button className="brand" onClick={() => navigate("/overview")} aria-label="RongRAG 概览">
+          <span className="brand-symbol">
+            <Cpu size={19} />
+          </span>
+          <span>
+            <strong>RAG 系统</strong>
+          </span>
+        </button>
+        <AppNavigation page={page} onNavigate={navigate} isAdmin={auth.user.role === "admin"} />
+      </aside>
+      <div className="app-main">
+        {page !== "overview" ? (
+          <header className="topbar">
+            <div className="topbar-primary">
+              <h1 className="breadcrumb">
+                {pageLabel[page]}
+                {page === "chat" ? (
+                  <span className="online-badge">
+                    <Circle size={7} fill="currentColor" /> 在线
+                  </span>
+                ) : null}
+              </h1>
+              <div className="topbar-context" id="topbar-context" />
+              {pathname === "/knowledge-bases" ? (
+                <button className="page-action" type="button" onClick={() => setShowKnowledgeBaseCreate(true)}>
+                  ＋ 新建知识库
+                </button>
+              ) : null}
+            </div>
+            <div className="topbar-actions">
+              <span className="current-user" title={`${auth.user.display_name} · ${auth.user.role === "admin" ? "管理员" : "成员"}`}>
+                {auth.user.display_name}
+              </span>
+              <button className="logout-button" onClick={() => void logout()} aria-label="退出登录" title="退出登录">
+                <LogOut size={16} />
+              </button>
+            </div>
+          </header>
+        ) : null}
+        {content}
+      </div>
+    </main>
+  );
 }
