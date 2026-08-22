@@ -11,6 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from .audit import AuditRepository
 from .auth import AuthenticatedSession, AuthRepository, UserRecord
 from .config import get_settings
+from .database import check_schema_version
 from .demo import seed_demo_document
 from .errors import AppError, install_error_handlers
 from .evaluation_reports import EvaluationReportRepository
@@ -152,6 +153,12 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        if settings.database_url:
+            await run_in_threadpool(
+                check_schema_version,
+                settings.database_url,
+                settings.required_database_schema_version,
+            )
         # 服务启动时迁移 V2 原始文件；只移动根目录文件，不扫描其他知识库目录。
         KnowledgeBaseScope(DEFAULT_KNOWLEDGE_BASE_ID, settings.upload_path).migrate_legacy_uploads()
         get_knowledge_bases()
