@@ -15,6 +15,7 @@ export function SourceCard({ source, index, defaultOpen = false }: SourceCardPro
         <span className="source-main">
           <strong>{source.filename}</strong>
           <small>{location} · 片段 {source.chunk_index}</small>
+          <span className="source-summary">{source.summary}</span>
         </span>
         <span className="score-pair">
           <span title="向量粗召回相似度">召回 {source.retrieval_score.toFixed(3)}</span>
