@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rag-postgres-restore-BACKUP_ID
+  namespace: rag-enterprise
+  labels:
+    app.kubernetes.io/part-of: rag-enterprise
+    app.kubernetes.io/component: restore
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: rag-enterprise
+        app.kubernetes.io/component: restore
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: restore
+          image: rag-enterprise-backend:issue-84
+          imagePullPolicy: Never
+          args:
+            - python
+            - -m
+            - scripts.postgres_backup
+            - restore
+            - --backup
+            - /backups/rag-postgres-BACKUP_ID.tar.gz
+            - --uploads-target
+            - /tmp/restored-uploads
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: rag-restore-drill-secrets, key: DATABASE_URL}}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: backups, mountPath: /backups, readOnly: true}
+            - {name: restored-uploads, mountPath: /tmp/restored-uploads}
+      volumes:
+        - name: backups
+          persistentVolumeClaim: {claimName: rag-backups}
+        - name: restored-uploads
+          emptyDir: {}

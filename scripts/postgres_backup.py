@@ -12,6 +12,7 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 ARCHIVE_VERSION = 1
 MANIFEST_NAME = "manifest.json"
@@ -26,8 +27,24 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _run(command: list[str]) -> None:
-    subprocess.run(command, check=True)
+def _connection_environment(database_url: str) -> tuple[dict[str, str], str]:
+    parsed = urlsplit(database_url)
+    if parsed.scheme not in {"postgres", "postgresql"}:
+        raise ValueError("数据库连接必须使用 PostgreSQL URL")
+    environment = os.environ.copy()
+    values = {
+        "PGHOST": parsed.hostname,
+        "PGPORT": str(parsed.port) if parsed.port else None,
+        "PGUSER": unquote(parsed.username) if parsed.username else None,
+        "PGPASSWORD": unquote(parsed.password) if parsed.password else None,
+        "PGDATABASE": parsed.path.lstrip("/") or None,
+    }
+    environment.update({key: value for key, value in values.items() if value is not None})
+    return environment, values["PGDATABASE"] or "postgres"
+
+
+def _run(command: list[str], *, environment: dict[str, str] | None = None) -> None:
+    subprocess.run(command, check=True, env=environment)
 
 
 def create_backup(database_url: str, uploads_root: Path, output: Path) -> dict[str, Any]:
@@ -36,6 +53,7 @@ def create_backup(database_url: str, uploads_root: Path, output: Path) -> dict[s
     with tempfile.TemporaryDirectory() as temporary_name:
         temporary = Path(temporary_name)
         dump = temporary / DATABASE_DUMP_NAME
+        environment, _database_name = _connection_environment(database_url)
         _run(
             [
                 "pg_dump",
@@ -44,8 +62,8 @@ def create_backup(database_url: str, uploads_root: Path, output: Path) -> dict[s
                 "--no-privileges",
                 "--file",
                 str(dump),
-                database_url,
-            ]
+            ],
+            environment=environment,
         )
         entries = [{"path": DATABASE_DUMP_NAME, "size": dump.stat().st_size, "sha256": sha256_file(dump)}]
         upload_files: list[Path] = []
@@ -142,16 +160,19 @@ def restore_backup(backup: Path, database_url: str, uploads_target: Path) -> dic
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with destination.open("xb") as target:
                     shutil.copyfileobj(source, target)
+        environment, database_name = _connection_environment(database_url)
         _run(
             [
                 "pg_restore",
                 "--exit-on-error",
                 "--no-owner",
                 "--no-privileges",
+                "--no-comments",
                 "--dbname",
-                database_url,
+                database_name,
                 str(temporary / DATABASE_DUMP_NAME),
-            ]
+            ],
+            environment=environment,
         )
         restored_uploads = temporary / "uploads"
         uploads_target.mkdir(parents=True, exist_ok=True)

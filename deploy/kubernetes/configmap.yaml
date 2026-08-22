@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-enterprise-config
+  namespace: rag-enterprise
+  labels:
+    app.kubernetes.io/part-of: rag-enterprise
+data:
+  APP_ENVIRONMENT: test
+  FRONTEND_ORIGIN: http://127.0.0.1:30080
+  REQUIRED_DATABASE_SCHEMA_VERSION: "2"
+  EMBEDDING_MODEL: shibing624/text2vec-base-chinese
+  RERANKER_MODEL: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+  GENERATION_MODEL: gemini-3.6-flash
+  INDEX_JOB_MAX_ATTEMPTS: "3"
+  INDEX_JOB_STALE_SECONDS: "900"
+  OMP_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  TOKENIZERS_PARALLELISM: "false"
