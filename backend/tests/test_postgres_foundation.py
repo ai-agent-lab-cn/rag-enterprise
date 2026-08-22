@@ -58,7 +58,9 @@ def test_postgres_backup_manifest_and_tamper_detection(
     uploads.mkdir()
     (uploads / "guide.md").write_text("guide", encoding="utf-8")
 
-    def fake_run(command: list[str]) -> None:
+    def fake_run(command: list[str], *, environment: dict[str, str] | None = None) -> None:
+        assert environment is not None
+        assert "postgresql://" not in " ".join(command)
         dump_path = Path(command[command.index("--file") + 1])
         dump_path.write_bytes(b"postgres-dump")
 

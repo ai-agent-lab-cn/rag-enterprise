@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rag-enterprise
+  labels:
+    app.kubernetes.io/name: rag-enterprise
+    app.kubernetes.io/part-of: rag-enterprise

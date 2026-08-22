@@ -1,4 +1,5 @@
 .env
+deploy/kubernetes/secret.yaml
 .env.*
 !.env.example
 .venv/

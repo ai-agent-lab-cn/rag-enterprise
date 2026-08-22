@@ -2014,6 +2014,7 @@ dev = [
     { name = "httpx" },
     { name = "ipykernel" },
     { name = "pytest" },
+    { name = "pyyaml" },
     { name = "ruff" },
 ]
 
@@ -2037,6 +2038,7 @@ dev = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "ipykernel", specifier = ">=7.3.0" },
     { name = "pytest", specifier = ">=8.4.0" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "ruff", specifier = ">=0.12.0" },
 ]
 

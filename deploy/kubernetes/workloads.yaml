@@ -1,0 +1,252 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rag-database-migrate
+  namespace: rag-enterprise
+  labels:
+    app.kubernetes.io/part-of: rag-enterprise
+    app.kubernetes.io/component: migrate
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: rag-enterprise
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: migrate
+          image: rag-enterprise-backend:issue-84
+          imagePullPolicy: Never
+          args: [python, -m, scripts.database_migrate, apply]
+          envFrom:
+            - configMapRef: {name: rag-enterprise-config}
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: rag-enterprise-secrets, key: DATABASE_URL}}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-backend
+  namespace: rag-enterprise
+  labels:
+    app.kubernetes.io/part-of: rag-enterprise
+    app.kubernetes.io/component: backend
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/component: backend}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: rag-enterprise
+        app.kubernetes.io/component: backend
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: backend
+          image: rag-enterprise-backend:issue-84
+          imagePullPolicy: Never
+          ports: [{name: http, containerPort: 8000}]
+          envFrom:
+            - configMapRef: {name: rag-enterprise-config}
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: rag-enterprise-secrets, key: DATABASE_URL}}
+            - name: GEMINI_API_KEY
+              valueFrom: {secretKeyRef: {name: rag-enterprise-secrets, key: GEMINI_API_KEY, optional: true}}
+          startupProbe:
+            httpGet: {path: /api/health/live, port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /api/health/ready, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /api/health/live, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: uploads, mountPath: /app/data/uploads}
+      volumes:
+        - name: uploads
+          persistentVolumeClaim: {claimName: rag-uploads}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: rag-enterprise
+  labels:
+    app.kubernetes.io/part-of: rag-enterprise
+spec:
+  selector: {app.kubernetes.io/component: backend}
+  ports: [{name: http, port: 8000, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-worker
+  namespace: rag-enterprise
+  labels:
+    app.kubernetes.io/part-of: rag-enterprise
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/component: worker}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: rag-enterprise
+        app.kubernetes.io/component: worker
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: worker
+          image: rag-enterprise-backend:issue-84
+          imagePullPolicy: Never
+          args: [python, -m, scripts.index_worker]
+          envFrom:
+            - configMapRef: {name: rag-enterprise-config}
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: rag-enterprise-secrets, key: DATABASE_URL}}
+            - name: INDEX_WORKER_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+          startupProbe:
+            exec:
+              command: [python, -m, scripts.database_migrate, check, --required-version, "2"]
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: [python, -m, scripts.database_migrate, check, --required-version, "2"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: [sh, -c, "kill -0 1"]
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 500m, memory: 1Gi}
+            limits: {cpu: "3", memory: 3Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: uploads, mountPath: /app/data/uploads}
+      volumes:
+        - name: uploads
+          persistentVolumeClaim: {claimName: rag-uploads}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-frontend
+  namespace: rag-enterprise
+  labels:
+    app.kubernetes.io/part-of: rag-enterprise
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/component: frontend}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: rag-enterprise
+        app.kubernetes.io/component: frontend
+    spec:
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: frontend
+          image: rag-enterprise-frontend:issue-84
+          imagePullPolicy: Never
+          ports: [{name: http, containerPort: 8080}]
+          startupProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 3
+            failureThreshold: 20
+          readinessProbe:
+            httpGet: {path: /api/health/ready, port: http}
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: {app.kubernetes.io/component: backend}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-frontend
+  namespace: rag-enterprise
+  labels:
+    app.kubernetes.io/part-of: rag-enterprise
+spec:
+  type: NodePort
+  selector: {app.kubernetes.io/component: frontend}
+  ports: [{name: http, port: 80, targetPort: http, nodePort: 30080}]

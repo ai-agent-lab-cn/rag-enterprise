@@ -8,6 +8,12 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 RUN groupadd --system app && useradd --system --gid app --home-dir /app app \
+    && export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates postgresql-common \
+    && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
+    && apt-get install --yes --no-install-recommends postgresql-client-16 \
+    && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir uv==0.12.1
 
 COPY pyproject.toml uv.lock ./
