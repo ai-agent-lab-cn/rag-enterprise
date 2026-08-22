@@ -7,7 +7,7 @@
 1. 停止写入，并保留现有 `data/` 目录的只读快照。
 2. 为目标 PostgreSQL 创建空数据库并安装 `vector` 扩展权限。
 3. 执行 `uv run python scripts/database_migrate.py apply`。
-4. 执行 `uv run python scripts/database_migrate.py check --required-version 1`。
+4. 执行 `uv run python scripts/database_migrate.py check --required-version 2`。
 5. 使用原有备份工具备份旧 `data/`，验证备份并完成一次空目录隔离恢复。
 
 ## 全量导入与校验
@@ -42,7 +42,20 @@ uv run python scripts/postgres_backup.py verify \
 uv run python scripts/postgres_backup.py restore \
   --backup /secure/off-host/rag-postgres.tar.gz \
   --uploads-target /tmp/rag-restored/uploads
-uv run python scripts/database_migrate.py check --required-version 1
+uv run python scripts/database_migrate.py check --required-version 2
 ```
 
 切换前若校验失败，保持旧版本和旧数据目录不变，删除失败的隔离目标后重新处理；不得在原目标上局部补写。运行时正式切换属于下一阶段，不在本阶段执行。
+
+## PostgreSQL 运行模式
+
+首次启动或升级时，先显式执行迁移，再启动 API、Worker 和前端：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
+  --profile tools run --rm migrate
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
+  up --detach --wait postgres backend worker frontend
+```
+
+API 上传只创建不可变原始文件、文档版本和幂等任务。Worker 使用 `FOR UPDATE SKIP LOCKED` 领取任务；成功后在同一事务中写入 chunks 并切换当前版本，失败重试达到上限后保留上一可用版本。

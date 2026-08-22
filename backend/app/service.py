@@ -23,6 +23,8 @@ from .store import ChromaStore, RetrievedChunk
 
 
 class RAGServiceProtocol(Protocol):
+    stores_source_files: bool
+
     def index_document(
         self, filename: str, content: bytes, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
     ) -> DocumentInfo: ...
@@ -42,6 +44,7 @@ class RAGServiceProtocol(Protocol):
 
 
 class RAGService:
+    stores_source_files = False
     def __init__(
         self,
         settings: Settings,

@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,7 +21,10 @@ class Settings(BaseSettings):
     auth_path: Path = Path("data/auth/store.json")
     audit_path: Path = Path("data/audit/events.json")
     database_url: str | None = None
-    required_database_schema_version: int = Field(default=1, ge=1)
+    required_database_schema_version: int = Field(default=2, ge=1)
+    index_worker_id: str = "worker-local"
+    index_job_max_attempts: int = Field(default=3, ge=1, le=10)
+    index_job_stale_seconds: int = Field(default=900, ge=60, le=86400)
     evaluation_reports_path: Path = Path("backend/evaluation/reports")
     demo_seed_path: Path | None = None
     collection_name: str = "rongrag_documents"
@@ -37,6 +40,11 @@ class Settings(BaseSettings):
     session_ttl_hours: int = Field(default=12, ge=1, le=168)
     frontend_origin: str = "http://localhost:5173"
     app_environment: Literal["development", "test", "production"] = "development"
+
+    @field_validator("demo_seed_path", mode="before")
+    @classmethod
+    def empty_demo_seed_is_disabled(cls, value: object) -> object:
+        return None if value == "" else value
 
     @model_validator(mode="after")
     def validate_security_boundaries(self) -> "Settings":

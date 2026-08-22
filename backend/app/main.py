@@ -24,6 +24,8 @@ from .knowledge_bases import (
 )
 from .models import get_embedding_model, get_generator, get_reranker
 from .observability import MetricsRegistry, ObservabilityMiddleware, bind_actor, hash_identifier
+from .postgres_documents import PostgresAsyncRAGService
+from .postgres_repositories import PostgresAuthRepository, PostgresKnowledgeBaseRepository
 from .schemas import (
     AnswerEvaluationReportResponse,
     AnswerEvaluationReportSummary,
@@ -60,6 +62,13 @@ from .store import ChromaStore
 @lru_cache
 def get_service() -> RAGService:
     settings = get_settings()
+    if settings.database_url:
+        return PostgresAsyncRAGService(
+            settings=settings,
+            embedder=get_embedding_model(),
+            reranker=get_reranker(),
+            generator=get_generator(),
+        )
     return RAGService(
         settings=settings,
         store=ChromaStore(settings.chroma_path, settings.collection_name, settings.embedding_model),
@@ -85,7 +94,10 @@ EvaluationReportsDependency = Annotated[EvaluationReportRepository, Depends(get_
 
 @lru_cache
 def get_knowledge_bases() -> KnowledgeBaseRepository:
-    return KnowledgeBaseRepository(get_settings().knowledge_bases_path)
+    settings = get_settings()
+    if settings.database_url:
+        return PostgresKnowledgeBaseRepository(settings.database_url)
+    return KnowledgeBaseRepository(settings.knowledge_bases_path)
 
 
 KnowledgeBasesDependency = Annotated[KnowledgeBaseRepository, Depends(get_knowledge_bases)]
@@ -102,6 +114,8 @@ ConversationsDependency = Annotated[ConversationRepository, Depends(get_conversa
 @lru_cache
 def get_auth_repository() -> AuthRepository:
     settings = get_settings()
+    if settings.database_url:
+        return PostgresAuthRepository(settings.database_url, settings.session_ttl_hours)
     return AuthRepository(settings.auth_path, settings.session_ttl_hours)
 
 
@@ -657,9 +671,7 @@ def create_app() -> FastAPI:
         auth: AuthRepositoryDependency,
         audit: AuditRepositoryDependency,
     ) -> DocumentInfo:
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         return await _upload_document(
             file,
             service,
@@ -684,9 +696,7 @@ def create_app() -> FastAPI:
         offset: PageOffset = 0,
         limit: PageLimit = 50,
     ) -> list[DocumentInfo]:
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         documents = await run_in_threadpool(service.list_documents, knowledge_base_id)
         return _page(documents, offset, limit)
 
@@ -767,9 +777,7 @@ def create_app() -> FastAPI:
         auth: AuthRepositoryDependency,
         audit: AuditRepositoryDependency,
     ) -> None:
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         await _delete_document(
             document_id,
             service,
@@ -814,9 +822,7 @@ def create_app() -> FastAPI:
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
     ) -> QueryResponse:
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         if payload.rerank_k > payload.retrieve_k:
             raise AppError("INVALID_TOP_K", "rerank_k 不能大于 retrieve_k。")
         return await _execute_recorded_query(
@@ -843,9 +849,7 @@ def create_app() -> FastAPI:
         offset: PageOffset = 0,
         limit: PageLimit = 50,
     ) -> list[ConversationSummaryResponse]:
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         items = await run_in_threadpool(conversations.list_conversations, knowledge_base_id)
         return [ConversationSummaryResponse(**item) for item in _page(items, offset, limit)]
 
@@ -861,9 +865,7 @@ def create_app() -> FastAPI:
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
     ) -> ConversationDetailResponse:
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         try:
             item = await run_in_threadpool(
                 conversations.get_conversation,
@@ -888,9 +890,7 @@ def create_app() -> FastAPI:
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
     ) -> None:
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         try:
             deleted = await run_in_threadpool(
                 conversations.delete_conversation,
@@ -914,9 +914,7 @@ def create_app() -> FastAPI:
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
     ) -> AnswerRecordResponse:
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         try:
             item = await run_in_threadpool(
                 conversations.get_answer,
@@ -1038,14 +1036,15 @@ async def _upload_document(
                 content,
                 knowledge_base_id,
             )
-        scope = KnowledgeBaseScope(knowledge_base_id, settings.upload_path)
-        scope.migrate_legacy_uploads()
-        extension = filename.rsplit(".", maxsplit=1)[-1].lower()
-        await run_in_threadpool(
-            write_private_file,
-            scope.upload_path / f"{result.document_id}.{extension}",
-            content,
-        )
+        if not getattr(service, "stores_source_files", False):
+            scope = KnowledgeBaseScope(knowledge_base_id, settings.upload_path)
+            scope.migrate_legacy_uploads()
+            extension = filename.rsplit(".", maxsplit=1)[-1].lower()
+            await run_in_threadpool(
+                write_private_file,
+                scope.upload_path / f"{result.document_id}.{extension}",
+                content,
+            )
     except Exception:
         metrics.record_index(_duration_ms(started), failed=True)
         await _record_audit(
