@@ -1,28 +1,37 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type { KnowledgeBase } from "../types";
 import { Modal } from "./Modal";
 
+const STATUS_LABEL = { empty: "空库", processing: "处理中", ready: "可用", failed: "失败" } as const;
+function formatBytes(bytes: number) { if (!bytes) return "0 KB"; const units = ["B", "KB", "MB", "GB"]; const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 3); return `${(bytes / 1024 ** exponent).toFixed(exponent ? 1 : 0)} ${units[exponent]}`; }
+
 export function KnowledgeBasesPage({ onOpen, showCreate, onCloseCreate }: { onOpen: (path: string) => void; showCreate: boolean; onCloseCreate: () => void }) {
   const [items, setItems] = useState<KnowledgeBase[] | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [name, setName] = useState(""); const [description, setDescription] = useState("");
+  const [search, setSearch] = useState(""); const [status, setStatus] = useState("");
+  const [sort, setSort] = useState<"updated_desc" | "updated_asc">("updated_desc");
+  const [page, setPage] = useState(0); const [hasNext, setHasNext] = useState(false); const pageSize = 10;
+  const [editing, setEditing] = useState<KnowledgeBase | null>(null); const [deleting, setDeleting] = useState<KnowledgeBase | null>(null);
   const [error, setError] = useState("");
-
-  const load = () => api.listKnowledgeBases().then(setItems, (reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取知识库。"));
-  useEffect(() => { void load(); }, []);
-  const create = async (event: FormEvent) => {
-    event.preventDefault(); setCreating(true); setError("");
-    try { const item = await api.createKnowledgeBase(name.trim(), description.trim()); setName(""); setDescription(""); onCloseCreate(); await load(); onOpen(`/knowledge-bases/${item.knowledge_base_id}`); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "创建失败。"); }
-    finally { setCreating(false); }
-  };
+  const load = useCallback(() => { setError(""); setItems(null); return api.listKnowledgeBases({ name: search.trim(), status, sort, offset: page * pageSize, limit: pageSize + 1 }).then((result) => { setHasNext(result.length > pageSize); setItems(result.slice(0, pageSize)); }, (reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取知识库。")); }, [search, status, sort, page]);
+  useEffect(() => { const timer = window.setTimeout(() => void load(), 250); return () => window.clearTimeout(timer); }, [load]);
+  const create = async (event: FormEvent) => { event.preventDefault(); setBusy(true); setError(""); try { const item = await api.createKnowledgeBase(name.trim(), description.trim()); setName(""); setDescription(""); onCloseCreate(); await load(); onOpen(`/knowledge-bases/${item.knowledge_base_id}`); } catch (reason) { setError(reason instanceof Error ? reason.message : "创建失败。"); } finally { setBusy(false); } };
+  const saveEdit = async (event: FormEvent) => { event.preventDefault(); if (!editing) return; setBusy(true); try { await api.updateKnowledgeBase(editing.knowledge_base_id, name.trim(), description.trim()); setEditing(null); setName(""); setDescription(""); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "保存失败。"); } finally { setBusy(false); } };
+  const remove = async () => { if (!deleting) return; setBusy(true); try { await api.deleteKnowledgeBase(deleting.knowledge_base_id); setDeleting(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "删除失败。"); } finally { setBusy(false); } };
+  const closeEdit = () => { if (!busy) { setEditing(null); setName(""); setDescription(""); } };
   return <section className="product-page" aria-label="知识库管理">
-    {error ? <div className="error-banner" role="alert">{error}</div> : null}
+    <div className="management-toolbar"><label><span className="sr-only">搜索知识库</span><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder="搜索知识库名称" /></label><select aria-label="状态筛选" value={status} onChange={(event) => { setStatus(event.target.value); setPage(0); }}><option value="">全部状态</option><option value="empty">空库</option><option value="processing">处理中</option><option value="ready">可用</option><option value="failed">失败</option></select><select aria-label="更新时间排序" value={sort} onChange={(event) => { setSort(event.target.value as typeof sort); setPage(0); }}><option value="updated_desc">最近更新</option><option value="updated_asc">最早更新</option></select></div>
+    {error ? <div className="error-banner" role="alert">{error} <button onClick={() => void load()}>重试</button></div> : null}
     {items === null && !error ? <div className="evaluation-state pulse">正在读取知识库…</div> : null}
-    {items?.length === 0 ? <div className="evaluation-state"><h2>还没有知识库</h2><p>创建一个知识库后即可上传资料并开始问答。</p></div> : null}
-    <div className="base-grid">{items?.map((item) => <article className="base-card" key={item.knowledge_base_id}><div className="base-title-row"><h2>{item.name}</h2><span className={`base-type-tag ${item.is_default ? "is-default" : "is-independent"}`}>{item.is_default ? "默认知识库" : "独立知识库"}</span></div><p>{item.description || "暂无说明"}</p><dl><div><dt>资料</dt><dd>{item.document_count}</dd></div><div><dt>片段</dt><dd>{item.chunk_count}</dd></div></dl><button onClick={() => onOpen(`/knowledge-bases/${item.knowledge_base_id}`)}>进入知识库 →</button></article>)}</div>
-    {showCreate ? <Modal title="新建知识库" description="知识库之间的资料、索引和会话相互隔离。" onClose={() => { if (!creating) onCloseCreate(); }}><form className="modal-form" onSubmit={create}><label htmlFor="base-name">知识库名称</label><input autoFocus id="base-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：产品研发资料" maxLength={80} required /><label htmlFor="base-description">用途说明 <span>选填</span></label><textarea id="base-description" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="简要说明该知识库包含的内容" maxLength={500} rows={4}/><footer className="modal-actions"><button className="secondary-action" type="button" onClick={onCloseCreate} disabled={creating}>取消</button><button className="primary-action" disabled={creating || !name.trim()}>{creating ? "创建中…" : "确认创建"}</button></footer></form></Modal> : null}
+    {items?.length === 0 ? <div className="evaluation-state"><h2>{search.trim() || status ? "没有符合条件的知识库" : "还没有知识库"}</h2><p>{search.trim() || status ? "调整搜索词或筛选条件后重试。" : "创建一个知识库后即可上传资料并开始问答。"}</p></div> : null}
+    {items?.length ? <div className="management-table-wrap"><table className="management-table"><thead><tr><th>知识库名称</th><th>描述</th><th>文档数量</th><th>存储空间</th><th>状态</th><th>权限</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{items.map((item) => { const itemStatus = item.index_status ?? (item.document_count ? "ready" : "empty"); const actions = item.allowed_actions ?? ["detail"]; return <tr key={item.knowledge_base_id}><td><button className="table-primary-link" onClick={() => onOpen(`/knowledge-bases/${item.knowledge_base_id}`)}>{item.name}</button><span className={`base-type-tag ${item.is_default ? "is-default" : "is-independent"}`}>{item.is_default ? "默认知识库" : "独立知识库"}</span></td><td><span className="truncate-cell" title={item.description || "—"}>{item.description || "—"}</span></td><td>{item.document_count}</td><td>{formatBytes(item.source_file_bytes ?? 0)}</td><td><span className={`status-tag status-${itemStatus}`}>{STATUS_LABEL[itemStatus]}</span></td><td>{item.current_user_permission === "admin" ? "管理员" : "可使用"}</td><td>{new Date(item.updated_at).toLocaleString("zh-CN")}</td><td><div className="table-actions"><button onClick={() => onOpen(`/knowledge-bases/${item.knowledge_base_id}`)}>详情</button>{actions.includes("edit") ? <button onClick={() => { setEditing(item); setName(item.name); setDescription(item.description); }}>编辑</button> : null}{item.current_user_permission === "admin" ? <button disabled={!actions.includes("delete")} title={item.is_default ? "默认知识库不能删除" : item.document_count ? "请先删除有效文档" : itemStatus === "processing" ? "索引任务运行中" : ""} onClick={() => setDeleting(item)}>删除</button> : null}</div></td></tr>; })}</tbody></table></div> : null}
+    {items && (page > 0 || hasNext) ? <nav className="management-pagination" aria-label="知识库分页"><button disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>上一页</button><span>第 {page + 1} 页</span><button disabled={!hasNext} onClick={() => setPage((value) => value + 1)}>下一页</button></nav> : null}
+    {showCreate ? <Modal title="新建知识库" description="知识库之间的资料、索引和会话相互隔离。" onClose={() => { if (!busy) onCloseCreate(); }}><BaseForm name={name} description={description} busy={busy} submitText="确认创建" onName={setName} onDescription={setDescription} onCancel={onCloseCreate} onSubmit={create}/></Modal> : null}
+    {editing ? <Modal title="编辑知识库" description="知识库类型不可修改。" onClose={closeEdit}><BaseForm name={name} description={description} busy={busy} submitText="保存" onName={setName} onDescription={setDescription} onCancel={closeEdit} onSubmit={saveEdit}/></Modal> : null}
+    {deleting ? <Modal title="删除知识库" description={`将删除“${deleting.name}”。该操作不会静默删除关联文档或索引。`} onClose={() => { if (!busy) setDeleting(null); }}><footer className="modal-actions"><button className="secondary-action" type="button" onClick={() => setDeleting(null)} disabled={busy}>取消</button><button className="danger-action" type="button" onClick={() => void remove()} disabled={busy}>{busy ? "删除中…" : `确认删除 ${deleting.name}`}</button></footer></Modal> : null}
   </section>;
 }
+
+function BaseForm({ name, description, busy, submitText, onName, onDescription, onCancel, onSubmit }: { name: string; description: string; busy: boolean; submitText: string; onName: (value: string) => void; onDescription: (value: string) => void; onCancel: () => void; onSubmit: (event: FormEvent) => void }) { return <form className="modal-form" onSubmit={onSubmit}><label htmlFor="base-name">知识库名称</label><input autoFocus id="base-name" value={name} onChange={(event) => onName(event.target.value)} maxLength={80} required/><label htmlFor="base-description">描述 <span>选填</span></label><textarea id="base-description" value={description} onChange={(event) => onDescription(event.target.value)} maxLength={500} rows={4}/><footer className="modal-actions"><button className="secondary-action" type="button" onClick={onCancel} disabled={busy}>取消</button><button className="primary-action" disabled={busy || !name.trim()}>{busy ? "处理中…" : submitText}</button></footer></form>; }

@@ -25,7 +25,11 @@ from .knowledge_bases import (
 from .models import get_embedding_model, get_generator, get_reranker
 from .observability import MetricsRegistry, ObservabilityMiddleware, bind_actor, hash_identifier
 from .postgres_documents import PostgresAsyncRAGService
-from .postgres_repositories import PostgresAuthRepository, PostgresKnowledgeBaseRepository
+from .postgres_repositories import (
+    PostgresAuthRepository,
+    PostgresDataSourceRepository,
+    PostgresKnowledgeBaseRepository,
+)
 from .schemas import (
     AnswerEvaluationReportResponse,
     AnswerEvaluationReportSummary,
@@ -37,7 +41,9 @@ from .schemas import (
     AuthTokenResponse,
     ConversationDetailResponse,
     ConversationSummaryResponse,
+    DataSourceResponse,
     DocumentInfo,
+    DocumentVersionResponse,
     EvaluationReportResponse,
     EvaluationReportSummary,
     HealthResponse,
@@ -101,6 +107,15 @@ def get_knowledge_bases() -> KnowledgeBaseRepository:
 
 
 KnowledgeBasesDependency = Annotated[KnowledgeBaseRepository, Depends(get_knowledge_bases)]
+
+
+@lru_cache
+def get_data_sources() -> PostgresDataSourceRepository | None:
+    database_url = get_settings().database_url
+    return PostgresDataSourceRepository(database_url) if database_url else None
+
+
+DataSourcesDependency = Annotated[PostgresDataSourceRepository | None, Depends(get_data_sources)]
 
 
 @lru_cache
@@ -476,12 +491,110 @@ def create_app() -> FastAPI:
         auth: AuthRepositoryDependency,
         offset: PageOffset = 0,
         limit: PageLimit = 50,
+        name: str = Query(default="", max_length=80),
+        status: str = Query(default="", pattern=r"^(|empty|processing|ready|failed)$"),
+        sort: str = Query(default="updated_desc", pattern=r"^(updated_desc|updated_asc)$"),
     ) -> list[KnowledgeBaseResponse]:
         records = await run_in_threadpool(knowledge_bases.list)
         accessible_ids = await run_in_threadpool(auth.accessible_knowledge_base_ids, current.user)
         if accessible_ids is not None:
             records = [item for item in records if item.knowledge_base_id in accessible_ids]
-        return [await _knowledge_base_response(item, service) for item in _page(records, offset, limit)]
+        if name.strip():
+            needle = name.strip().casefold()
+            records = [item for item in records if needle in item.name.casefold()]
+        responses = [
+            await _knowledge_base_response(item, service, current.user) for item in records
+        ]
+        if status:
+            responses = [item for item in responses if item.index_status == status]
+        responses.sort(key=lambda item: item.updated_at, reverse=sort == "updated_desc")
+        return _page(responses, offset, limit)
+
+    @app.get("/api/data-sources", response_model=list[DataSourceResponse])
+    async def list_data_sources(
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        offset: PageOffset = 0,
+        limit: PageLimit = 50,
+    ) -> list[DataSourceResponse]:
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "数据源管理需要 PostgreSQL 运行时。", 503)
+        accessible_ids = await run_in_threadpool(auth.accessible_knowledge_base_ids, current.user)
+        rows = await run_in_threadpool(sources.list, accessible_ids)
+        return [_data_source_response(row, current.user) for row in _page(rows, offset, limit)]
+
+    @app.put("/api/data-sources/{data_source_id}/enabled", status_code=204)
+    async def set_data_source_enabled(
+        data_source_id: str,
+        enabled: bool,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> None:
+        _require_admin(current.user)
+        if sources is None or not await run_in_threadpool(sources.set_enabled, data_source_id, enabled):
+            raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
+        await _record_audit(
+            audit,
+            "data_source.enable" if enabled else "data_source.disable",
+            current.user,
+            "data_source",
+            data_source_id,
+        )
+
+    @app.post("/api/data-sources/{data_source_id}/sync", response_model=DocumentInfo, status_code=202)
+    async def sync_data_source(
+        data_source_id: str,
+        sources: DataSourcesDependency,
+        service: ServiceDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> DocumentInfo:
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "数据源同步需要 PostgreSQL 运行时。", 503)
+        payload = await run_in_threadpool(sources.sync_payload, data_source_id)
+        if payload is None:
+            raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
+        _require_knowledge_base_access(auth, current.user, str(payload["knowledge_base_id"]))
+        if not payload["enabled"]:
+            raise AppError("DATA_SOURCE_DISABLED", "数据源已停用，请先启用。", 409)
+        if not payload["source_path"]:
+            raise AppError("DATA_SOURCE_EMPTY", "数据源没有可同步的当前文件。", 409)
+        source_path = (settings.upload_path / str(payload["source_path"])).resolve()
+        if not source_path.is_relative_to(settings.upload_path.resolve()) or not source_path.is_file():
+            raise AppError("SOURCE_FILE_MISSING", "数据源原始文件不存在。", 409)
+        result = await run_in_threadpool(
+            service.index_document,
+            str(payload["name"]),
+            source_path.read_bytes(),
+            str(payload["knowledge_base_id"]),
+        )
+        await _record_audit(audit, "data_source.sync", current.user, "data_source", data_source_id)
+        return result
+
+    @app.delete("/api/data-sources/{data_source_id}", status_code=204)
+    async def delete_data_source(
+        data_source_id: str,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> None:
+        _require_admin(current.user)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "数据源管理需要 PostgreSQL 运行时。", 503)
+        try:
+            deleted = await run_in_threadpool(sources.delete, data_source_id)
+        except ValueError as exc:
+            raise AppError(
+                "DATA_SOURCE_IN_USE",
+                "请先删除关联文档，并等待运行中的索引任务完成。",
+                409,
+            ) from exc
+        if not deleted:
+            raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
+        await _record_audit(audit, "data_source.delete", current.user, "data_source", data_source_id)
 
     @app.post("/api/knowledge-bases", response_model=KnowledgeBaseResponse, status_code=201)
     async def create_knowledge_base(
@@ -507,7 +620,7 @@ def create_app() -> FastAPI:
             "knowledge_base",
             record.knowledge_base_id,
         )
-        return await _knowledge_base_response(record, service)
+        return await _knowledge_base_response(record, service, current.user)
 
     @app.get("/api/knowledge-bases/{knowledge_base_id}", response_model=KnowledgeBaseResponse)
     async def get_knowledge_base(
@@ -523,7 +636,7 @@ def create_app() -> FastAPI:
             current.user,
             knowledge_base_id,
         )
-        return await _knowledge_base_response(record, service)
+        return await _knowledge_base_response(record, service, current.user)
 
     @app.get(
         "/api/knowledge-bases/{knowledge_base_id}/members",
@@ -625,7 +738,7 @@ def create_app() -> FastAPI:
             "knowledge_base",
             knowledge_base_id,
         )
-        return await _knowledge_base_response(record, service)
+        return await _knowledge_base_response(record, service, current.user)
 
     @app.delete("/api/knowledge-bases/{knowledge_base_id}", status_code=204)
     async def delete_knowledge_base(
@@ -699,6 +812,27 @@ def create_app() -> FastAPI:
         await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         documents = await run_in_threadpool(service.list_documents, knowledge_base_id)
         return _page(documents, offset, limit)
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/document-versions",
+        response_model=list[DocumentVersionResponse],
+    )
+    async def list_document_versions(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        offset: PageOffset = 0,
+        limit: PageLimit = 100,
+    ) -> list[DocumentVersionResponse]:
+        await _require_accessible_knowledge_base(
+            knowledge_bases, auth, current.user, knowledge_base_id
+        )
+        if sources is None:
+            return []
+        rows = await run_in_threadpool(sources.list_document_versions, knowledge_base_id)
+        return [DocumentVersionResponse(**row) for row in _page(rows, offset, limit)]
 
     @app.get("/api/evaluations", response_model=list[EvaluationReportSummary])
     async def list_evaluations(
@@ -998,13 +1132,51 @@ async def _require_knowledge_base(
 async def _knowledge_base_response(
     record: KnowledgeBaseRecord,
     service: RAGServiceProtocol,
+    user: UserRecord,
 ) -> KnowledgeBaseResponse:
     documents = await run_in_threadpool(service.list_documents, record.knowledge_base_id)
+    statuses = {item.status for item in documents}
+    if not documents:
+        index_status = "empty"
+    elif "failed" in statuses:
+        index_status = "failed"
+    elif statuses & {"queued", "pending", "indexing", "processing"}:
+        index_status = "processing"
+    else:
+        index_status = "ready"
+    upload_path = KnowledgeBaseScope(
+        record.knowledge_base_id,
+        get_settings().upload_path,
+    ).upload_path
+    source_file_bytes = sum(
+        item.stat().st_size for item in upload_path.iterdir() if item.is_file()
+    ) if upload_path.exists() else 0
+    allowed_actions = ["detail"]
+    if user.role == "admin":
+        allowed_actions.append("edit")
+        if not record.is_default and not documents and index_status != "processing":
+            allowed_actions.append("delete")
     return KnowledgeBaseResponse(
         **record.to_json(),
         document_count=len(documents),
         chunk_count=sum(item.chunk_count for item in documents),
+        source_file_bytes=source_file_bytes,
+        index_status=index_status,
+        current_user_permission="admin" if user.role == "admin" else "use",
+        allowed_actions=allowed_actions,
     )
+
+
+def _data_source_response(row: dict[str, object], user: UserRecord) -> DataSourceResponse:
+    raw_status = str(row.get("sync_status") or "idle")
+    sync_status = raw_status if raw_status in {"queued", "running", "succeeded", "failed"} else "idle"
+    actions = ["detail", "sync"]
+    if user.role == "admin":
+        actions.extend(["edit", "disable" if row["enabled"] else "enable"])
+        if not row["document_count"] and sync_status not in {"queued", "running"}:
+            actions.append("delete")
+    normalized = {**row, "sync_status": sync_status, "allowed_actions": actions}
+    return DataSourceResponse(**normalized)
 
 
 async def _upload_document(

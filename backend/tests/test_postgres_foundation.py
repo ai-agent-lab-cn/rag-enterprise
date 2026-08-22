@@ -16,6 +16,7 @@ from backend.app.database import apply_migrations, check_schema_version, migrati
 from backend.app.postgres_documents import IndexWorker, PostgresAsyncRAGService
 from backend.app.postgres_repositories import (
     PostgresAuthRepository,
+    PostgresDataSourceRepository,
     PostgresKnowledgeBaseRepository,
 )
 from scripts import legacy_to_postgres, postgres_backup
@@ -220,6 +221,10 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
     queued = service.index_document("guide.md", b"updated production guide", "kb_default")
     duplicate = service.index_document("guide.md", b"updated production guide", "kb_default")
     assert queued.status == duplicate.status == "pending"
+    data_sources = PostgresDataSourceRepository(database_url)
+    pending_versions = data_sources.list_document_versions("kb_default")
+    assert pending_versions[0]["status"] == "pending"
+    assert pending_versions[0]["is_current"] is False
     with psycopg.connect(database_url) as connection:
         assert connection.execute("SELECT count(*) FROM index_jobs").fetchone()[0] == 1
     worker = IndexWorker(settings, FakeEmbedder())
@@ -227,6 +232,19 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
     current = service.list_documents("kb_default")[0]
     assert current.status == "ready"
     assert current.chunk_count > 0
+    source = next(item for item in data_sources.list() if item["name"] == "guide.md")
+    assert source["document_count"] == 1
+    assert source["sync_status"] == "succeeded"
+    assert source["source_file_bytes"] == len(b"updated production guide")
+    versions = data_sources.list_document_versions("kb_default")
+    assert versions[0]["filename"] == "guide.md"
+    assert versions[0]["is_current"] is True
+    assert versions[0]["version_number"] == 2
+    assert data_sources.set_enabled(str(source["data_source_id"]), False)
+    assert data_sources.sync_payload(str(source["data_source_id"]))["enabled"] is False
+    with pytest.raises(ValueError, match="has documents"):
+        data_sources.delete(str(source["data_source_id"]))
+    assert data_sources.set_enabled(str(source["data_source_id"]), True)
     retrieved = service.store.query([0.1, 0.2, 0.3], 5, "kb_default")
     assert retrieved
     assert retrieved[0].metadata["document_id"] == queued.document_id

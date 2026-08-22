@@ -1,6 +1,32 @@
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
 from backend.app.config import get_settings
 from backend.app.errors import AppError
-from backend.app.main import get_service
+from backend.app.main import _data_source_response, get_service
+
+
+def test_data_source_response_normalizes_repository_sync_status() -> None:
+    response = _data_source_response(
+        {
+            "data_source_id": "src_test",
+            "name": "guide.md",
+            "source_type": "file",
+            "knowledge_base_id": "kb_default",
+            "knowledge_base_name": "默认知识库",
+            "enabled": True,
+            "sync_status": "succeeded",
+            "document_count": 1,
+            "source_file_bytes": 128,
+            "last_synced_at": datetime.now(UTC),
+            "failure_reason": None,
+            "updated_at": datetime.now(UTC),
+        },
+        SimpleNamespace(role="admin"),
+    )
+
+    assert response.sync_status == "succeeded"
+    assert response.allowed_actions == ["detail", "sync", "edit", "disable"]
 
 
 def test_health_does_not_initialize_rag_service(client) -> None:
