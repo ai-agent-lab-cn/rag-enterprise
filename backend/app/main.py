@@ -1169,13 +1169,21 @@ async def _knowledge_base_response(
 
 def _data_source_response(row: dict[str, object], user: UserRecord) -> DataSourceResponse:
     raw_status = str(row.get("sync_status") or "idle")
-    sync_status = raw_status if raw_status in {"queued", "running", "succeeded", "failed"} else "idle"
+    index_status = raw_status if raw_status in {"queued", "running", "succeeded", "failed"} else "idle"
+    upload_status = "succeeded" if row.get("upload_status") == "succeeded" else "idle"
     actions = ["detail", "sync"]
     if user.role == "admin":
         actions.extend(["edit", "disable" if row["enabled"] else "enable"])
-        if not row["document_count"] and sync_status not in {"queued", "running"}:
+        if not row["document_count"] and index_status not in {"queued", "running"}:
             actions.append("delete")
-    normalized = {**row, "sync_status": sync_status, "allowed_actions": actions}
+    normalized = {
+        **row,
+        "upload_status": upload_status,
+        "index_status": index_status,
+        "sync_status": index_status,
+        "last_indexed_at": row.get("last_indexed_at") or row.get("last_synced_at"),
+        "allowed_actions": actions,
+    }
     return DataSourceResponse(**normalized)
 
 

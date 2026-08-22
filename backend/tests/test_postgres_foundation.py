@@ -234,7 +234,9 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
     assert current.chunk_count > 0
     source = next(item for item in data_sources.list() if item["name"] == "guide.md")
     assert source["document_count"] == 1
+    assert source["upload_status"] == "succeeded"
     assert source["sync_status"] == "succeeded"
+    assert source["last_indexed_at"] == source["last_synced_at"]
     assert source["source_file_bytes"] == len(b"updated production guide")
     versions = data_sources.list_document_versions("kb_default")
     assert versions[0]["filename"] == "guide.md"
