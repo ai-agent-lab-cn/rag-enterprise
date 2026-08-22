@@ -144,8 +144,11 @@ export interface KnowledgeBase {
 export interface DataSource {
   data_source_id: string; name: string; source_type: "file" | "object_storage" | "web" | "connector";
   knowledge_base_id: string; knowledge_base_name: string; enabled: boolean;
+  upload_status: "idle" | "succeeded";
+  index_status: "idle" | "queued" | "running" | "succeeded" | "failed";
+  /** @deprecated 使用 index_status。 */
   sync_status: "idle" | "queued" | "running" | "succeeded" | "failed";
-  document_count: number; source_file_bytes: number; last_synced_at: string | null;
+  document_count: number; source_file_bytes: number; last_indexed_at: string | null; last_synced_at: string | null;
   failure_reason: string | null; updated_at: string;
   allowed_actions: Array<"detail" | "edit" | "disable" | "enable" | "sync" | "delete">;
 }

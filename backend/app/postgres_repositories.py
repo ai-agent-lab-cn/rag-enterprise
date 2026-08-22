@@ -131,6 +131,13 @@ class PostgresDataSourceRepository:
                           k.name AS knowledge_base_name, s.enabled, s.updated_at,
                           count(DISTINCT d.document_id) AS document_count,
                           COALESCE(sum(v.source_file_bytes), 0) AS source_file_bytes,
+                          CASE WHEN EXISTS (
+                            SELECT 1 FROM documents uploaded_document
+                            JOIN document_versions uploaded_version
+                              USING (knowledge_base_id, document_id)
+                            WHERE uploaded_document.data_source_id = s.data_source_id
+                          ) THEN 'succeeded' ELSE 'idle' END AS upload_status,
+                          j.finished_at AS last_indexed_at,
                           j.finished_at AS last_synced_at, j.status AS sync_status,
                           j.failure_reason
                    FROM data_sources s JOIN knowledge_bases k USING (knowledge_base_id)

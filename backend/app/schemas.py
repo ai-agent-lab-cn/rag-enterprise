@@ -147,9 +147,12 @@ class DataSourceResponse(BaseModel):
     knowledge_base_id: str
     knowledge_base_name: str
     enabled: bool
+    upload_status: Literal["idle", "succeeded"]
+    index_status: Literal["idle", "queued", "running", "succeeded", "failed"]
     sync_status: Literal["idle", "queued", "running", "succeeded", "failed"]
     document_count: int
     source_file_bytes: int
+    last_indexed_at: datetime | None
     last_synced_at: datetime | None
     failure_reason: str | None
     updated_at: datetime

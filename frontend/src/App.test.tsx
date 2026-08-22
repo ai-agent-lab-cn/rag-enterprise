@@ -24,8 +24,9 @@ const document = {
 const dataSource = {
   data_source_id: "src_1", name: "profile.md", source_type: "file",
   knowledge_base_id: "kb_default", knowledge_base_name: "默认知识库", enabled: true,
+  upload_status: "succeeded", index_status: "succeeded",
   sync_status: "succeeded", document_count: 1, source_file_bytes: 2048,
-  last_synced_at: "2026-08-12T00:00:00Z", failure_reason: null,
+  last_indexed_at: "2026-08-12T00:00:00Z", last_synced_at: "2026-08-12T00:00:00Z", failure_reason: null,
   updated_at: "2026-08-12T00:00:00Z", allowed_actions: ["detail", "edit", "disable", "sync"],
 };
 const answerSummary = {
@@ -150,6 +151,8 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if ((url === "/api/knowledge-bases" || url.startsWith("/api/knowledge-bases?")) && !init?.method) return Promise.resolve(json([base]));
   if (url === "/api/data-sources?offset=0&limit=21") return Promise.resolve(json([dataSource]));
   if (url === "/api/knowledge-bases/kb_default") return Promise.resolve(json(base));
+  if (url === "/api/knowledge-bases/kb_default/documents" && init?.method === "POST")
+    return Promise.resolve(json({ ...document, status: "pending" }, 201));
   if (url === "/api/knowledge-bases/kb_default/documents") return Promise.resolve(json([document]));
   if (url === "/api/knowledge-bases/kb_default/document-versions?offset=0&limit=100") return Promise.resolve(json([]));
   if (url === "/api/knowledge-bases/kb_default/conversations") return Promise.resolve(json([]));
@@ -217,8 +220,40 @@ test("数据源管理使用独立列表而非复用默认知识库详情", async
   render(<App />);
   expect(await screen.findByRole("region", { name: "数据源管理" })).toBeInTheDocument();
   expect(await screen.findByText("profile.md")).toBeInTheDocument();
-  expect(screen.getByRole("columnheader", { name: "同步状态" })).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "上传状态" })).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "索引状态" })).toBeInTheDocument();
+  expect(screen.getByText("上传成功")).toBeInTheDocument();
+  expect(screen.getByText("索引完成")).toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: "类型" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: "文档数" })).not.toBeInTheDocument();
   expect(screen.queryByText("会话历史")).not.toBeInTheDocument();
+});
+
+test("文件数据源使用更新文件创建新版本", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/data-sources");
+  render(<App />);
+  expect(screen.queryByRole("button", { name: "同步" })).not.toBeInTheDocument();
+  await userEvent.upload(await screen.findByLabelText("更新 profile.md"), new File(["updated"], "profile.md", { type: "text/markdown" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("新版本已上传并加入索引队列");
+  expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/documents", expect.objectContaining({ method: "POST" }));
+});
+
+test("索引处理中自动刷新数据源状态", async () => {
+  let sourceRequests = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/data-sources?offset=0&limit=21") {
+      sourceRequests += 1;
+      return Promise.resolve(json([{ ...dataSource, index_status: sourceRequests === 1 ? "queued" : "succeeded" }]));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/data-sources");
+  render(<App />);
+  expect(await screen.findByText("等待索引")).toHaveClass("index-loading");
+  expect(screen.getByText("等待索引")).toHaveAttribute("aria-busy", "true");
+  expect(await screen.findByText("索引完成", {}, { timeout: 2_000 })).toBeInTheDocument();
+  expect(sourceRequests).toBe(2);
 });
 
 test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {

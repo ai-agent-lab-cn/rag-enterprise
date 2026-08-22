@@ -15,6 +15,7 @@ def test_data_source_response_normalizes_repository_sync_status() -> None:
             "knowledge_base_id": "kb_default",
             "knowledge_base_name": "默认知识库",
             "enabled": True,
+            "upload_status": "succeeded",
             "sync_status": "succeeded",
             "document_count": 1,
             "source_file_bytes": 128,
@@ -26,6 +27,9 @@ def test_data_source_response_normalizes_repository_sync_status() -> None:
     )
 
     assert response.sync_status == "succeeded"
+    assert response.upload_status == "succeeded"
+    assert response.index_status == "succeeded"
+    assert response.last_indexed_at == response.last_synced_at
     assert response.allowed_actions == ["detail", "sync", "edit", "disable"]
 
 
