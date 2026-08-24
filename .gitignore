@@ -1,5 +1,8 @@
 .env
 deploy/kubernetes/secret.yaml
+artifacts/controlled-pilot/
+frontend/playwright-report/
+frontend/test-results/
 .env.*
 !.env.example
 .venv/

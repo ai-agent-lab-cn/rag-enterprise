@@ -66,6 +66,8 @@ class MetricsRegistry:
         self._rag: dict[str, int | float] = {
             "queries": 0,
             "failures": 0,
+            "retrieval_failures": 0,
+            "answer_failures": 0,
             "retrieval_ms_total": 0.0,
             "rerank_ms_total": 0.0,
             "generation_ms_total": 0.0,
@@ -90,10 +92,22 @@ class MetricsRegistry:
             item["duration_ms_total"] = round(float(item["duration_ms_total"]) + duration_ms, 2)
             item["duration_ms_max"] = max(float(item["duration_ms_max"]), duration_ms)
 
-    def record_rag(self, latency_ms: dict[str, float], *, failed: bool) -> None:
+    def record_rag(
+        self,
+        latency_ms: dict[str, float],
+        *,
+        retrieval_failed: bool,
+        answer_failed: bool,
+    ) -> None:
         with self._lock:
             self._rag["queries"] = int(self._rag["queries"]) + 1
-            self._rag["failures"] = int(self._rag["failures"]) + (1 if failed else 0)
+            self._rag["failures"] = int(self._rag["failures"]) + (1 if answer_failed else 0)
+            self._rag["retrieval_failures"] = int(self._rag["retrieval_failures"]) + (
+                1 if retrieval_failed else 0
+            )
+            self._rag["answer_failures"] = int(self._rag["answer_failures"]) + (
+                1 if answer_failed else 0
+            )
             for stage in ("retrieval", "rerank", "generation", "total"):
                 key = f"{stage}_ms_total"
                 self._rag[key] = round(float(self._rag[key]) + float(latency_ms.get(stage, 0.0)), 2)

@@ -1293,7 +1293,7 @@ async def _execute_recorded_query(
             )
     except AppError as exc:
         failure_latency = {"total": _duration_ms(started)}
-        metrics.record_rag(failure_latency, failed=True)
+        metrics.record_rag(failure_latency, retrieval_failed=True, answer_failed=True)
         record = await run_in_threadpool(
             conversations.record,
             conversation_id=conversation["conversation_id"],
@@ -1328,7 +1328,11 @@ async def _execute_recorded_query(
         if result.answer_status in {"answered", "insufficient_evidence", "source_conflict"}
         else "failed"
     )
-    metrics.record_rag(result.latency_ms, failed=record_status == "failed")
+    metrics.record_rag(
+        result.latency_ms,
+        retrieval_failed=False,
+        answer_failed=record_status == "failed",
+    )
     record = await run_in_threadpool(
         conversations.record,
         conversation_id=conversation["conversation_id"],

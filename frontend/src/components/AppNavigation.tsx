@@ -18,5 +18,5 @@ const ADMIN_ITEMS: typeof ITEMS = [
 ];
 export function AppNavigation({ page, onNavigate, isAdmin }: AppNavigationProps) {
   const items = isAdmin ? [...ITEMS, ...ADMIN_ITEMS] : ITEMS;
-  return <nav className="app-navigation" aria-label="主导航">{items.map((item) => <div className="nav-entry" key={item.page}>{item.group ? <span className="nav-group">{item.group}</span> : null}<button type="button" className={page === item.page ? "is-active" : ""} aria-current={page === item.page ? "page" : undefined} onClick={() => onNavigate(item.path)}><item.icon className="nav-mark" aria-hidden="true" size={18}/><span>{item.label}</span></button></div>)}</nav>;
+  return <nav className="app-navigation" aria-label="主导航">{items.map((item) => <div className="nav-entry" key={item.page}>{item.group ? <span className="nav-group">{item.group}</span> : null}<button type="button" aria-label={item.label} className={page === item.page ? "is-active" : ""} aria-current={page === item.page ? "page" : undefined} onClick={() => onNavigate(item.path)}><item.icon className="nav-mark" aria-hidden="true" size={18}/><span>{item.label}</span></button></div>)}</nav>;
 }
