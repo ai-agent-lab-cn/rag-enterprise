@@ -56,7 +56,7 @@ def test_source_fingerprint_changes_with_content(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
-def test_schema_two_with_existing_data_upgrades_to_schema_three(tmp_path: Path) -> None:
+def test_schema_two_with_existing_data_upgrades_to_current_schema(tmp_path: Path) -> None:
     """升级必须保留已有版本和任务，且不会把历史分块伪装成新切分配置。"""
 
     database_url = os.environ["TEST_DATABASE_URL"]
@@ -160,8 +160,8 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 3
-    check_schema_version(database_url, 3)
+    assert apply_migrations(database_url) == 4
+    check_schema_version(database_url, 4)
 
     now = "2026-08-22T00:00:00+00:00"
     auth = tmp_path / "auth/store.json"

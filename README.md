@@ -10,6 +10,7 @@
 
 - Markdown、TXT、PDF 多格式解析，稳定文档 ID 与完整来源 metadata
 - 本地中文 Embedding + ChromaDB 持久化向量召回
+- PostgreSQL 生产路径使用 pgvector 与 pg_trgm 混合召回，并以 RRF 稳定融合候选
 - CrossEncoder 精排，同时展示粗召回与精排分数
 - Gemini 生成带 `[来源 N]` 标签的答案，未配置 Key 时仍可完成检索
 - FastAPI 类型化接口与 React/TypeScript 交互界面
@@ -216,9 +217,10 @@ uv run python -m backend.evaluation.run_corpus_baseline \
   --output backend/evaluation/reports/corpus_v2_baseline.json
 ```
 
-评测会真实写入 PostgreSQL、由索引 Worker 处理并通过 pgvector 查询。为避免污染业务数据，
-命令只接受 schema 3 且不含用户或知识库的隔离数据库；运行结束会清理临时语料。冻结阈值为
-Recall@5 `0.70`、向量 MRR `0.55`、精排 MRR `0.65`，不按实测结果倒推。
+评测会真实写入 PostgreSQL、由索引 Worker 处理，并分别记录纯向量候选、pgvector 与
+pg_trgm 的 RRF 混合候选以及 CrossEncoder 最终排序。为避免污染业务数据，命令只接受
+schema 4 且不含用户或知识库的隔离数据库；运行结束会清理临时语料。冻结阈值为 Recall@5
+`0.70`、向量 MRR `0.55`、混合召回 MRR `0.55`、精排 MRR `0.65`，不按实测结果倒推。
 
 首份 2.0.0 报告须在评测实现与数据集进入 commit 后生成，报告中的 `commit` 必须正好包含
 被测代码和冻结语料。未通过门槛的报告会保留为 `official: false`，不会进入只读评测 API。

@@ -97,13 +97,15 @@ def test_evaluate_rankings_preserves_vector_and_rerank_order() -> None:
     ]
     vector_rankings = {"q001": ["x", "a"], "q002": ["b", "x"]}
     reranked_rankings = {"q001": ["a", "x"], "q002": ["x", "b"]}
+    hybrid_rankings = {"q001": ["a", "x"], "q002": ["b", "x"]}
 
-    metrics = evaluate_rankings(queries, vector_rankings, reranked_rankings)
+    metrics = evaluate_rankings(queries, vector_rankings, reranked_rankings, hybrid_rankings)
 
     assert metrics.query_count == 2
     assert metrics.recall_at_5 == 1.0
     assert metrics.vector_mrr == 0.75
     assert metrics.rerank_mrr == 0.75
+    assert metrics.hybrid_mrr == 1.0
 
 
 def test_evaluate_rankings_rejects_missing_query_results() -> None:
@@ -113,6 +115,8 @@ def test_evaluate_rankings_rejects_missing_query_results() -> None:
         evaluate_rankings([query], {}, {"q001": ["a"]})
     with pytest.raises(ValueError, match="精排缺少问题结果"):
         evaluate_rankings([query], {"q001": ["a"]}, {})
+    with pytest.raises(ValueError, match="混合召回缺少问题结果"):
+        evaluate_rankings([query], {"q001": ["a"]}, {"q001": ["a"]}, {})
 
 
 def test_report_records_required_context_and_quality_gate() -> None:

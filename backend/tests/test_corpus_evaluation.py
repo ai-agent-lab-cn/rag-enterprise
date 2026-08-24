@@ -17,6 +17,7 @@ from backend.evaluation import (
     paragraph_key,
 )
 from backend.evaluation.run_corpus_baseline import (
+    HYBRID_MRR_THRESHOLD,
     RECALL_AT_5_THRESHOLD,
     RERANK_MRR_THRESHOLD,
     VECTOR_MRR_THRESHOLD,
@@ -68,8 +69,14 @@ def test_corpus_dataset_is_versioned_and_anchored_to_real_documents() -> None:
 
 
 def test_corpus_gate_is_frozen_before_the_first_reproducible_report() -> None:
-    assert (RECALL_AT_5_THRESHOLD, VECTOR_MRR_THRESHOLD, RERANK_MRR_THRESHOLD) == (
+    assert (
+        RECALL_AT_5_THRESHOLD,
+        VECTOR_MRR_THRESHOLD,
+        HYBRID_MRR_THRESHOLD,
+        RERANK_MRR_THRESHOLD,
+    ) == (
         0.70,
+        0.55,
         0.55,
         0.65,
     )
@@ -97,6 +104,8 @@ def test_corpus_baseline_uses_postgres_pipeline_and_cleans_temporary_data(monkey
 
     assert report.query_count == len(dataset.queries)
     assert report.parameters["chunk_count"] > 0
+    assert report.parameters["retrieval_strategy"] == "vector_lexical_rrf"
+    assert report.hybrid_mrr is not None
     with psycopg.connect(database_url) as connection:
         assert connection.execute("SELECT count(*) FROM knowledge_bases").fetchone()[0] == 0
         assert connection.execute("SELECT count(*) FROM chunks").fetchone()[0] == 0
