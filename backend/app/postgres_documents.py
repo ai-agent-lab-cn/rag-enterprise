@@ -11,7 +11,7 @@ from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from .chunking import split_sections
+from .chunking import chunking_version, parse_chunking_version, split_sections
 from .config import Settings
 from .errors import AppError
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID, validate_knowledge_base_id
@@ -289,8 +289,8 @@ class PostgresAsyncRAGService(RAGService):
                 connection.execute(
                     """INSERT INTO index_jobs
                        (index_job_id, knowledge_base_id, data_source_id, document_version_id,
-                        idempotency_key, status, max_attempts)
-                       VALUES (%s, %s, %s, %s, %s, 'queued', %s)""",
+                        idempotency_key, status, max_attempts, job_type, target_chunking_version)
+                       VALUES (%s, %s, %s, %s, %s, 'queued', %s, 'index', %s)""",
                     (
                         f"job_{uuid4().hex[:20]}",
                         knowledge_base_id,
@@ -298,6 +298,7 @@ class PostgresAsyncRAGService(RAGService):
                         version_id,
                         f"index:{version_id}",
                         self.settings.index_job_max_attempts,
+                        chunking_version(self.settings.chunk_size, self.settings.chunk_overlap),
                     ),
                 )
         return DocumentInfo(
@@ -307,6 +308,114 @@ class PostgresAsyncRAGService(RAGService):
             chunk_count=0,
             status="pending",
         )
+
+
+def enqueue_rebuild(
+    database_url: str,
+    knowledge_base_id: str,
+    target_chunking_version: str,
+    max_attempts: int = 3,
+) -> dict[str, object]:
+    """把知识库中尚未使用目标切分配置的当前版本批量排队重建。
+
+    只覆盖 ``current_version_id`` 指向的版本：历史版本不参与检索，重切它们没有收益。
+    已有排队或运行中任务的版本会被跳过，重复调用因此是安全的，中断后再次调用即可续跑。
+    """
+
+    validate_knowledge_base_id(knowledge_base_id)
+    parse_chunking_version(target_chunking_version)
+    batch_id = f"rbd_{uuid4().hex[:16]}"
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        with connection.transaction():
+            if not connection.execute(
+                "SELECT 1 FROM knowledge_bases WHERE knowledge_base_id = %s",
+                (knowledge_base_id,),
+            ).fetchone():
+                raise AppError("KNOWLEDGE_BASE_NOT_FOUND", "未找到该知识库。", 404)
+            candidates = connection.execute(
+                """SELECT v.document_version_id, d.data_source_id
+                   FROM documents d
+                   JOIN document_versions v ON v.document_version_id = d.current_version_id
+                   WHERE d.knowledge_base_id = %s
+                     AND v.chunking_version IS DISTINCT FROM %s
+                     AND NOT EXISTS (
+                         SELECT 1 FROM index_jobs j
+                         WHERE j.document_version_id = v.document_version_id
+                           AND j.status IN ('queued', 'running'))
+                   ORDER BY d.document_id""",
+                (knowledge_base_id, target_chunking_version),
+            ).fetchall()
+            queued = 0
+            for candidate in candidates:
+                result = connection.execute(
+                    """INSERT INTO index_jobs
+                       (index_job_id, knowledge_base_id, data_source_id, document_version_id,
+                        idempotency_key, status, max_attempts, job_type, rebuild_batch_id,
+                        target_chunking_version)
+                       VALUES (%s, %s, %s, %s, %s, 'queued', %s, 'rebuild', %s, %s)
+                       ON CONFLICT (document_version_id)
+                         WHERE document_version_id IS NOT NULL
+                           AND status IN ('queued', 'running')
+                       DO NOTHING""",
+                    (
+                        f"job_{uuid4().hex[:20]}",
+                        knowledge_base_id,
+                        candidate["data_source_id"],
+                        candidate["document_version_id"],
+                        f"rebuild:{batch_id}:{candidate['document_version_id']}",
+                        max_attempts,
+                        batch_id,
+                        target_chunking_version,
+                    ),
+                )
+                queued += result.rowcount
+    return {
+        "batch_id": batch_id,
+        "knowledge_base_id": knowledge_base_id,
+        "target_chunking_version": target_chunking_version,
+        "queued": queued,
+    }
+
+
+def rebuild_status(database_url: str, batch_id: str) -> dict[str, object]:
+    """汇总一个重建批次的任务状态，用于判断是否已经跑完或需要续跑。"""
+
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        rows = connection.execute(
+            """SELECT status, count(*) AS total FROM index_jobs
+               WHERE rebuild_batch_id = %s GROUP BY status""",
+            (batch_id,),
+        ).fetchall()
+        failures = connection.execute(
+            """SELECT document_version_id, failure_reason FROM index_jobs
+               WHERE rebuild_batch_id = %s AND status = 'failed'
+               ORDER BY document_version_id""",
+            (batch_id,),
+        ).fetchall()
+    counts = {str(row["status"]): int(row["total"]) for row in rows}
+    return {
+        "batch_id": batch_id,
+        "counts": counts,
+        "pending": counts.get("queued", 0) + counts.get("running", 0),
+        "failures": [dict(row) for row in failures],
+    }
+
+
+def chunking_inventory(database_url: str, knowledge_base_id: str) -> dict[str, int]:
+    """按切分配置统计知识库当前版本的分布，用于验证重建是否真正收敛。"""
+
+    validate_knowledge_base_id(knowledge_base_id)
+    with psycopg.connect(database_url) as connection:
+        rows = connection.execute(
+            """SELECT COALESCE(v.chunking_version, ''), count(*)
+               FROM documents d
+               JOIN document_versions v ON v.document_version_id = d.current_version_id
+               WHERE d.knowledge_base_id = %s
+               GROUP BY 1
+               ORDER BY 1""",
+            (knowledge_base_id,),
+        ).fetchall()
+    return {str(row[0]): int(row[1]) for row in rows}
 
 
 class IndexWorker:
@@ -370,14 +479,20 @@ class IndexWorker:
             ).fetchone()
         if version is None:
             raise RuntimeError("document version not found")
+        # 按入队时冻结的目标配置切分，重建期间修改进程配置不会让同一批次产生混合结果。
+        target_version = str(
+            job.get("target_chunking_version")
+            or chunking_version(self.settings.chunk_size, self.settings.chunk_overlap)
+        )
+        _, chunk_size, chunk_overlap = parse_chunking_version(target_version)
         content = (self.settings.upload_path / version["source_path"]).read_bytes()
         sections = parse_document(str(version["filename"]), content)
         chunks = split_sections(
             str(version["document_id"]),
             str(version["filename"]),
             sections,
-            self.settings.chunk_size,
-            self.settings.chunk_overlap,
+            chunk_size,
+            chunk_overlap,
             str(version["knowledge_base_id"]),
         )
         embeddings = self.embedder.encode([chunk.text for chunk in chunks])
@@ -406,26 +521,34 @@ class IndexWorker:
                             now,
                         ),
                     )
-                connection.execute(
-                    """UPDATE document_versions SET status = 'superseded'
-                       WHERE knowledge_base_id = %s AND document_id = %s AND status = 'ready'""",
-                    (version["knowledge_base_id"], version["document_id"]),
-                )
-                connection.execute(
-                    """UPDATE document_versions SET status = 'ready', indexed_at = %s,
-                              failure_reason = NULL WHERE document_version_id = %s""",
-                    (now, version["document_version_id"]),
-                )
-                connection.execute(
-                    """UPDATE documents SET current_version_id = %s, updated_at = %s
-                       WHERE knowledge_base_id = %s AND document_id = %s""",
-                    (
-                        version["document_version_id"],
-                        now,
-                        version["knowledge_base_id"],
-                        version["document_id"],
-                    ),
-                )
+                if str(job.get("job_type", "index")) == "rebuild":
+                    # 重建只替换同一版本的 chunks，不参与版本状态机，也不移动当前版本指针。
+                    connection.execute(
+                        "UPDATE document_versions SET chunking_version = %s WHERE document_version_id = %s",
+                        (target_version, version["document_version_id"]),
+                    )
+                else:
+                    connection.execute(
+                        """UPDATE document_versions SET status = 'superseded'
+                           WHERE knowledge_base_id = %s AND document_id = %s AND status = 'ready'""",
+                        (version["knowledge_base_id"], version["document_id"]),
+                    )
+                    connection.execute(
+                        """UPDATE document_versions SET status = 'ready', indexed_at = %s,
+                                  failure_reason = NULL, chunking_version = %s
+                           WHERE document_version_id = %s""",
+                        (now, target_version, version["document_version_id"]),
+                    )
+                    connection.execute(
+                        """UPDATE documents SET current_version_id = %s, updated_at = %s
+                           WHERE knowledge_base_id = %s AND document_id = %s""",
+                        (
+                            version["document_version_id"],
+                            now,
+                            version["knowledge_base_id"],
+                            version["document_id"],
+                        ),
+                    )
                 connection.execute(
                     """UPDATE index_jobs SET status = 'succeeded', finished_at = %s,
                               locked_at = NULL, locked_by = NULL, updated_at = %s
@@ -436,7 +559,7 @@ class IndexWorker:
     def _fail(self, job_id: str, reason: str) -> None:
         with psycopg.connect(self.database_url) as connection, connection.transaction():
             job = connection.execute(
-                """SELECT attempt_count, max_attempts, document_version_id
+                """SELECT attempt_count, max_attempts, document_version_id, job_type
                    FROM index_jobs WHERE index_job_id = %s""",
                 (job_id,),
             ).fetchone()
@@ -449,6 +572,9 @@ class IndexWorker:
                           updated_at = now() WHERE index_job_id = %s""",
                 (status, reason[:1000], terminal, job_id),
             )
+            if str(job[3]) == "rebuild":
+                # 重建失败时上一批 chunks 仍然完好，文档必须保持可检索，只由任务记录失败。
+                return
             connection.execute(
                 """UPDATE document_versions SET status = %s, failure_reason = %s
                    WHERE document_version_id = %s""",
