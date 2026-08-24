@@ -88,6 +88,8 @@ def test_admin_metrics_cover_requests_rag_and_indexing(client) -> None:
     assert response.status_code == 200
     assert payload["requests"]["total"] >= 3
     assert payload["rag"]["queries"] == 1
+    assert payload["rag"]["retrieval_failures"] == 0
+    assert payload["rag"]["answer_failures"] == 0
     assert payload["rag"]["total_ms_total"] == 6
     assert payload["indexing"]["attempts"] == 1
     assert payload["indexing"]["successes"] == 1
