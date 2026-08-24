@@ -71,8 +71,8 @@ def run_baseline(
         run_at=run_at,
         official=True,
         models={
-            "embedding": _resolved_model(settings.embedding_model),
-            "reranker": _resolved_model(settings.reranker_model),
+            "embedding": resolved_model(settings.embedding_model),
+            "reranker": resolved_model(settings.reranker_model),
         },
         parameters={
             "retrieve_k": 10,
@@ -117,7 +117,7 @@ def _evaluation_chunk(item, index: int) -> Chunk:
     )
 
 
-def _resolved_model(model_name: str) -> str:
+def resolved_model(model_name: str) -> str:
     """解析 Hugging Face 精确 revision，使后续运行可以识别实际模型版本。"""
 
     revision = HfApi().model_info(model_name).sha

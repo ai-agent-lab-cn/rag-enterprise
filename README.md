@@ -201,6 +201,31 @@ uv run python -m backend.evaluation.run_baseline \
   --output backend/evaluation/reports/retrieval_v1_optimized.json
 ```
 
+### 语料级检索评测（2.0.0）
+
+`retrieval_v1.json` 的候选分块是写死的，解析与切分不在被测范围，因此切分参数变化不会
+反映到指标上。`corpus_v2.json` 以 `docs/` 的 10 篇真实中文文档为冻结语料（快照存放在
+`backend/evaluation/datasets/corpus_v2/`，按 SHA-256 与解析段落数双重锁定），每次评测
+重新执行 `parse_document` 与 `split_sections`，指标按原始段落粒度统计：
+
+```bash
+uv run python -m backend.evaluation.run_corpus_baseline \
+  --dataset backend/evaluation/datasets/corpus_v2.json \
+  --database-url "$TEST_DATABASE_URL" \
+  --commit "$(git rev-parse HEAD)" \
+  --output backend/evaluation/reports/corpus_v2_baseline.json
+```
+
+评测会真实写入 PostgreSQL、由索引 Worker 处理并通过 pgvector 查询。为避免污染业务数据，
+命令只接受 schema 3 且不含用户或知识库的隔离数据库；运行结束会清理临时语料。冻结阈值为
+Recall@5 `0.70`、向量 MRR `0.55`、精排 MRR `0.65`，不按实测结果倒推。
+
+首份 2.0.0 报告须在评测实现与数据集进入 commit 后生成，报告中的 `commit` 必须正好包含
+被测代码和冻结语料。未通过门槛的报告会保留为 `official: false`，不会进入只读评测 API。
+1.0.0 数据集与其正式报告保持不变，继续守护融合排序策略的回归。
+
+`--chunk-size` 与 `--chunk-overlap` 可覆盖切分配置，用于对比不同切分策略的实际收益。
+
 ### V3 回答质量工具链
 
 固定回答评测集位于 `backend/evaluation/datasets/answer_v1.json`，包含 30 个稳定样本：

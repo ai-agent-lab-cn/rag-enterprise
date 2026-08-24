@@ -1,8 +1,37 @@
 import hashlib
+import re
 from dataclasses import dataclass
 
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID, validate_knowledge_base_id
 from .parsers import ParsedSection
+
+# 切分算法本身发生变化时必须递增，否则重建无法区分“配置不同”与“实现不同”。
+CHUNKING_ALGORITHM_VERSION = "v1"
+_CHUNKING_VERSION_PATTERN = re.compile(r"^(v\d+)-(\d+)-(\d+)$")
+
+
+def chunking_version(chunk_size: int, chunk_overlap: int) -> str:
+    """描述一批 chunk 由什么切分配置产出，用于判断哪些文档需要重建。"""
+
+    if chunk_overlap >= chunk_size:
+        raise ValueError("chunk overlap must be smaller than chunk size")
+    return f"{CHUNKING_ALGORITHM_VERSION}-{chunk_size}-{chunk_overlap}"
+
+
+def parse_chunking_version(value: str) -> tuple[str, int, int]:
+    """还原切分配置，使重建任务按入队时的目标执行而不是按当前进程配置执行。"""
+
+    match = _CHUNKING_VERSION_PATTERN.fullmatch(value)
+    if not match:
+        raise ValueError(f"chunking version is invalid: {value}")
+    algorithm, chunk_size, chunk_overlap = match.group(1), int(match.group(2)), int(match.group(3))
+    if algorithm != CHUNKING_ALGORITHM_VERSION:
+        raise ValueError(
+            f"chunking algorithm {algorithm} is not supported by {CHUNKING_ALGORITHM_VERSION}"
+        )
+    if chunk_overlap >= chunk_size:
+        raise ValueError(f"chunking version is invalid: {value}")
+    return algorithm, chunk_size, chunk_overlap
 
 
 # 重叠切片、metadata、稳定 document/chunk ID

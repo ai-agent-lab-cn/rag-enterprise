@@ -11,6 +11,12 @@ from .answer_quality import (
     load_answer_run,
     promote_official_report,
 )
+from .corpus_dataset import (
+    CorpusEvaluationDataset,
+    CorpusQuery,
+    load_corpus_dataset,
+    paragraph_key,
+)
 from .dataset import EvaluationDataset, EvaluationQuery, load_dataset
 from .metrics import RetrievalMetrics, evaluate_rankings, recall_at_k, reciprocal_rank
 from .report import EvaluationMetric, RetrievalEvaluationReport, assess_metric
@@ -21,6 +27,8 @@ __all__ = [
     "AnswerEvaluationRun",
     "AnswerMetric",
     "HumanReviewRecord",
+    "CorpusEvaluationDataset",
+    "CorpusQuery",
     "EvaluationDataset",
     "EvaluationMetric",
     "EvaluationQuery",
@@ -29,7 +37,9 @@ __all__ = [
     "assess_metric",
     "evaluate_answers",
     "evaluate_rankings",
+    "load_corpus_dataset",
     "load_dataset",
+    "paragraph_key",
     "load_answer_dataset",
     "load_answer_run",
     "promote_official_report",

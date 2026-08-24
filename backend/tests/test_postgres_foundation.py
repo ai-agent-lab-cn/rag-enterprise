@@ -3,7 +3,9 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import tarfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 import chromadb
@@ -38,6 +40,7 @@ def test_migration_files_are_contiguous() -> None:
     assert [path.name for path in migration_files()] == [
         "0001_postgres_foundation.sql",
         "0002_runtime_defaults.sql",
+        "0003_index_rebuild.sql",
     ]
 
 
@@ -49,6 +52,74 @@ def test_source_fingerprint_changes_with_content(tmp_path: Path) -> None:
     auth.write_text("two", encoding="utf-8")
     second = legacy_to_postgres.fingerprint(legacy_to_postgres.source_manifest(tmp_path))
     assert first != second
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_schema_two_with_existing_data_upgrades_to_schema_three(tmp_path: Path) -> None:
+    """升级必须保留已有版本和任务，且不会把历史分块伪装成新切分配置。"""
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    old_migrations = tmp_path / "migrations"
+    old_migrations.mkdir()
+    for name in ("0001_postgres_foundation.sql", "0002_runtime_defaults.sql"):
+        shutil.copy(Path("backend/migrations") / name, old_migrations / name)
+    assert apply_migrations(database_url, old_migrations) == 2
+
+    now = datetime.now(UTC)
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO knowledge_bases
+               (knowledge_base_id, name, name_normalized, is_default, created_at, updated_at)
+               VALUES ('kb_default', '默认知识库', '默认知识库', true, %s, %s)""",
+            (now, now),
+        )
+        connection.execute(
+            """INSERT INTO data_sources
+               (data_source_id, knowledge_base_id, source_type, name, created_at, updated_at)
+               VALUES ('src_legacy', 'kb_default', 'file', 'legacy.md', %s, %s)""",
+            (now, now),
+        )
+        connection.execute(
+            """INSERT INTO documents
+               (document_id, knowledge_base_id, data_source_id, filename, created_at, updated_at)
+               VALUES ('doc_legacy', 'kb_default', 'src_legacy', 'legacy.md', %s, %s)""",
+            (now, now),
+        )
+        connection.execute(
+            """INSERT INTO document_versions
+               (document_version_id, knowledge_base_id, document_id, version_number,
+                content_sha256, source_file_bytes, source_path, status, created_at, indexed_at)
+               VALUES ('ver_legacy', 'kb_default', 'doc_legacy', 1, %s, 6,
+                       'legacy.md', 'ready', %s, %s)""",
+            ("a" * 64, now, now),
+        )
+        connection.execute(
+            "UPDATE documents SET current_version_id = 'ver_legacy' WHERE document_id = 'doc_legacy'"
+        )
+        connection.execute(
+            """INSERT INTO index_jobs
+               (index_job_id, knowledge_base_id, data_source_id, document_version_id,
+                idempotency_key, status, created_at, updated_at)
+               VALUES ('job_legacy', 'kb_default', 'src_legacy', 'ver_legacy',
+                       'index:ver_legacy', 'succeeded', %s, %s)""",
+            (now, now),
+        )
+
+    assert apply_migrations(database_url) == 3
+    check_schema_version(database_url, 3)
+    with psycopg.connect(database_url) as connection:
+        version = connection.execute(
+            "SELECT status, chunking_version FROM document_versions WHERE document_version_id = 'ver_legacy'"
+        ).fetchone()
+        job = connection.execute(
+            """SELECT status, job_type, rebuild_batch_id, target_chunking_version
+               FROM index_jobs WHERE index_job_id = 'job_legacy'"""
+        ).fetchone()
+    assert version == ("ready", None)
+    assert job == ("succeeded", "index", None, None)
 
 
 def test_postgres_backup_manifest_and_tamper_detection(
@@ -88,8 +159,8 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 2
-    check_schema_version(database_url, 2)
+    assert apply_migrations(database_url) == 3
+    check_schema_version(database_url, 3)
 
     now = "2026-08-22T00:00:00+00:00"
     auth = tmp_path / "auth/store.json"
