@@ -26,6 +26,9 @@ export interface Source {
   text: string;
   retrieval_score: number;
   rerank_score: number;
+  vector_score?: number | null;
+  lexical_score?: number | null;
+  retrieval_methods?: Array<"vector" | "lexical">;
 }
 
 export interface QueryResult {
@@ -124,6 +127,7 @@ export interface EvaluationReport extends EvaluationReportSummary {
   recall_at_5: EvaluationMetric;
   vector_mrr: EvaluationMetric;
   rerank_mrr: EvaluationMetric;
+  hybrid_mrr?: EvaluationMetric | null;
 }
 
 export interface KnowledgeBase {

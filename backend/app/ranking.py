@@ -5,6 +5,63 @@ from collections.abc import Sequence
 from .store import RetrievedChunk
 
 VECTOR_SCORE_WEIGHT = 0.15
+RRF_RANK_CONSTANT = 60
+
+
+def fuse_retrieval_candidates(
+    vector_candidates: Sequence[RetrievedChunk],
+    lexical_candidates: Sequence[RetrievedChunk],
+    limit: int,
+    rank_constant: int = RRF_RANK_CONSTANT,
+) -> list[RetrievedChunk]:
+    """使用 Reciprocal Rank Fusion 合并向量与关键词候选。
+
+    RRF 只依赖各检索器的稳定名次，避免直接混合余弦相似度与 trigram 分数。
+    相同融合分数时依次按向量名次、关键词名次和 chunk ID 排序，保证结果可复现。
+    """
+
+    if limit < 1:
+        raise ValueError("limit 必须大于等于 1")
+    if rank_constant < 1:
+        raise ValueError("rank_constant 必须大于等于 1")
+
+    merged: dict[str, RetrievedChunk] = {}
+    ranks: dict[str, dict[str, int]] = {}
+    scores: dict[str, float] = {}
+    for method, candidates in (("vector", vector_candidates), ("lexical", lexical_candidates)):
+        for rank, candidate in enumerate(candidates, start=1):
+            item = merged.setdefault(candidate.chunk_id, candidate)
+            item.retrieval_methods = sorted(set((item.retrieval_methods or []) + [method]))
+            if method == "vector":
+                item.vector_score = (
+                    candidate.vector_score
+                    if candidate.vector_score is not None
+                    else candidate.retrieval_score
+                )
+            else:
+                item.lexical_score = (
+                    candidate.lexical_score
+                    if candidate.lexical_score is not None
+                    else candidate.retrieval_score
+                )
+            ranks.setdefault(candidate.chunk_id, {})[method] = rank
+            scores[candidate.chunk_id] = scores.get(candidate.chunk_id, 0.0) + 1 / (
+                rank_constant + rank
+            )
+
+    missing_rank = len(merged) + 1
+    ordered = sorted(
+        merged.values(),
+        key=lambda item: (
+            -scores[item.chunk_id],
+            ranks[item.chunk_id].get("vector", missing_rank),
+            ranks[item.chunk_id].get("lexical", missing_rank),
+            item.chunk_id,
+        ),
+    )[:limit]
+    for item in ordered:
+        item.retrieval_score = round(scores[item.chunk_id], 8)
+    return ordered
 
 
 def rank_candidates(

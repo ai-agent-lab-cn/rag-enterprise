@@ -111,7 +111,12 @@ class RAGService:
         total_started = time.perf_counter()
         retrieval_started = time.perf_counter()
         query_embedding = self.embedder.encode([question])[0]
-        candidates = self.store.query(query_embedding, retrieve_k, knowledge_base_id)
+        candidates = self.store.query(
+            query_embedding,
+            retrieve_k,
+            knowledge_base_id,
+            query_text=question,
+        )
         retrieval_ms = _elapsed(retrieval_started)
         if not candidates:
             raise AppError("NO_DOCUMENTS", "知识库为空，请先上传文档。", 409)
@@ -212,4 +217,7 @@ def _source(item: RetrievedChunk) -> Source:
         text=item.text,
         retrieval_score=item.retrieval_score,
         rerank_score=item.rerank_score,
+        vector_score=item.vector_score,
+        lexical_score=item.lexical_score,
+        retrieval_methods=item.retrieval_methods or ["vector"],
     )

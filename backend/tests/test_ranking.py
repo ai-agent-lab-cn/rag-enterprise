@@ -1,6 +1,6 @@
 import pytest
 
-from backend.app.ranking import rank_candidates
+from backend.app.ranking import fuse_retrieval_candidates, rank_candidates
 from backend.app.store import RetrievedChunk
 
 
@@ -32,3 +32,30 @@ def test_rank_candidates_validates_inputs_and_empty_candidates() -> None:
         rank_candidates([], [], limit=1, vector_weight=1.1)
 
     assert rank_candidates([], [], limit=1) == []
+
+
+def test_fuse_retrieval_candidates_uses_stable_rrf_and_preserves_paths() -> None:
+    vectors = [candidate("semantic", 0.95), candidate("both", 0.8)]
+    lexical = [candidate("exact", 0.9), candidate("both", 0.7)]
+    for item in lexical:
+        item.lexical_score = item.retrieval_score
+
+    fused = fuse_retrieval_candidates(vectors, lexical, limit=3)
+
+    assert [item.chunk_id for item in fused] == ["both", "semantic", "exact"]
+    assert fused[0].retrieval_methods == ["lexical", "vector"]
+    assert fused[0].vector_score == pytest.approx(0.8)
+    assert fused[0].lexical_score == pytest.approx(0.7)
+
+
+def test_fuse_retrieval_candidates_validates_parameters_and_ties() -> None:
+    tied = fuse_retrieval_candidates(
+        [candidate("b", 0.5), candidate("a", 0.5)],
+        [],
+        limit=2,
+    )
+    assert [item.chunk_id for item in tied] == ["b", "a"]
+    with pytest.raises(ValueError, match="limit"):
+        fuse_retrieval_candidates([], [], limit=0)
+    with pytest.raises(ValueError, match="rank_constant"):
+        fuse_retrieval_candidates([], [], limit=1, rank_constant=0)

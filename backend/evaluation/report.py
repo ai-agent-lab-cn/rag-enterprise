@@ -50,6 +50,7 @@ class RetrievalEvaluationReport(BaseModel):
     recall_at_5: EvaluationMetric
     vector_mrr: EvaluationMetric
     rerank_mrr: EvaluationMetric
+    hybrid_mrr: EvaluationMetric | None = None
 
     @model_validator(mode="after")
     def validate_models(self) -> "RetrievalEvaluationReport":
@@ -60,4 +61,7 @@ class RetrievalEvaluationReport(BaseModel):
 
     @property
     def passed(self) -> bool:
-        return all((self.recall_at_5.passed, self.vector_mrr.passed, self.rerank_mrr.passed))
+        metrics = [self.recall_at_5, self.vector_mrr, self.rerank_mrr]
+        if self.hybrid_mrr is not None:
+            metrics.append(self.hybrid_mrr)
+        return all(metric.passed for metric in metrics)

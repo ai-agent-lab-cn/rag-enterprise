@@ -41,6 +41,7 @@ def test_migration_files_are_contiguous() -> None:
         "0001_postgres_foundation.sql",
         "0002_runtime_defaults.sql",
         "0003_index_rebuild.sql",
+        "0004_hybrid_retrieval.sql",
     ]
 
 
@@ -108,8 +109,8 @@ def test_schema_two_with_existing_data_upgrades_to_schema_three(tmp_path: Path) 
             (now, now),
         )
 
-    assert apply_migrations(database_url) == 3
-    check_schema_version(database_url, 3)
+    assert apply_migrations(database_url) == 4
+    check_schema_version(database_url, 4)
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
             "SELECT status, chunking_version FROM document_versions WHERE document_version_id = 'ver_legacy'"
@@ -320,9 +321,23 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
     with pytest.raises(ValueError, match="has documents"):
         data_sources.delete(str(source["data_source_id"]))
     assert data_sources.set_enabled(str(source["data_source_id"]), True)
-    retrieved = service.store.query([0.1, 0.2, 0.3], 5, "kb_default")
+    retrieved = service.store.query(
+        [0.1, 0.2, 0.3],
+        5,
+        "kb_default",
+        query_text="production guide",
+    )
     assert retrieved
     assert retrieved[0].metadata["document_id"] == queued.document_id
+    assert retrieved[0].retrieval_methods == ["lexical", "vector"]
+    assert retrieved[0].vector_score is not None
+    assert retrieved[0].lexical_score is not None
+    assert service.store.query(
+        [0.1, 0.2, 0.3],
+        5,
+        created_base.knowledge_base_id,
+        query_text="production guide",
+    ) == []
     with psycopg.connect(database_url) as connection:
         current_version_before_failure = connection.execute(
             "SELECT current_version_id FROM documents WHERE knowledge_base_id = 'kb_default'"

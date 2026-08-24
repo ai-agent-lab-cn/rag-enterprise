@@ -39,6 +39,7 @@ from .run_baseline import resolved_model
 RECALL_AT_5_THRESHOLD = 0.70
 VECTOR_MRR_THRESHOLD = 0.55
 RERANK_MRR_THRESHOLD = 0.65
+HYBRID_MRR_THRESHOLD = 0.55
 
 RETRIEVE_K = 10
 RERANK_K = 5
@@ -59,7 +60,7 @@ def run_corpus_baseline(
     database_url = database_url or settings.database_url
     if not database_url:
         raise ValueError("语料评测必须通过 --database-url 或 DATABASE_URL 指定隔离数据库")
-    check_schema_version(database_url, 3)
+    check_schema_version(database_url, 4)
     _require_empty_evaluation_database(database_url)
     embedder = embedder or get_embedding_model()
     reranker = reranker or get_reranker()
@@ -88,12 +89,22 @@ def run_corpus_baseline(
                 raise RuntimeError(f"语料索引失败：{failed}")
 
             vector_rankings: dict[str, list[str]] = {}
+            hybrid_rankings: dict[str, list[str]] = {}
             reranked_rankings: dict[str, list[str]] = {}
             for query in dataset.queries:
-                candidates = service.store.query(
+                vector_candidates = service.store.query(
                     embedder.encode([query.question])[0], RETRIEVE_K, knowledge_base_id
                 )
-                vector_rankings[query.query_id] = [_position(item) for item in candidates]
+                vector_rankings[query.query_id] = [
+                    _position(item) for item in vector_candidates
+                ]
+                candidates = service.store.query(
+                    embedder.encode([query.question])[0],
+                    RETRIEVE_K,
+                    knowledge_base_id,
+                    query_text=query.question,
+                )
+                hybrid_rankings[query.query_id] = [_position(item) for item in candidates]
 
                 scores = reranker.score(query.question, [item.text for item in candidates])
                 reranked = rank_candidates(candidates, scores, min(RERANK_K, len(candidates)))
@@ -106,6 +117,7 @@ def run_corpus_baseline(
         [_as_evaluation_query(query) for query in dataset.queries],
         vector_rankings,
         reranked_rankings,
+        hybrid_rankings,
     )
     run_at = datetime.now(UTC)
     report = RetrievalEvaluationReport(
@@ -126,6 +138,7 @@ def run_corpus_baseline(
             "rerank_k": RERANK_K,
             "distance": "cosine",
             "normalize_embeddings": True,
+            "retrieval_strategy": "vector_lexical_rrf",
             "ranking_strategy": "minmax_weighted_fusion",
             "vector_score_weight": VECTOR_SCORE_WEIGHT,
             "chunk_size": chunk_size,
@@ -148,6 +161,11 @@ def run_corpus_baseline(
             metrics.rerank_mrr,
             RERANK_MRR_THRESHOLD,
             baseline.rerank_mrr.value if baseline else None,
+        ),
+        hybrid_mrr=assess_metric(
+            metrics.hybrid_mrr if metrics.hybrid_mrr is not None else 0.0,
+            HYBRID_MRR_THRESHOLD,
+            baseline.hybrid_mrr.value if baseline and baseline.hybrid_mrr else None,
         ),
     )
     return report.model_copy(update={"official": report.passed})

@@ -101,6 +101,7 @@ class EvaluationReportRepository:
             recall_at_5=report.recall_at_5.model_dump(),
             vector_mrr=report.vector_mrr.model_dump(),
             rerank_mrr=report.rerank_mrr.model_dump(),
+            hybrid_mrr=report.hybrid_mrr.model_dump() if report.hybrid_mrr else None,
         )
 
     @staticmethod
