@@ -283,9 +283,10 @@ npm run build
 [备份恢复与数据生命周期运行手册](docs/operations/backup-recovery.md)。恢复工具强制使用空目标目录，
 不会覆盖现有数据；Render 或其他正式环境恢复仍须另行批准。
 
-V4 的 Tag 质量门、GHCR 不可变镜像、制品清单、GitHub Release 和前一版本隔离回滚流程见
-[V4 版本发布与受控回滚](docs/operations/release-rollback.md)。发布必须由明确批准的 `v4.x.y`
-Tag 触发；普通 PR 不创建版本制品，也不会触发 Render 部署。
+PostgreSQL 版本的 Tag 质量门、GHCR 不可变镜像、制品清单和前一版本隔离回滚流程见
+[PostgreSQL 版本发布与受控回滚](docs/operations/release-rollback.md)。发布必须由明确批准的 `v5.x.y`
+Tag 触发；普通 PR 不创建版本制品，也不会触发 Render 部署。回滚流程使用隔离的 PostgreSQL、
+pgvector 和原始文件目标，并以独立 Worker 验证当前生产运行模式。
 
 V4 的生产就绪验收范围、证据索引、已知限制与 V0→V4 总复盘见
 [V4 生产就绪验收报告](docs/reports/v4-readiness.md)。版本 commit、镜像摘要和回滚记录以

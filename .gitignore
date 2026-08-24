@@ -1,6 +1,7 @@
 .env
 deploy/kubernetes/secret.yaml
 artifacts/controlled-pilot/
+artifacts/postgres-rollback.json
 frontend/playwright-report/
 frontend/test-results/
 .env.*
