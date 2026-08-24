@@ -3,7 +3,7 @@ name: release
 on:
   push:
     tags:
-      - "v4.*.*"
+      - "v5.*.*"
 
 permissions:
   contents: write
@@ -22,6 +22,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       BACKEND_REPOSITORY: ghcr.io/${{ github.repository }}/backend
       FRONTEND_REPOSITORY: ghcr.io/${{ github.repository }}/frontend
+      RELEASE_POSTGRES_IMAGE: docker.io/pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     steps:
       - name: 检出完整版本历史
         uses: actions/checkout@v7
@@ -32,21 +33,29 @@ jobs:
         id: version
         run: |
           tag="${GITHUB_REF_NAME}"
-          if [[ ! "$tag" =~ ^v4\.[0-9]+\.[0-9]+$ ]]; then
-            echo "仅允许 v4.x.y 版本 Tag" >&2
+          if [[ ! "$tag" =~ ^v5\.[0-9]+\.[0-9]+$ ]]; then
+            echo "仅允许 v5.x.y 版本 Tag" >&2
             exit 1
           fi
           git fetch origin main --tags --force
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-          previous_tag="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // empty')"
-          if [ -z "$previous_tag" ]; then
-            previous_tag="$(git tag --merged "$GITHUB_SHA" --list 'v[0-3].*' --sort=-v:refname | head -n 1)"
+          previous_tag="$(gh release list --exclude-drafts --exclude-pre-releases --limit 100 --json tagName --jq '[.[] | select(.tagName | startswith("v5."))][0].tagName // empty')"
+          if [ -n "$previous_tag" ]; then
+            previous_sha="$(git rev-list -n 1 "$previous_tag")"
+          else
+            previous_sha="${{ vars.POSTGRES_ROLLBACK_BASE_COMMIT }}"
+            if [[ ! "$previous_sha" =~ ^[a-f0-9]{40}$ ]]; then
+              echo "首个 v5 Release 必须配置已通过 main quality 的 POSTGRES_ROLLBACK_BASE_COMMIT" >&2
+              exit 1
+            fi
+            previous_tag="postgres-baseline-${previous_sha::12}"
           fi
-          if [ -z "$previous_tag" ]; then
-            echo "没有可用的前一发布版本" >&2
+          git merge-base --is-ancestor "$previous_sha" origin/main
+          previous_success="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?branch=main&head_sha=${previous_sha}&status=success" --jq '[.workflow_runs[] | select(.name == "quality" and .event == "push")] | length')"
+          if [ "$previous_success" -lt 1 ]; then
+            echo "前一 PostgreSQL 回滚基线没有通过 main quality" >&2
             exit 1
           fi
-          previous_sha="$(git rev-list -n 1 "$previous_tag")"
           successful_runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?branch=main&head_sha=${GITHUB_SHA}&status=success" --jq '[.workflow_runs[] | select(.name == "quality" and .event == "push")] | length')"
           if [ "$successful_runs" -lt 1 ]; then
             echo "Tag 提交没有通过 main quality 工作流" >&2
@@ -113,6 +122,7 @@ jobs:
           CURRENT_FRONTEND_IMAGE: ${{ steps.images.outputs.current_frontend }}
           PREVIOUS_BACKEND_IMAGE: ${{ steps.images.outputs.previous_backend }}
           PREVIOUS_FRONTEND_IMAGE: ${{ steps.images.outputs.previous_frontend }}
+          RELEASE_POSTGRES_IMAGE: ${{ env.RELEASE_POSTGRES_IMAGE }}
           ROLLBACK_EVIDENCE_PATH: release/rollback-evidence.json
         run: |
           uv sync --locked --dev
@@ -126,16 +136,18 @@ jobs:
             --arg commit "$GITHUB_SHA" \
             --arg previous_tag "${{ steps.version.outputs.previous_tag }}" \
             --arg previous_commit "${{ steps.version.outputs.previous_sha }}" \
+            --arg postgres "$RELEASE_POSTGRES_IMAGE" \
             --arg backend "${{ steps.images.outputs.current_backend }}" \
             --arg frontend "${{ steps.images.outputs.current_frontend }}" \
             --arg rollback_backend "${{ steps.images.outputs.previous_backend }}" \
             --arg rollback_frontend "${{ steps.images.outputs.previous_frontend }}" \
-            '{tag:$tag,commit:$commit,images:{backend:$backend,frontend:$frontend},rollback:{tag:$previous_tag,commit:$previous_commit,backend:$rollback_backend,frontend:$rollback_frontend}}' \
+            '{tag:$tag,commit:$commit,images:{postgres:$postgres,backend:$backend,frontend:$frontend},rollback:{tag:$previous_tag,commit:$previous_commit,backend:$rollback_backend,frontend:$rollback_frontend}}' \
             > release/artifact-manifest.json
           {
             echo "## 不可变制品"
             echo
             echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- PostgreSQL: \`$RELEASE_POSTGRES_IMAGE\`"
             echo "- Backend: \`${{ steps.images.outputs.current_backend }}\`"
             echo "- Frontend: \`${{ steps.images.outputs.current_frontend }}\`"
             echo "- 回滚版本: \`${{ steps.version.outputs.previous_tag }}\`"
@@ -150,7 +162,7 @@ jobs:
             --fail-on-no-commits \
             --title "RongRAG Studio ${{ steps.version.outputs.tag }}" \
             --generate-notes \
-            --notes-start-tag "${{ steps.version.outputs.previous_tag }}" \
+            --notes-start-tag "${{ steps.version.outputs.previous_sha }}" \
             --notes "$(cat release/release-notes.md)" \
             release/artifact-manifest.json release/rollback-evidence.json
 

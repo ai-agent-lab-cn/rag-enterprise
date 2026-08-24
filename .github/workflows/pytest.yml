@@ -174,7 +174,11 @@ jobs:
         env:
           RELEASE_BACKEND_IMAGE: example.invalid/backend@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           RELEASE_FRONTEND_IMAGE: example.invalid/frontend@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-          ACTIVE_DATA_ROOT: /tmp/rongrag-release-contract
+          RELEASE_POSTGRES_IMAGE: docker.io/pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+          POSTGRES_PASSWORD: release-contract-placeholder
+          ACTIVE_POSTGRES_ROOT: /tmp/rongrag-release-contract/postgres
+          ACTIVE_UPLOADS_ROOT: /tmp/rongrag-release-contract/uploads
+          ACTIVE_BACKUPS_ROOT: /tmp/rongrag-release-contract/backups
         run: |
           docker compose --file docker-compose.release.yml config --quiet
           bash -n scripts/verify_release_rollback.sh

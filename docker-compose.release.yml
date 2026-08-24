@@ -1,23 +1,72 @@
 services:
+  postgres:
+    image: "${RELEASE_POSTGRES_IMAGE:?RELEASE_POSTGRES_IMAGE is required}"
+    environment:
+      POSTGRES_DB: rag_enterprise
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+    volumes:
+      - "${ACTIVE_POSTGRES_ROOT:?ACTIVE_POSTGRES_ROOT is required}:/var/lib/postgresql/data"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag_enterprise"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    profiles: ["tools"]
+    image: "${RELEASE_BACKEND_IMAGE:?RELEASE_BACKEND_IMAGE is required}"
+    command: ["python", "-m", "scripts.database_migrate", "apply"]
+    environment:
+      DATABASE_URL: "postgresql://rag:${POSTGRES_PASSWORD}@postgres:5432/rag_enterprise"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   backend:
     image: "${RELEASE_BACKEND_IMAGE:?RELEASE_BACKEND_IMAGE is required}"
     environment:
+      DATABASE_URL: "postgresql://rag:${POSTGRES_PASSWORD}@postgres:5432/rag_enterprise"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "2"
       GEMINI_API_KEY: ""
       EMBEDDING_MODEL: "${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}"
       RERANKER_MODEL: "${RERANKER_MODEL:-demo/lexical-overlap-v1}"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      TOKENIZERS_PARALLELISM: "false"
     volumes:
-      - "${ACTIVE_DATA_ROOT:?ACTIVE_DATA_ROOT is required}/chroma:/app/data/chroma"
-      - "${ACTIVE_DATA_ROOT}/uploads:/app/data/uploads"
-      - "${ACTIVE_DATA_ROOT}/knowledge_bases:/app/data/knowledge_bases"
-      - "${ACTIVE_DATA_ROOT}/conversations:/app/data/conversations"
-      - "${ACTIVE_DATA_ROOT}/auth:/app/data/auth"
-      - "${ACTIVE_DATA_ROOT}/audit:/app/data/audit"
+      - "${ACTIVE_UPLOADS_ROOT:?ACTIVE_UPLOADS_ROOT is required}:/app/data/uploads"
+      - "${ACTIVE_BACKUPS_ROOT:?ACTIVE_BACKUPS_ROOT is required}:/app/data/backups"
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/ready', timeout=2)"]
       interval: 5s
       timeout: 3s
       start_period: 10s
       retries: 24
+
+  worker:
+    image: "${RELEASE_BACKEND_IMAGE:?RELEASE_BACKEND_IMAGE is required}"
+    command: ["python", "-m", "scripts.index_worker"]
+    environment:
+      DATABASE_URL: "postgresql://rag:${POSTGRES_PASSWORD}@postgres:5432/rag_enterprise"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "2"
+      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}"
+      INDEX_WORKER_ID: release-rollback-worker
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      TOKENIZERS_PARALLELISM: "false"
+    volumes:
+      - "${ACTIVE_UPLOADS_ROOT:?ACTIVE_UPLOADS_ROOT is required}:/app/data/uploads"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      disable: true
 
   frontend:
     image: "${RELEASE_FRONTEND_IMAGE:?RELEASE_FRONTEND_IMAGE is required}"
@@ -27,7 +76,7 @@ services:
     ports:
       - "127.0.0.1:${RELEASE_PORT:-5180}:8080"
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8080/api/health"]
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8080/api/health/ready"]
       interval: 5s
       timeout: 3s
       start_period: 5s
