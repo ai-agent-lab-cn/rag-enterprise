@@ -192,6 +192,9 @@ class Source(BaseModel):
     text: str
     retrieval_score: float
     rerank_score: float
+    vector_score: float | None = None
+    lexical_score: float | None = None
+    retrieval_methods: list[Literal["vector", "lexical"]] = Field(default_factory=list)
 
 
 class QueryResponse(BaseModel):
@@ -310,6 +313,7 @@ class EvaluationReportResponse(EvaluationReportSummary):
     recall_at_5: EvaluationMetricResponse
     vector_mrr: EvaluationMetricResponse
     rerank_mrr: EvaluationMetricResponse
+    hybrid_mrr: EvaluationMetricResponse | None = None
 
 
 class AnswerEvaluationMetricResponse(EvaluationMetricResponse):

@@ -17,6 +17,7 @@ from .errors import AppError
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID, validate_knowledge_base_id
 from .models import EmbeddingModel, GeminiGenerator, Reranker
 from .parsers import parse_document
+from .ranking import fuse_retrieval_candidates
 from .schemas import DocumentInfo
 from .security import write_private_file
 from .service import RAGService
@@ -38,11 +39,12 @@ class PostgresVectorStore:
         embedding: list[float],
         limit: int,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        query_text: str | None = None,
     ) -> list[RetrievedChunk]:
         validate_knowledge_base_id(knowledge_base_id)
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             register_vector(connection)
-            rows = connection.execute(
+            vector_rows = connection.execute(
                 """SELECT c.chunk_id, c.content, c.metadata,
                           1 - (c.embedding <=> %s::vector) AS retrieval_score
                    FROM chunks c
@@ -50,20 +52,60 @@ class PostgresVectorStore:
                      ON d.knowledge_base_id = c.knowledge_base_id
                     AND d.document_id = (c.metadata->>'document_id')
                     AND d.current_version_id = c.document_version_id
+                   JOIN document_versions v
+                     ON v.document_version_id = c.document_version_id
+                    AND v.status = 'ready'
                    WHERE c.knowledge_base_id = %s
                    ORDER BY c.embedding <=> %s::vector
                    LIMIT %s""",
                 (embedding, knowledge_base_id, embedding, limit),
             ).fetchall()
-        return [
+            lexical_rows = connection.execute(
+                """SELECT c.chunk_id, c.content, c.metadata,
+                          GREATEST(
+                              similarity(lower(c.content), lower(%s)),
+                              word_similarity(lower(%s), lower(c.content))
+                          ) AS retrieval_score
+                   FROM chunks c
+                   JOIN documents d
+                     ON d.knowledge_base_id = c.knowledge_base_id
+                    AND d.document_id = (c.metadata->>'document_id')
+                    AND d.current_version_id = c.document_version_id
+                   JOIN document_versions v
+                     ON v.document_version_id = c.document_version_id
+                    AND v.status = 'ready'
+                   WHERE c.knowledge_base_id = %s
+                     AND GREATEST(
+                         similarity(lower(c.content), lower(%s)),
+                         word_similarity(lower(%s), lower(c.content))
+                     ) > 0
+                   ORDER BY retrieval_score DESC, c.chunk_id
+                   LIMIT %s""",
+                (query_text, query_text, knowledge_base_id, query_text, query_text, limit),
+            ).fetchall() if query_text else []
+        vectors = [
             RetrievedChunk(
                 chunk_id=str(row["chunk_id"]),
                 text=str(row["content"]),
                 metadata=dict(row["metadata"]),
                 retrieval_score=round(float(row["retrieval_score"]), 6),
+                vector_score=round(float(row["retrieval_score"]), 6),
+                retrieval_methods=["vector"],
             )
-            for row in rows
+            for row in vector_rows
         ]
+        lexical = [
+            RetrievedChunk(
+                chunk_id=str(row["chunk_id"]),
+                text=str(row["content"]),
+                metadata=dict(row["metadata"]),
+                retrieval_score=round(float(row["retrieval_score"]), 6),
+                lexical_score=round(float(row["retrieval_score"]), 6),
+                retrieval_methods=["lexical"],
+            )
+            for row in lexical_rows
+        ]
+        return fuse_retrieval_candidates(vectors, lexical, limit)
 
     def list_documents(self, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID) -> list[dict[str, Any]]:
         validate_knowledge_base_id(knowledge_base_id)

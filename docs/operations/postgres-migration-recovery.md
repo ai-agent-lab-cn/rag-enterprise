@@ -9,7 +9,7 @@
 3. 升级已有 schema 2 数据库时，先确认同一文档版本没有多个活动任务；查询必须返回零行：
    `SELECT document_version_id FROM index_jobs WHERE status IN ('queued', 'running') GROUP BY document_version_id HAVING count(*) > 1;`
 4. 执行 `uv run python scripts/database_migrate.py apply`。
-5. 执行 `uv run python scripts/database_migrate.py check --required-version 3`。
+5. 执行 `uv run python scripts/database_migrate.py check --required-version 4`。
 6. 使用原有备份工具备份旧 `data/`，验证备份并完成一次空目录隔离恢复。
 
 ## 全量导入与校验
@@ -44,7 +44,7 @@ uv run python scripts/postgres_backup.py verify \
 uv run python scripts/postgres_backup.py restore \
   --backup /secure/off-host/rag-postgres.tar.gz \
   --uploads-target /tmp/rag-restored/uploads
-uv run python scripts/database_migrate.py check --required-version 3
+uv run python scripts/database_migrate.py check --required-version 4
 ```
 
 切换前若校验失败，保持旧版本和旧数据目录不变，删除失败的隔离目标后重新处理；不得在原目标上局部补写。运行时正式切换属于下一阶段，不在本阶段执行。

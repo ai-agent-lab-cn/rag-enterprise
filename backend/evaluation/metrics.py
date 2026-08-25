@@ -32,12 +32,14 @@ class RetrievalMetrics:
     recall_at_5: float
     vector_mrr: float
     rerank_mrr: float
+    hybrid_mrr: float | None = None
 
 
 def evaluate_rankings(
     queries: Sequence[EvaluationQuery],
     vector_rankings: Mapping[str, Sequence[str]],
     reranked_rankings: Mapping[str, Sequence[str]],
+    hybrid_rankings: Mapping[str, Sequence[str]] | None = None,
 ) -> RetrievalMetrics:
     """以宏平均方式计算固定数据集的三项 V2 指标。"""
 
@@ -48,15 +50,22 @@ def evaluate_rankings(
         missing = expected_ids - set(rankings)
         if missing:
             raise ValueError(f"{name}缺少问题结果：{sorted(missing)}")
+    if hybrid_rankings is not None:
+        missing = expected_ids - set(hybrid_rankings)
+        if missing:
+            raise ValueError(f"混合召回缺少问题结果：{sorted(missing)}")
 
     recalls: list[float] = []
     vector_rrs: list[float] = []
     rerank_rrs: list[float] = []
+    hybrid_rrs: list[float] = []
     for query in queries:
         relevant = set(query.relevant_chunk_ids)
         recalls.append(recall_at_k(vector_rankings[query.query_id], relevant, 5))
         vector_rrs.append(reciprocal_rank(vector_rankings[query.query_id], relevant))
         rerank_rrs.append(reciprocal_rank(reranked_rankings[query.query_id], relevant))
+        if hybrid_rankings is not None:
+            hybrid_rrs.append(reciprocal_rank(hybrid_rankings[query.query_id], relevant))
 
     count = len(queries)
     return RetrievalMetrics(
@@ -64,4 +73,5 @@ def evaluate_rankings(
         recall_at_5=sum(recalls) / count,
         vector_mrr=sum(vector_rrs) / count,
         rerank_mrr=sum(rerank_rrs) / count,
+        hybrid_mrr=sum(hybrid_rrs) / count if hybrid_rrs else None,
     )

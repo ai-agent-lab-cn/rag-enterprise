@@ -4,11 +4,12 @@ import type { EvaluationMetric, EvaluationReport, EvaluationReportSummary } from
 import { TopbarPortal } from "./TopbarPortal";
 
 const METRIC_ROWS: Array<{
-  key: "recall_at_5" | "vector_mrr" | "rerank_mrr";
+  key: "recall_at_5" | "vector_mrr" | "hybrid_mrr" | "rerank_mrr";
   label: string;
 }> = [
   { key: "recall_at_5", label: "Recall@5" },
   { key: "vector_mrr", label: "向量 MRR" },
+  { key: "hybrid_mrr", label: "混合召回 MRR" },
   { key: "rerank_mrr", label: "最终排序 MRR" },
 ];
 
@@ -129,9 +130,10 @@ export function EvaluationPage() {
             </div>
           </div>
           <div className="quality-grid">
-            {METRIC_ROWS.map(({ key, label }) => (
-              <MetricCard key={key} label={label} metric={report[key]} />
-            ))}
+            {METRIC_ROWS.map(({ key, label }) => {
+              const metric = report[key];
+              return metric ? <MetricCard key={key} label={label} metric={metric} /> : null;
+            })}
           </div>
           <div className="report-details">
             <section>
