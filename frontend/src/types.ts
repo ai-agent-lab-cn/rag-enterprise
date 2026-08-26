@@ -26,6 +26,9 @@ export interface Source {
   text: string;
   retrieval_score: number;
   rerank_score: number;
+  // V5 之前保存的历史回答没有这两个字段，缺失表示通路未知，不得当作向量召回展示。
+  retrieval_channels?: string[];
+  lexical_score?: number | null;
 }
 
 export interface QueryResult {
@@ -150,7 +153,7 @@ export interface DataSource {
   sync_status: "idle" | "queued" | "running" | "succeeded" | "failed";
   document_count: number; source_file_bytes: number; last_indexed_at: string | null; last_synced_at: string | null;
   failure_reason: string | null; updated_at: string;
-  allowed_actions: Array<"detail" | "edit" | "disable" | "enable" | "sync" | "delete">;
+  allowed_actions: Array<"detail" | "edit" | "disable" | "enable" | "update_file" | "delete">;
 }
 
 export interface ConversationSummary {

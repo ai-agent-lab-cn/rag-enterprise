@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     auth_path: Path = Path("data/auth/store.json")
     audit_path: Path = Path("data/audit/events.json")
     database_url: str | None = None
-    required_database_schema_version: int = Field(default=3, ge=1)
+    required_database_schema_version: int = Field(default=4, ge=1)
     index_worker_id: str = "worker-local"
     index_job_max_attempts: int = Field(default=3, ge=1, le=10)
     index_job_stale_seconds: int = Field(default=900, ge=60, le=86400)
@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     collection_name: str = "rongrag_documents"
     chunk_size: int = Field(default=700, ge=100, le=4000)
     chunk_overlap: int = Field(default=100, ge=0, le=1000)
+    # 默认保持纯向量召回；hybrid 的实测收益确认前不改默认值。
+    retrieval_mode: Literal["vector", "hybrid"] = "vector"
     max_upload_mb: int = Field(default=15, ge=1, le=100)
     max_request_body_mb: int = Field(default=16, ge=1, le=101)
     max_filename_chars: int = Field(default=160, ge=32, le=255)

@@ -30,7 +30,7 @@ def test_data_source_response_normalizes_repository_sync_status() -> None:
     assert response.upload_status == "succeeded"
     assert response.index_status == "succeeded"
     assert response.last_indexed_at == response.last_synced_at
-    assert response.allowed_actions == ["detail", "sync", "edit", "disable"]
+    assert response.allowed_actions == ["detail", "update_file", "edit", "disable"]
 
 
 def test_health_does_not_initialize_rag_service(client) -> None:

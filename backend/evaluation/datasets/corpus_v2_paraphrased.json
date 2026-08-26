@@ -1,8 +1,8 @@
 {
-  "dataset_id": "rag-enterprise-corpus",
-  "version": "2.0.0",
+  "dataset_id": "rag-enterprise-corpus-paraphrased",
+  "version": "1.1.0",
   "language": "zh-CN",
-  "description": "以 docs/ 的 10 篇真实中文运维与设计文档为冻结语料，标注锚定原始段落，使解析与切分进入被测范围。ui-baseline.md 同时承担干扰文档职责。",
+  "description": "与 corpus_v2 共用同一份冻结语料和段落标注，但问法改为贴近真实用户的口语化表达，并尽量避开原文措辞与标识符。用于检验词法召回的优势是否来自评测集与原文的用词重合。1.1.0 修正了 4 条自身存在术语撞车或指代不明的问句（q044/q055/q119/q132）——它们的失败源于评测集缺陷而非检索能力，保留会污染后续测量；其余失败条目（纯命令段落、长列表段落）如实保留，作为真实困难的基准。",
   "corpus_dir": "corpus_v2",
   "documents": [
     {
@@ -59,7 +59,7 @@
   "queries": [
     {
       "query_id": "q001",
-      "question": "备份恢复手册适用于什么架构？",
+      "question": "这套存档流程是给什么样的部署环境写的？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -69,7 +69,7 @@
     },
     {
       "query_id": "q002",
-      "question": "备份根目录固定覆盖哪几个子目录？",
+      "question": "做一次完整存档，都会把哪些东西打包进去？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -79,7 +79,7 @@
     },
     {
       "query_id": "q003",
-      "question": "API Key 和 TLS 私钥会被纳入备份吗？",
+      "question": "凭证和证书这类敏感东西会不会一起被存下来？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -89,7 +89,7 @@
     },
     {
       "query_id": "q004",
-      "question": "备份工具发现疑似密钥文件时会怎么处理？",
+      "question": "如果工具在目录里翻到看着像凭证的文件，会怎么办？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -99,7 +99,7 @@
     },
     {
       "query_id": "q005",
-      "question": "为什么一致性备份要求先停止写请求？",
+      "question": "存档之前为什么非得让服务先停下来？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -109,7 +109,7 @@
     },
     {
       "query_id": "q006",
-      "question": "Compose 场景应该从哪里执行备份？",
+      "question": "容器编排那种部署方式，应该从哪里取数据做存档？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -119,7 +119,7 @@
     },
     {
       "query_id": "q007",
-      "question": "创建文件备份包的命令是什么？",
+      "question": "怎么手动生成一份存档？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -129,7 +129,7 @@
     },
     {
       "query_id": "q008",
-      "question": "怎么校验已经创建好的备份包？",
+      "question": "存档做完了，怎么确认它没坏？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -139,7 +139,7 @@
     },
     {
       "query_id": "q009",
-      "question": "备份包的 manifest.json 里记录了什么？",
+      "question": "打包出来的清单文件里都写了些什么？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -149,7 +149,7 @@
     },
     {
       "query_id": "q010",
-      "question": "备份创建成功之后应该怎么保管？",
+      "question": "存档做好以后该放在哪、需要登记什么？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -159,7 +159,7 @@
     },
     {
       "query_id": "q011",
-      "question": "恢复目标目录必须满足什么条件？",
+      "question": "往回还原的时候，目标位置有什么要求？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -169,7 +169,7 @@
     },
     {
       "query_id": "q012",
-      "question": "恢复演练的 RTO 怎么测量？",
+      "question": "怎么算出一次还原到底花了多久？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -179,7 +179,7 @@
     },
     {
       "query_id": "q013",
-      "question": "可以把恢复目录挂载到当前正在服务的系统上吗？",
+      "question": "能不能把还原出来的那份数据直接挂到正在跑的服务上？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -189,7 +189,7 @@
     },
     {
       "query_id": "q014",
-      "question": "恢复演练之后要在隔离后端验证哪些内容？",
+      "question": "还原完之后要在隔离环境里核对哪些东西？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -199,7 +199,7 @@
     },
     {
       "query_id": "q015",
-      "question": "演练记录至少要包含哪些条目？",
+      "question": "每次做完这种练习，记录里至少要写哪些内容？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -209,7 +209,7 @@
     },
     {
       "query_id": "q016",
-      "question": "没有正式运行数据时可以承诺生产 RPO 和 RTO 吗？",
+      "question": "还没有真实线上数据的时候，能对外承诺多久能恢复吗？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -219,7 +219,7 @@
     },
     {
       "query_id": "q017",
-      "question": "恢复后发现配置的 embedding 模型与索引不匹配该怎么办？",
+      "question": "还原之后发现向量模型跟索引对不上，该怎么办？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -229,7 +229,7 @@
     },
     {
       "query_id": "q018",
-      "question": "删除了业务数据以后，旧备份里的那份数据怎么处理？",
+      "question": "用户要求删数据，可旧存档里还留着，这怎么处理？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -239,7 +239,7 @@
     },
     {
       "query_id": "q019",
-      "question": "故障处置流程的第一步要做什么？",
+      "question": "出事了第一件该做的是什么？",
       "relevant": [
         {
           "filename": "backup-recovery.md",
@@ -249,7 +249,7 @@
     },
     {
       "query_id": "q020",
-      "question": "受控试运行的策略配置文件是哪一个？",
+      "question": "小范围上线那套判定规则写在哪个文件里？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -259,7 +259,7 @@
     },
     {
       "query_id": "q021",
-      "question": "试运行报告里 external_slo 必须保留成什么值？",
+      "question": "报告里那个表示对外承诺的开关必须设成什么？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -269,7 +269,7 @@
     },
     {
       "query_id": "q022",
-      "question": "可用性这个 SLI 是怎么计算的？",
+      "question": "服务好不好用这个数是怎么算出来的？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -279,7 +279,7 @@
     },
     {
       "query_id": "q023",
-      "question": "延迟指标用哪种统计口径？",
+      "question": "响应快慢用什么统计方式衡量？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -289,7 +289,7 @@
     },
     {
       "query_id": "q024",
-      "question": "检索失败率的分子和分母分别是什么？",
+      "question": "问答出错的比例是拿什么除以什么？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -299,7 +299,7 @@
     },
     {
       "query_id": "q025",
-      "question": "索引积压是怎么度量的？",
+      "question": "任务排队堆积到什么程度算超标，怎么量？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -309,7 +309,7 @@
     },
     {
       "query_id": "q026",
-      "question": "容量类指标按什么比例衡量？",
+      "question": "磁盘占用是按什么口径判断的？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -319,7 +319,7 @@
     },
     {
       "query_id": "q027",
-      "question": "样本缺失或者窗口不足的时候怎么判定？",
+      "question": "如果采集到的点数不够或者中间断了，结论算过还是不过？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -329,7 +329,7 @@
     },
     {
       "query_id": "q028",
-      "question": "默认的采样窗口和最少样本数是多少？",
+      "question": "默认要观察多长时间、至少收集多少个点？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -339,7 +339,7 @@
     },
     {
       "query_id": "q029",
-      "question": "执行受控试运行用哪个脚本？",
+      "question": "跑这轮小范围验证用哪个脚本？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -349,7 +349,7 @@
     },
     {
       "query_id": "q030",
-      "question": "试运行的原始样本和判定报告生成在什么目录？",
+      "question": "跑完以后产出的数据落在什么地方？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -359,7 +359,7 @@
     },
     {
       "query_id": "q031",
-      "question": "会话令牌会被写进试运行报告吗？",
+      "question": "登录凭据会不会被写进产出的文件里？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -369,7 +369,7 @@
     },
     {
       "query_id": "q032",
-      "question": "核对生产清单的命令怎么写？",
+      "question": "核对搬迁后数量的那条命令怎么写？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -379,7 +379,7 @@
     },
     {
       "query_id": "q033",
-      "question": "迁移核对时目标库的 sessions 数量应该是多少？",
+      "question": "数据搬完以后，新库里的登录记录应该剩多少条？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -389,7 +389,7 @@
     },
     {
       "query_id": "q034",
-      "question": "迁移后要怎么验证旧令牌已经失效？",
+      "question": "搬完之后怎么确认老的登录凭据已经不能用了？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -399,7 +399,7 @@
     },
     {
       "query_id": "q035",
-      "question": "故障桌面演练怎么逐项重启组件？",
+      "question": "怎么挨个把服务重启一遍来练手？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -409,7 +409,7 @@
     },
     {
       "query_id": "q036",
-      "question": "验证前一版本镜像时可以用 latest 标签吗？",
+      "question": "验证退回上个版本时，能不能用那种会变的镜像标签？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -419,7 +419,7 @@
     },
     {
       "query_id": "q037",
-      "question": "关闭 #86 需要哪些证据全部通过？",
+      "question": "要收尾这个阶段，得凑齐哪些证明材料？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -429,7 +429,7 @@
     },
     {
       "query_id": "q038",
-      "question": "最终试运行报告必须列明哪些限制？",
+      "question": "结项报告里必须坦白哪些做不到的地方？",
       "relevant": [
         {
           "filename": "controlled-pilot.md",
@@ -439,7 +439,7 @@
     },
     {
       "query_id": "q039",
-      "question": "阶段 5 的发布验收记录对应哪个 Issue？",
+      "question": "这份验收记录是为哪个任务单写的？",
       "relevant": [
         {
           "filename": "controlled-pilot-readiness.md",
@@ -449,7 +449,7 @@
     },
     {
       "query_id": "q040",
-      "question": "SLI 原始样本和内部阈值的证据保存在哪里？",
+      "question": "那些采集到的原始数据存放在什么地方？",
       "relevant": [
         {
           "filename": "controlled-pilot-readiness.md",
@@ -459,7 +459,7 @@
     },
     {
       "query_id": "q041",
-      "question": "浏览器端流程的验收证据来自什么？",
+      "question": "页面操作流程的验证结果从哪里来？",
       "relevant": [
         {
           "filename": "controlled-pilot-readiness.md",
@@ -469,7 +469,7 @@
     },
     {
       "query_id": "q042",
-      "question": "单节点本地环境在容灾上有什么限制？",
+      "question": "只有一台机器的环境，在抗灾方面差在哪？",
       "relevant": [
         {
           "filename": "controlled-pilot-readiness.md",
@@ -479,7 +479,7 @@
     },
     {
       "query_id": "q043",
-      "question": "正式云环境准入必须补齐哪些能力？",
+      "question": "真要搬到云上正式跑，还欠哪些东西？",
       "relevant": [
         {
           "filename": "controlled-pilot-readiness.md",
@@ -489,7 +489,7 @@
     },
     {
       "query_id": "q044",
-      "question": "PostgreSQL 的不可变版本回滚缺陷由哪个 Issue 跟踪？",
+      "question": "数据库退版本那个还没修好的问题，在哪里跟踪？",
       "relevant": [
         {
           "filename": "controlled-pilot-readiness.md",
@@ -499,7 +499,7 @@
     },
     {
       "query_id": "q045",
-      "question": "什么条件下放行结论才能从未放行改掉？",
+      "question": "什么时候才能把结论从「还不能放」改掉？",
       "relevant": [
         {
           "filename": "controlled-pilot-readiness.md",
@@ -509,7 +509,7 @@
     },
     {
       "query_id": "q046",
-      "question": "发布工作流只响应什么格式的 Tag？",
+      "question": "打什么样的版本号才会触发出包流程？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -519,7 +519,7 @@
     },
     {
       "query_id": "q047",
-      "question": "创建发布 Tag 之前必须确认什么？",
+      "question": "打版本号之前得先确认哪几件事？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -529,7 +529,7 @@
     },
     {
       "query_id": "q048",
-      "question": "后端和前端镜像必须用什么形式引用？",
+      "question": "镜像该怎么写才算符合要求？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -539,7 +539,7 @@
     },
     {
       "query_id": "q049",
-      "question": "首个 v5 Release 需要仓库管理员配置什么？",
+      "question": "第一次出这个大版本的包，管理员得先配好什么？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -549,7 +549,7 @@
     },
     {
       "query_id": "q050",
-      "question": "POSTGRES_ROLLBACK_BASE_COMMIT 必须满足哪些条件？",
+      "question": "那个用来做退回基准的提交号有什么硬性要求？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -559,7 +559,7 @@
     },
     {
       "query_id": "q051",
-      "question": "回滚验证脚本用了几套 Compose project 和 bind mount？",
+      "question": "验证退版本的脚本是怎么做到两边互不干扰的？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -569,7 +569,7 @@
     },
     {
       "query_id": "q052",
-      "question": "隔离回滚流程的第一步做什么？",
+      "question": "整个退版本演练最开始要做什么？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -579,7 +579,7 @@
     },
     {
       "query_id": "q053",
-      "question": "回滚过程中会执行降级迁移吗？",
+      "question": "退回旧版本时会不会反向改数据库结构？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -589,7 +589,7 @@
     },
     {
       "query_id": "q054",
-      "question": "为什么会话数量不能作为回滚前后完全相等的断言？",
+      "question": "为什么登录记录的条数前后对不上也算正常？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -599,7 +599,7 @@
     },
     {
       "query_id": "q055",
-      "question": "rollback-evidence.json 里不允许包含什么？",
+      "question": "最后产出的那份证明材料里，不许包含哪些东西？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -609,7 +609,7 @@
     },
     {
       "query_id": "q056",
-      "question": "哪些情况会直接停止 Release？",
+      "question": "碰到哪些情况就得中止出包？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -619,7 +619,7 @@
     },
     {
       "query_id": "q057",
-      "question": "回滚失败时可以在正式数据库上补写吗？",
+      "question": "演练失败了，能不能直接在正在用的库上补数据？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -629,7 +629,7 @@
     },
     {
       "query_id": "q058",
-      "question": "本地合同演练怎么允许使用 Docker 内容寻址 image ID？",
+      "question": "在自己机器上试这套流程时，镜像怎么指定才行？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -639,7 +639,7 @@
     },
     {
       "query_id": "q059",
-      "question": "用相同镜像做本地演练只能证明什么？",
+      "question": "两边用一样的镜像来演练，能说明什么、不能说明什么？",
       "relevant": [
         {
           "filename": "release-rollback.md",
@@ -649,7 +649,7 @@
     },
     {
       "query_id": "q060",
-      "question": "应用启动的时候会自动建表或导入旧数据吗？",
+      "question": "服务起来的时候会不会自己把表建好、把老数据搬进来？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -659,7 +659,7 @@
     },
     {
       "query_id": "q061",
-      "question": "执行迁移之前需要做哪些准备工作？",
+      "question": "动手搬数据之前要先准备些什么？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -685,7 +685,7 @@
     },
     {
       "query_id": "q062",
-      "question": "怎么执行数据库 schema 迁移？",
+      "question": "怎么把表结构建起来？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -695,7 +695,7 @@
     },
     {
       "query_id": "q063",
-      "question": "怎么校验数据库 schema 版本？",
+      "question": "怎么确认表结构已经是对的版本？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -705,7 +705,7 @@
     },
     {
       "query_id": "q064",
-      "question": "把旧数据全量导入 PostgreSQL 的命令是什么？",
+      "question": "把老数据整体搬进新库要执行什么？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -715,7 +715,7 @@
     },
     {
       "query_id": "q065",
-      "question": "全量导入是在什么事务边界内完成的？",
+      "question": "搬迁过程中途失败了会不会留下半截数据？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -725,7 +725,7 @@
     },
     {
       "query_id": "q066",
-      "question": "目标业务表非空的时候导入会怎样？",
+      "question": "如果新库里已经有业务数据了，搬迁会怎样？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -735,7 +735,7 @@
     },
     {
       "query_id": "q067",
-      "question": "对同一份源数据重复执行导入会发生什么？",
+      "question": "同一批数据不小心搬了两遍会怎么样？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -745,7 +745,7 @@
     },
     {
       "query_id": "q068",
-      "question": "迁移之后旧的登录令牌还能用吗？",
+      "question": "搬完之后大家还得重新登录吗？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -755,7 +755,7 @@
     },
     {
       "query_id": "q069",
-      "question": "导入完成后需要核对哪些数量？",
+      "question": "搬完要核对哪几类数量对不对得上？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -765,7 +765,7 @@
     },
     {
       "query_id": "q070",
-      "question": "缺失原始文件的历史文档会被怎么记录？",
+      "question": "有些老文档的原件已经找不到了，会怎么记录？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -775,7 +775,7 @@
     },
     {
       "query_id": "q071",
-      "question": "PostgreSQL 备份包里包含哪些内容？",
+      "question": "数据库那份存档里都装了些什么？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -785,7 +785,7 @@
     },
     {
       "query_id": "q072",
-      "question": "数据库备份包里会包含连接串或密钥吗？",
+      "question": "存档里会不会夹带数据库账号密码？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -795,7 +795,7 @@
     },
     {
       "query_id": "q073",
-      "question": "数据库恢复目标必须是什么状态？",
+      "question": "把数据还原过去的话，目标库得是什么状态？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -805,7 +805,7 @@
     },
     {
       "query_id": "q074",
-      "question": "切换之前校验失败了应该怎么处理？",
+      "question": "正式切过去之前校验没通过，该怎么收场？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -815,7 +815,7 @@
     },
     {
       "query_id": "q075",
-      "question": "PostgreSQL 模式下首次启动的正确顺序是什么？",
+      "question": "换到新存储之后，各个服务该按什么顺序起？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -825,7 +825,7 @@
     },
     {
       "query_id": "q076",
-      "question": "索引 Worker 用什么方式领取任务？",
+      "question": "后台处理程序是怎么保证不会两个人抢同一件活的？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -835,7 +835,7 @@
     },
     {
       "query_id": "q077",
-      "question": "索引任务重试达到上限之后会怎样？",
+      "question": "一份文件反复处理失败，最后会怎么样？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -845,7 +845,7 @@
     },
     {
       "query_id": "q078",
-      "question": "上传接口在 PostgreSQL 模式下只创建什么？",
+      "question": "用户传文件上来的那一刻，后台其实只做了什么？",
       "relevant": [
         {
           "filename": "postgres-migration-recovery.md",
@@ -855,7 +855,7 @@
     },
     {
       "query_id": "q079",
-      "question": "Kubernetes 生产演练手册对应哪个 Issue？",
+      "question": "本机集群这份操作说明是为哪个任务单写的？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -865,7 +865,7 @@
     },
     {
       "query_id": "q080",
-      "question": "谁负责管理单实例 PostgreSQL？",
+      "question": "数据库那一层是由什么在照看的？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -875,7 +875,7 @@
     },
     {
       "query_id": "q081",
-      "question": "rag-uploads 和 rag-backups 两个卷分别保存什么？",
+      "question": "那两块存储空间分别是拿来放什么的？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -885,7 +885,7 @@
     },
     {
       "query_id": "q082",
-      "question": "NodePort 30080 的访问范围是什么？",
+      "question": "对外暴露的那个入口，别的机器能连上吗？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -895,7 +895,7 @@
     },
     {
       "query_id": "q083",
-      "question": "Kubernetes 的 Secret 文件放在什么位置？",
+      "question": "账号密码那类配置该放在哪、能不能提交上去？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -905,7 +905,7 @@
     },
     {
       "query_id": "q084",
-      "question": "Docker Desktop 需要分配多少内存和 CPU？",
+      "question": "本机跑这套东西，得给它留多少内存和几个核？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -915,7 +915,7 @@
     },
     {
       "query_id": "q085",
-      "question": "怎么让 kubectl 可用？",
+      "question": "命令行工具找不到，该怎么弄？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -925,7 +925,7 @@
     },
     {
       "query_id": "q086",
-      "question": "演练脚本在什么情况下会拒绝执行写操作？",
+      "question": "脚本什么时候会拒绝往集群里写东西？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -935,7 +935,7 @@
     },
     {
       "query_id": "q087",
-      "question": "部署到本地 Kubernetes 要依次执行哪些子命令？",
+      "question": "从零把这套东西铺上去，要按顺序执行哪几步？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -945,7 +945,7 @@
     },
     {
       "query_id": "q088",
-      "question": "为什么 build 要把镜像显式导入节点？",
+      "question": "为什么要专门把本地打好的包塞进节点里？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -955,7 +955,7 @@
     },
     {
       "query_id": "q089",
-      "question": "首次部署后管理员账号怎么创建？",
+      "question": "刚铺好的环境，第一个管理员是怎么来的？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -965,7 +965,7 @@
     },
     {
       "query_id": "q090",
-      "question": "API 可用性用什么方法检查？",
+      "question": "怎么判断服务还活着、能不能接请求？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -975,7 +975,7 @@
     },
     {
       "query_id": "q091",
-      "question": "数据库容量怎么查询？",
+      "question": "数据库现在占了多大空间，怎么看？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -985,7 +985,7 @@
     },
     {
       "query_id": "q092",
-      "question": "索引积压和失败任务怎么观测？",
+      "question": "怎么看有多少活积压着、有多少干失败了？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -995,7 +995,7 @@
     },
     {
       "query_id": "q093",
-      "question": "为什么进程内指标不能充当长期监控存储？",
+      "question": "为什么服务自己统计的那些数不能当长期依据？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -1005,7 +1005,7 @@
     },
     {
       "query_id": "q094",
-      "question": "只读观测采集脚本怎么运行？",
+      "question": "有没有一条命令能把这些状态一次性收集齐？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -1015,7 +1015,7 @@
     },
     {
       "query_id": "q095",
-      "question": "Kubernetes 备份写入哪个 PVC？",
+      "question": "存档最后落到哪一块空间上？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -1025,7 +1025,7 @@
     },
     {
       "query_id": "q096",
-      "question": "restore-drill 使用什么临时数据库？",
+      "question": "练习还原的时候，数据会写到哪里去？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -1035,7 +1035,7 @@
     },
     {
       "query_id": "q097",
-      "question": "破坏性重启演练怎么触发？",
+      "question": "怎么主动把服务打挂来试一下？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -1045,7 +1045,7 @@
     },
     {
       "query_id": "q098",
-      "question": "数据库重启期间服务短暂不可用说明了什么？",
+      "question": "重启数据库那会儿服务断了一小下，这说明什么问题？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -1055,7 +1055,7 @@
     },
     {
       "query_id": "q099",
-      "question": "演练失败时要保留哪些现场信息？",
+      "question": "出问题的时候要先把哪些东西留下来？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -1065,7 +1065,7 @@
     },
     {
       "query_id": "q100",
-      "question": "删除整个命名空间会造成什么后果？",
+      "question": "把整个环境整个删掉，会连数据一起没了吗？",
       "relevant": [
         {
           "filename": "docker-desktop-kubernetes.md",
@@ -1075,7 +1075,7 @@
     },
     {
       "query_id": "q101",
-      "question": "render.yaml 一共定义了哪些服务？",
+      "question": "那份托管平台的配置里一共声明了几个服务？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1085,7 +1085,7 @@
     },
     {
       "query_id": "q102",
-      "question": "第一次创建 Render Blueprint 的步骤是什么？",
+      "question": "第一次把演示环境搭起来要点哪些步骤？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1107,7 +1107,7 @@
     },
     {
       "query_id": "q103",
-      "question": "Render 服务名被占用时要同步修改哪几处？",
+      "question": "名字被别人占了的话，要一起改哪几个地方？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1117,7 +1117,7 @@
     },
     {
       "query_id": "q104",
-      "question": "Demo 后端启动时会自动导入什么资料？",
+      "question": "演示环境一起来就自带的那份资料是什么？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1127,7 +1127,7 @@
     },
     {
       "query_id": "q105",
-      "question": "免费实例使用哪个 embedding 模型？",
+      "question": "内存很小的那个环境，换成了哪个更轻的向量模型？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1137,7 +1137,7 @@
     },
     {
       "query_id": "q106",
-      "question": "demo/lexical-overlap-v1 是什么东西？",
+      "question": "那个不加载第二个大模型的排序方案是怎么回事？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1147,7 +1147,7 @@
     },
     {
       "query_id": "q107",
-      "question": "为什么免费 Demo 要覆盖成更小的模型？",
+      "question": "为什么演示环境非要换成小一号的模型？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1157,7 +1157,7 @@
     },
     {
       "query_id": "q108",
-      "question": "演示环境的模型覆盖可以当作正式质量分数吗？",
+      "question": "演示环境跑出来的分数能拿来当正式成绩吗？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1167,7 +1167,7 @@
     },
     {
       "query_id": "q109",
-      "question": "免费实例休眠之后冷启动大概要多久？",
+      "question": "很久没人访问之后再打开，大概要等多久？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1177,7 +1177,7 @@
     },
     {
       "query_id": "q110",
-      "question": "免费环境会持久保留用户上传的资料吗？",
+      "question": "在演示环境传上去的东西会一直留着吗？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1187,7 +1187,7 @@
     },
     {
       "query_id": "q111",
-      "question": "部署后的正式验收必须通过什么地址运行？",
+      "question": "做最终检查时必须从哪个入口进？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1197,7 +1197,7 @@
     },
     {
       "query_id": "q112",
-      "question": "冒烟验证脚本怎么调用？",
+      "question": "那个一键检查的脚本怎么跑？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1207,7 +1207,7 @@
     },
     {
       "query_id": "q113",
-      "question": "--allow-retrieval-only 参数什么时候才允许使用？",
+      "question": "那个放宽检查的开关什么场合才准用？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1217,7 +1217,7 @@
     },
     {
       "query_id": "q114",
-      "question": "Demo 的验收结果应该回写到哪里？",
+      "question": "检查完的结论要登记到什么地方？",
       "relevant": [
         {
           "filename": "render-demo.md",
@@ -1227,7 +1227,7 @@
     },
     {
       "query_id": "q115",
-      "question": "安全威胁清单覆盖哪些范围？",
+      "question": "这份风险梳理管到哪、不管哪？",
       "relevant": [
         {
           "filename": "v4-threat-model.md",
@@ -1237,7 +1237,7 @@
     },
     {
       "query_id": "q116",
-      "question": "未认证或跨知识库访问是靠什么控制的？",
+      "question": "防止别人翻到不属于自己那份资料，靠的是什么？",
       "relevant": [
         {
           "filename": "v4-threat-model.md",
@@ -1247,7 +1247,7 @@
     },
     {
       "query_id": "q117",
-      "question": "登录暴力尝试用什么手段缓解？",
+      "question": "有人反复猜密码，系统怎么拦？",
       "relevant": [
         {
           "filename": "v4-threat-model.md",
@@ -1257,7 +1257,7 @@
     },
     {
       "query_id": "q118",
-      "question": "伪造上传或二进制文件怎么校验？",
+      "question": "有人把可执行文件改个后缀传上来，能识破吗？",
       "relevant": [
         {
           "filename": "v4-threat-model.md",
@@ -1267,7 +1267,7 @@
     },
     {
       "query_id": "q119",
-      "question": "认证存储里只保存什么数据？",
+      "question": "用户身份信息具体被保存成了什么形式？",
       "relevant": [
         {
           "filename": "v4-threat-model.md",
@@ -1277,7 +1277,7 @@
     },
     {
       "query_id": "q120",
-      "question": "问答历史会保存完整 Prompt 或供应商原始响应吗？",
+      "question": "聊天记录会把发给大模型的完整指令也存下来吗？",
       "relevant": [
         {
           "filename": "v4-threat-model.md",
@@ -1287,7 +1287,7 @@
     },
     {
       "query_id": "q121",
-      "question": "删除文档的时候会同步删除什么？",
+      "question": "把一份资料删掉，相关的东西会跟着清干净吗？",
       "relevant": [
         {
           "filename": "v4-threat-model.md",
@@ -1297,7 +1297,7 @@
     },
     {
       "query_id": "q122",
-      "question": "进程内限流有哪些已知限制？",
+      "question": "现在这套防刷机制在多台机器上有什么毛病？",
       "relevant": [
         {
           "filename": "v4-threat-model.md",
@@ -1307,7 +1307,7 @@
     },
     {
       "query_id": "q123",
-      "question": "文件校验能等同于恶意软件扫描吗？",
+      "question": "现有的文件检查算得上查毒吗？",
       "relevant": [
         {
           "filename": "v4-threat-model.md",
@@ -1317,7 +1317,7 @@
     },
     {
       "query_id": "q124",
-      "question": "V4 的最终放行以什么为准？",
+      "question": "这一版到底以什么为准算是放行了？",
       "relevant": [
         {
           "filename": "v4-readiness.md",
@@ -1327,7 +1327,7 @@
     },
     {
       "query_id": "q125",
-      "question": "发布制品的镜像 digest 记录在哪个文件里？",
+      "question": "每次出包用了哪些确切的产物，记在哪里？",
       "relevant": [
         {
           "filename": "v4-readiness.md",
@@ -1337,7 +1337,7 @@
     },
     {
       "query_id": "q126",
-      "question": "发布工作流失败的时候还会创建 Release 吗？",
+      "question": "出包过程中途挂了，还会留下一个版本吗？",
       "relevant": [
         {
           "filename": "v4-readiness.md",
@@ -1347,7 +1347,7 @@
     },
     {
       "query_id": "q127",
-      "question": "权限验收场景覆盖了哪些情况？",
+      "question": "关于谁能看什么，测了哪几种情况？",
       "relevant": [
         {
           "filename": "v4-readiness.md",
@@ -1357,7 +1357,7 @@
     },
     {
       "query_id": "q128",
-      "question": "审计事件会不会记录密码或者业务正文？",
+      "question": "操作留痕里会不会把用户问的内容也记下来？",
       "relevant": [
         {
           "filename": "v4-readiness.md",
@@ -1367,7 +1367,7 @@
     },
     {
       "query_id": "q129",
-      "question": "正式发布必须从什么条件触发？",
+      "question": "正式出包必须满足什么前提才能启动？",
       "relevant": [
         {
           "filename": "v4-readiness.md",
@@ -1377,7 +1377,7 @@
     },
     {
       "query_id": "q130",
-      "question": "进程内限流不跨实例共享这个风险的复查点是什么时候？",
+      "question": "多台机器共享限流这件事，打算什么时候再看？",
       "relevant": [
         {
           "filename": "v4-readiness.md",
@@ -1387,7 +1387,7 @@
     },
     {
       "query_id": "q131",
-      "question": "V2 阶段建立了什么能力？",
+      "question": "第二个阶段主要立起来的是什么能力？",
       "relevant": [
         {
           "filename": "v4-readiness.md",
@@ -1397,7 +1397,7 @@
     },
     {
       "query_id": "q132",
-      "question": "V4 是在不改变什么的前提下补齐能力的？",
+      "question": "最新那个版本是在不改动哪一部分的前提下补齐能力的？",
       "relevant": [
         {
           "filename": "v4-readiness.md",
@@ -1407,7 +1407,7 @@
     },
     {
       "query_id": "q133",
-      "question": "复盘里决定停止哪些做法？",
+      "question": "回头看，哪些习惯是决定不再继续的？",
       "relevant": [
         {
           "filename": "v4-readiness.md",
@@ -1417,7 +1417,7 @@
     },
     {
       "query_id": "q134",
-      "question": "设计图和 UI 基线冲突的时候怎么处理？",
+      "question": "设计稿跟已定的规范打架了，听谁的？",
       "relevant": [
         {
           "filename": "ui-baseline.md",
@@ -1427,7 +1427,7 @@
     },
     {
       "query_id": "q135",
-      "question": "界面里的紫色只用来强调什么？",
+      "question": "那个重点色只用在什么地方？",
       "relevant": [
         {
           "filename": "ui-baseline.md",
@@ -1437,7 +1437,7 @@
     },
     {
       "query_id": "q136",
-      "question": "主色 primary-500 的色值是多少？",
+      "question": "主题色的具体色号是多少？",
       "relevant": [
         {
           "filename": "ui-baseline.md",
@@ -1447,7 +1447,7 @@
     },
     {
       "query_id": "q137",
-      "question": "指标数字用多大的字号？",
+      "question": "那些大数字用多大号？",
       "relevant": [
         {
           "filename": "ui-baseline.md",
@@ -1461,7 +1461,7 @@
     },
     {
       "query_id": "q138",
-      "question": "顶栏高度和一级侧栏宽度分别是多少？",
+      "question": "上面那条和左边那栏各占多宽多高？",
       "relevant": [
         {
           "filename": "ui-baseline.md",
@@ -1471,7 +1471,7 @@
     },
     {
       "query_id": "q139",
-      "question": "纯图标按钮有什么无障碍要求？",
+      "question": "只有一个小图标没有文字的按钮，要额外注意什么？",
       "relevant": [
         {
           "filename": "ui-baseline.md",
@@ -1481,7 +1481,7 @@
     },
     {
       "query_id": "q140",
-      "question": "按钮的高度和圆角是多少？",
+      "question": "可点的那个方块做多高、拐角磨多圆？",
       "relevant": [
         {
           "filename": "ui-baseline.md",
@@ -1491,7 +1491,7 @@
     },
     {
       "query_id": "q141",
-      "question": "答案引用编号和来源卡是什么对应关系？",
+      "question": "正文里标的那个数字跟下面的出处是怎么对上的？",
       "relevant": [
         {
           "filename": "ui-baseline.md",
@@ -1501,7 +1501,7 @@
     },
     {
       "query_id": "q142",
-      "question": "删除操作在交互上有什么要求？",
+      "question": "点删除的时候要不要再拦一道？",
       "relevant": [
         {
           "filename": "ui-baseline.md",
@@ -1511,7 +1511,7 @@
     },
     {
       "query_id": "q143",
-      "question": "常用动画的时长上限是多少？",
+      "question": "界面上那些过渡效果最长不能超过多久？",
       "relevant": [
         {
           "filename": "ui-baseline.md",
@@ -1521,7 +1521,7 @@
     },
     {
       "query_id": "q144",
-      "question": "屏幕宽度小于 768px 时表格怎么处理？",
+      "question": "手机上那种很宽的数据要怎么摆？",
       "relevant": [
         {
           "filename": "ui-baseline.md",
@@ -1531,7 +1531,7 @@
     },
     {
       "query_id": "q145",
-      "question": "界面里空值用什么符号显示？",
+      "question": "没有数的时候格子里显示什么？",
       "relevant": [
         {
           "filename": "ui-baseline.md",

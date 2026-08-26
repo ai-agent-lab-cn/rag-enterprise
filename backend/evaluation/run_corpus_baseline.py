@@ -43,6 +43,9 @@ RERANK_MRR_THRESHOLD = 0.65
 RETRIEVE_K = 10
 RERANK_K = 5
 
+# vector 为既有单路基线；lexical 单独衡量 BM25；hybrid 用 RRF 合并两路名次。
+RETRIEVAL_MODES = ("vector", "lexical", "hybrid")
+
 
 def run_corpus_baseline(
     dataset: CorpusEvaluationDataset,
@@ -54,12 +57,18 @@ def run_corpus_baseline(
     database_url: str | None = None,
     embedder=None,
     reranker=None,
+    retrieval_mode: str = "vector",
+    retrieve_k: int = RETRIEVE_K,
 ) -> RetrievalEvaluationReport:
     settings = get_settings()
+    if retrieval_mode not in RETRIEVAL_MODES:
+        raise ValueError(f"retrieval_mode 必须是 {RETRIEVAL_MODES} 之一")
+    if retrieve_k < RERANK_K:
+        raise ValueError(f"retrieve_k 不能小于 rerank_k（{RERANK_K}）")
     database_url = database_url or settings.database_url
     if not database_url:
         raise ValueError("语料评测必须通过 --database-url 或 DATABASE_URL 指定隔离数据库")
-    check_schema_version(database_url, 3)
+    check_schema_version(database_url, settings.required_database_schema_version)
     _require_empty_evaluation_database(database_url)
     embedder = embedder or get_embedding_model()
     reranker = reranker or get_reranker()
@@ -83,20 +92,33 @@ def run_corpus_baseline(
             while worker.run_once():
                 pass
 
-            failed = _failed_index_jobs(database_url, knowledge_base_id)
-            if failed:
-                raise RuntimeError(f"语料索引失败：{failed}")
+            unfinished = _unfinished_index_jobs(database_url, knowledge_base_id)
+            if unfinished:
+                raise RuntimeError(f"语料索引未全部成功：{unfinished}")
 
             vector_rankings: dict[str, list[str]] = {}
             reranked_rankings: dict[str, list[str]] = {}
             for query in dataset.queries:
-                candidates = service.store.query(
-                    embedder.encode([query.question])[0], RETRIEVE_K, knowledge_base_id
+                embedding = embedder.encode([query.question])[0]
+                # 与在线查询共用同一份召回实现，两个入口不会得出不同的质量结论。
+                candidates = service.retrieve_candidates(
+                    query.question,
+                    embedding,
+                    retrieve_k,
+                    knowledge_base_id,
+                    retrieval_mode,
                 )
+                # 在 lexical/hybrid 模式下这一路记录的是召回阶段的融合名次，
+                # 因此报告里的 vector_mrr 应结合 parameters.retrieval_mode 解读。
                 vector_rankings[query.query_id] = [_position(item) for item in candidates]
 
-                scores = reranker.score(query.question, [item.text for item in candidates])
-                reranked = rank_candidates(candidates, scores, min(RERANK_K, len(candidates)))
+                # 纯词法模式下可能一个词元都匹配不上，此时该问题的两项指标均计 0，
+                # 而不是让空候选传进精排。
+                if candidates:
+                    scores = reranker.score(query.question, [item.text for item in candidates])
+                    reranked = rank_candidates(candidates, scores, min(RERANK_K, len(candidates)))
+                else:
+                    reranked = []
                 reranked_rankings[query.query_id] = [_position(item) for item in reranked]
             chunk_count = service.store.count(knowledge_base_id)
         finally:
@@ -122,12 +144,17 @@ def run_corpus_baseline(
             "reranker": resolved_model(settings.reranker_model),
         },
         parameters={
-            "retrieve_k": RETRIEVE_K,
+            "retrieve_k": retrieve_k,
             "rerank_k": RERANK_K,
             "distance": "cosine",
             "normalize_embeddings": True,
-            "ranking_strategy": "minmax_weighted_fusion",
+            "ranking_strategy": (
+                "minmax_weighted_fusion"
+                if retrieval_mode == "vector"
+                else f"rrf_recall_then_minmax_weighted_fusion({retrieval_mode})"
+            ),
             "vector_score_weight": VECTOR_SCORE_WEIGHT,
+            "retrieval_mode": retrieval_mode,
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
             "chunk_count": chunk_count,
@@ -148,6 +175,13 @@ def run_corpus_baseline(
             metrics.rerank_mrr,
             RERANK_MRR_THRESHOLD,
             baseline.rerank_mrr.value if baseline else None,
+        ),
+        rerank_recall_at_5=assess_metric(
+            metrics.rerank_recall_at_5,
+            RECALL_AT_5_THRESHOLD,
+            baseline.rerank_recall_at_5.value
+            if baseline and baseline.rerank_recall_at_5
+            else None,
         ),
     )
     return report.model_copy(update={"official": report.passed})
@@ -176,13 +210,20 @@ def _create_evaluation_knowledge_base(database_url: str, knowledge_base_id: str)
         )
 
 
-def _failed_index_jobs(database_url: str, knowledge_base_id: str) -> list[str]:
+def _unfinished_index_jobs(database_url: str, knowledge_base_id: str) -> list[str]:
+    """列出未成功完成的索引任务。
+
+    只查 ``failed`` 会漏掉重试中停在 ``queued`` 的任务——那种情况下评测会安静地
+    产出一份 chunk_count=0 的报告，比直接失败更危险。
+    """
+
     with psycopg.connect(database_url) as connection:
         return [
-            str(row[0] or "未知错误")
+            f"{row[0]}: {row[1] or '无失败原因'}"
             for row in connection.execute(
-                """SELECT failure_reason FROM index_jobs
-                   WHERE knowledge_base_id = %s AND status = 'failed'""",
+                """SELECT status, failure_reason FROM index_jobs
+                   WHERE knowledge_base_id = %s AND status <> 'succeeded'
+                   ORDER BY index_job_id""",
                 (knowledge_base_id,),
             ).fetchall()
         ]
@@ -231,6 +272,8 @@ def main() -> None:
     parser.add_argument("--chunk-size", type=int)
     parser.add_argument("--chunk-overlap", type=int)
     parser.add_argument("--database-url", default=os.getenv("DATABASE_URL"))
+    parser.add_argument("--retrieval-mode", choices=RETRIEVAL_MODES, default="vector")
+    parser.add_argument("--retrieve-k", type=int, default=RETRIEVE_K)
     args = parser.parse_args()
 
     settings = get_settings()
@@ -248,6 +291,8 @@ def main() -> None:
         args.chunk_overlap if args.chunk_overlap is not None else settings.chunk_overlap,
         baseline,
         args.database_url,
+        retrieval_mode=args.retrieval_mode,
+        retrieve_k=args.retrieve_k,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(

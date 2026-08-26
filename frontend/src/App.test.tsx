@@ -27,7 +27,7 @@ const dataSource = {
   upload_status: "succeeded", index_status: "succeeded",
   sync_status: "succeeded", document_count: 1, source_file_bytes: 2048,
   last_indexed_at: "2026-08-12T00:00:00Z", last_synced_at: "2026-08-12T00:00:00Z", failure_reason: null,
-  updated_at: "2026-08-12T00:00:00Z", allowed_actions: ["detail", "edit", "disable", "sync"],
+  updated_at: "2026-08-12T00:00:00Z", allowed_actions: ["detail", "edit", "disable", "update_file"],
 };
 const answerSummary = {
   report_id: "answer-official",

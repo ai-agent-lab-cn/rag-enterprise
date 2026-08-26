@@ -221,6 +221,59 @@ def test_rebuild_skips_versions_with_active_jobs(tmp_path: Path) -> None:
     assert enqueue_rebuild(database_url, KNOWLEDGE_BASE_ID, chunking_version(160, 20))["queued"] == 1
 
 
+class _OtherModelEmbedder(FakeEmbedder):
+    model_name = "test/other-embedding"
+
+
+class _WiderEmbedder(FakeEmbedder):
+    model_name = "test/embedding"
+
+    def encode(self, texts: list[str]) -> list[list[float]]:
+        return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_switching_embedding_model_is_rejected_before_polluting_the_index(tmp_path: Path) -> None:
+    """换模型必须在写入前被拦下，而不是等检索执行 <=> 时才报维度错。"""
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    settings = _settings(tmp_path, database_url, 700, 100)
+    service = _service(settings)
+    service.index_document("guide.md", DOCUMENT_TEXT.encode(), KNOWLEDGE_BASE_ID)
+    assert _drain(IndexWorker(settings, FakeEmbedder())) == 1
+    healthy = _chunk_count(database_url)
+
+    with psycopg.connect(database_url) as connection:
+        registered = connection.execute(
+            "SELECT embedding_model, embedding_dimension FROM index_settings WHERE singleton"
+        ).fetchone()
+    assert registered == ("test/embedding", 3)
+
+    # 换成另一个模型：任务失败，但既有分块完好。
+    service.index_document("second.md", f"second\n\n{DOCUMENT_TEXT}".encode(), KNOWLEDGE_BASE_ID)
+    assert IndexWorker(settings, _OtherModelEmbedder()).run_once() is True
+    assert _chunk_count(database_url) == healthy
+
+    # 同名模型但维度变化同样要拦下。
+    service.index_document("third.md", f"third\n\n{DOCUMENT_TEXT}".encode(), KNOWLEDGE_BASE_ID)
+    assert IndexWorker(settings, _WiderEmbedder()).run_once() is True
+    assert _chunk_count(database_url) == healthy
+
+    with psycopg.connect(database_url) as connection:
+        reasons = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT failure_reason FROM index_jobs WHERE failure_reason IS NOT NULL"
+            ).fetchall()
+        ]
+    # 失败原因记录的是 AppError 的消息文本，须点明双方模型与维度以便排查。
+    assert len(reasons) == 2
+    assert all("索引使用 test/embedding（3 维）" in reason for reason in reasons)
+    assert any("test/other-embedding" in reason for reason in reasons)
+    assert any("（4 维）" in reason for reason in reasons)
+
+
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
 def test_rebuild_rejects_unknown_knowledge_base(tmp_path: Path) -> None:
     database_url = os.environ["TEST_DATABASE_URL"]

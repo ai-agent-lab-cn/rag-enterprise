@@ -16,6 +16,9 @@ class RetrievedChunk:
     metadata: dict[str, Any]
     retrieval_score: float
     rerank_score: float = 0.0
+    # 命中该候选的召回通路。默认只有向量，混合召回会在融合阶段改写。
+    channels: tuple[str, ...] = ("vector",)
+    lexical_score: float | None = None
 
 
 class ChromaStore:

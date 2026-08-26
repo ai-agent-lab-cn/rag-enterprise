@@ -181,18 +181,6 @@ class PostgresDataSourceRepository:
             )
         return result.rowcount > 0
 
-    def sync_payload(self, data_source_id: str) -> dict[str, object] | None:
-        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
-            row = connection.execute(
-                """SELECT s.knowledge_base_id, s.name, s.enabled, v.source_path
-                   FROM data_sources s
-                   LEFT JOIN documents d ON d.data_source_id = s.data_source_id
-                   LEFT JOIN document_versions v ON v.document_version_id = d.current_version_id
-                   WHERE s.data_source_id = %s""",
-                (data_source_id,),
-            ).fetchone()
-        return dict(row) if row else None
-
     def delete(self, data_source_id: str) -> bool:
         with psycopg.connect(self.database_url) as connection, connection.transaction():
             row = connection.execute(

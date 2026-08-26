@@ -14,8 +14,21 @@ _CONVERSATION_ID_PATTERN = re.compile(r"^conv_[a-f0-9]{16}$")
 _ANSWER_RECORD_ID_PATTERN = re.compile(r"^answer_[a-f0-9]{16}$")
 
 
+def _owned_by(conversation: dict[str, Any], owner_id: str) -> bool:
+    """判断会话是否属于该用户。
+
+    V5 之前保存的会话没有 ``owner_id``，一律视为无主：既然无法确定它属于谁，
+    就不对任何人展示，而不是退回到"同知识库可见"那种越权行为。
+    """
+
+    return conversation.get("owner_id") == owner_id
+
+
 class ConversationRepository:
-    """追加保存会话和回答记录；仅存来源快照，不依赖当前 Chroma 内容。"""
+    """追加保存会话和回答记录；仅存来源快照，不依赖当前 Chroma 内容。
+
+    会话按发起人隔离：知识库授权决定能否提问，不代表能读别人的问答正文。
+    """
 
     def __init__(self, path: Path):
         self.path = path
@@ -34,6 +47,7 @@ class ConversationRepository:
         knowledge_base_id: str,
         question: str,
         conversation_id: str | None,
+        owner_id: str,
     ) -> dict[str, Any]:
         validate_knowledge_base_id(knowledge_base_id)
         with self._lock:
@@ -52,12 +66,15 @@ class ConversationRepository:
                     raise LookupError("conversation not found")
                 if conversation["knowledge_base_id"] != knowledge_base_id:
                     raise PermissionError("conversation belongs to another knowledge base")
+                if not _owned_by(conversation, owner_id):
+                    raise PermissionError("conversation belongs to another user")
                 return dict(conversation)
 
             now = datetime.now(UTC).isoformat()
             conversation = {
                 "conversation_id": f"conv_{uuid4().hex[:16]}",
                 "knowledge_base_id": knowledge_base_id,
+                "owner_id": owner_id,
                 "title": question[:80],
                 "created_at": now,
                 "updated_at": now,
@@ -122,13 +139,15 @@ class ConversationRepository:
             self._save(payload)
             return dict(record)
 
-    def list_conversations(self, knowledge_base_id: str) -> list[dict[str, Any]]:
+    def list_conversations(self, knowledge_base_id: str, owner_id: str) -> list[dict[str, Any]]:
         validate_knowledge_base_id(knowledge_base_id)
         with self._lock:
             payload = self._load()
         summaries = []
         for conversation in payload["conversations"]:
             if conversation["knowledge_base_id"] != knowledge_base_id:
+                continue
+            if not _owned_by(conversation, owner_id):
                 continue
             records = [
                 item
@@ -144,10 +163,27 @@ class ConversationRepository:
             )
         return sorted(summaries, key=lambda item: item["updated_at"], reverse=True)
 
+    def count_conversations(self, knowledge_base_id: str) -> int:
+        """统计知识库下所有人的会话数，不做归属过滤。
+
+        仅用于健康探测和"知识库是否为空"的判定：删除知识库必须考虑他人的会话，
+        否则会留下无法访问的孤儿记录。不得用于面向用户的读取路径。
+        """
+
+        validate_knowledge_base_id(knowledge_base_id)
+        with self._lock:
+            payload = self._load()
+        return sum(
+            1
+            for item in payload["conversations"]
+            if item["knowledge_base_id"] == knowledge_base_id
+        )
+
     def get_conversation(
         self,
         knowledge_base_id: str,
         conversation_id: str,
+        owner_id: str,
     ) -> dict[str, Any] | None:
         validate_knowledge_base_id(knowledge_base_id)
         self._validate_conversation_id(conversation_id)
@@ -162,7 +198,7 @@ class ConversationRepository:
             ),
             None,
         )
-        if conversation is None:
+        if conversation is None or not _owned_by(conversation, owner_id):
             return None
         records = [
             item
@@ -172,7 +208,12 @@ class ConversationRepository:
         ]
         return {**conversation, "records": records}
 
-    def get_answer(self, knowledge_base_id: str, record_id: str) -> dict[str, Any] | None:
+    def get_answer(
+        self,
+        knowledge_base_id: str,
+        record_id: str,
+        owner_id: str,
+    ) -> dict[str, Any] | None:
         validate_knowledge_base_id(knowledge_base_id)
         if not _ANSWER_RECORD_ID_PATTERN.fullmatch(record_id):
             raise ValueError("answer record id is invalid")
@@ -187,9 +228,27 @@ class ConversationRepository:
             ),
             None,
         )
-        return dict(record) if record is not None else None
+        if record is None:
+            return None
+        # 回答记录本身不带归属，必须回到所属会话判断，否则可凭 record_id 绕过隔离。
+        conversation = next(
+            (
+                item
+                for item in payload["conversations"]
+                if item["conversation_id"] == record["conversation_id"]
+            ),
+            None,
+        )
+        if conversation is None or not _owned_by(conversation, owner_id):
+            return None
+        return dict(record)
 
-    def delete_conversation(self, knowledge_base_id: str, conversation_id: str) -> bool:
+    def delete_conversation(
+        self,
+        knowledge_base_id: str,
+        conversation_id: str,
+        owner_id: str,
+    ) -> bool:
         validate_knowledge_base_id(knowledge_base_id)
         self._validate_conversation_id(conversation_id)
         with self._lock:
@@ -200,6 +259,7 @@ class ConversationRepository:
                 if not (
                     item["conversation_id"] == conversation_id
                     and item["knowledge_base_id"] == knowledge_base_id
+                    and _owned_by(item, owner_id)
                 )
             ]
             if len(remaining_conversations) == len(payload["conversations"]):

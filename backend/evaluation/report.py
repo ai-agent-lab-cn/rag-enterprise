@@ -50,6 +50,8 @@ class RetrievalEvaluationReport(BaseModel):
     recall_at_5: EvaluationMetric
     vector_mrr: EvaluationMetric
     rerank_mrr: EvaluationMetric
+    # 1.0.0 的历史报告没有这一项，保持可选以免旧报告失效。
+    rerank_recall_at_5: EvaluationMetric | None = None
 
     @model_validator(mode="after")
     def validate_models(self) -> "RetrievalEvaluationReport":

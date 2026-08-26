@@ -41,6 +41,7 @@ def test_migration_files_are_contiguous() -> None:
         "0001_postgres_foundation.sql",
         "0002_runtime_defaults.sql",
         "0003_index_rebuild.sql",
+        "0004_index_embedding_guard.sql",
     ]
 
 
@@ -108,8 +109,8 @@ def test_schema_two_with_existing_data_upgrades_to_schema_three(tmp_path: Path) 
             (now, now),
         )
 
-    assert apply_migrations(database_url) == 3
-    check_schema_version(database_url, 3)
+    assert apply_migrations(database_url) == 4
+    check_schema_version(database_url, 4)
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
             "SELECT status, chunking_version FROM document_versions WHERE document_version_id = 'ver_legacy'"
@@ -159,8 +160,8 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 3
-    check_schema_version(database_url, 3)
+    assert apply_migrations(database_url) == 4
+    check_schema_version(database_url, 4)
 
     now = "2026-08-22T00:00:00+00:00"
     auth = tmp_path / "auth/store.json"
@@ -316,7 +317,7 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
     assert versions[0]["is_current"] is True
     assert versions[0]["version_number"] == 2
     assert data_sources.set_enabled(str(source["data_source_id"]), False)
-    assert data_sources.sync_payload(str(source["data_source_id"]))["enabled"] is False
+    assert data_sources.list()[0]["enabled"] is False
     with pytest.raises(ValueError, match="has documents"):
         data_sources.delete(str(source["data_source_id"]))
     assert data_sources.set_enabled(str(source["data_source_id"]), True)
