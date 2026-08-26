@@ -80,6 +80,7 @@ class ConversationRepository:
         model_metadata: dict[str, str | int | float | bool],
         prompt_version: str | None,
         prompt_hash: str | None,
+        query_metadata: dict[str, str | int | bool] | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> dict[str, Any]:
@@ -113,6 +114,7 @@ class ConversationRepository:
                 "model_metadata": model_metadata,
                 "prompt_version": prompt_version,
                 "prompt_hash": prompt_hash,
+                "query_metadata": query_metadata,
                 "error_code": error_code,
                 "error_message": error_message,
                 "created_at": now,

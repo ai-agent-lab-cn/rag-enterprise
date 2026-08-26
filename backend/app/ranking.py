@@ -8,6 +8,54 @@ VECTOR_SCORE_WEIGHT = 0.15
 RRF_RANK_CONSTANT = 60
 
 
+def fuse_query_candidates(
+    rankings: Sequence[Sequence[RetrievedChunk]],
+    limit: int,
+    rank_constant: int = RRF_RANK_CONSTANT,
+) -> list[RetrievedChunk]:
+    """以 RRF 稳定合并原查询和扩展查询的候选，并按 chunk ID 去重。"""
+
+    if limit < 1:
+        raise ValueError("limit 必须大于等于 1")
+    if rank_constant < 1:
+        raise ValueError("rank_constant 必须大于等于 1")
+    merged: dict[str, RetrievedChunk] = {}
+    scores: dict[str, float] = {}
+    first_seen: dict[str, tuple[int, int]] = {}
+    matches: dict[str, int] = {}
+    for query_index, candidates in enumerate(rankings):
+        seen_in_query: set[str] = set()
+        for rank, candidate in enumerate(candidates, start=1):
+            item = merged.setdefault(candidate.chunk_id, candidate)
+            first_seen.setdefault(candidate.chunk_id, (query_index, rank))
+            scores[candidate.chunk_id] = scores.get(candidate.chunk_id, 0.0) + 1 / (
+                rank_constant + rank
+            )
+            if candidate.chunk_id not in seen_in_query:
+                matches[candidate.chunk_id] = matches.get(candidate.chunk_id, 0) + 1
+                seen_in_query.add(candidate.chunk_id)
+            item.retrieval_methods = sorted(
+                set((item.retrieval_methods or []) + (candidate.retrieval_methods or []))
+            )
+            if item.vector_score is None:
+                item.vector_score = candidate.vector_score
+            if item.lexical_score is None:
+                item.lexical_score = candidate.lexical_score
+
+    ordered = sorted(
+        merged.values(),
+        key=lambda item: (
+            -scores[item.chunk_id],
+            first_seen[item.chunk_id],
+            item.chunk_id,
+        ),
+    )[:limit]
+    for item in ordered:
+        item.retrieval_score = round(scores[item.chunk_id], 8)
+        item.query_match_count = matches[item.chunk_id]
+    return ordered
+
+
 def fuse_retrieval_candidates(
     vector_candidates: Sequence[RetrievedChunk],
     lexical_candidates: Sequence[RetrievedChunk],

@@ -15,7 +15,8 @@ from .prompts import (
     build_prompt,
     parse_answer,
 )
-from .ranking import rank_candidates
+from .query_understanding import build_query_plan
+from .ranking import fuse_query_candidates, rank_candidates
 from .schemas import DocumentInfo, QueryResponse, Source
 from .store import ChromaStore, RetrievedChunk
 
@@ -110,12 +111,36 @@ class RAGService:
     ) -> QueryResponse:
         total_started = time.perf_counter()
         retrieval_started = time.perf_counter()
-        query_embedding = self.embedder.encode([question])[0]
-        candidates = self.store.query(
-            query_embedding,
+        query_plan = build_query_plan(question)
+        original_embedding = self.embedder.encode([query_plan.normalized])[0]
+        original_candidates = self.store.query(
+            original_embedding,
             retrieve_k,
             knowledge_base_id,
-            query_text=question,
+            query_text=query_plan.normalized,
+        )
+        query_rankings = [original_candidates]
+        fallback_used = False
+        for expanded_query in query_plan.queries[1:]:
+            try:
+                expanded_embedding = self.embedder.encode([expanded_query])[0]
+                expanded_candidates = self.store.query(
+                    expanded_embedding,
+                    retrieve_k,
+                    knowledge_base_id,
+                    query_text=expanded_query,
+                )
+            except Exception:
+                fallback_used = True
+                continue
+            if expanded_candidates:
+                query_rankings.append(expanded_candidates)
+            else:
+                fallback_used = True
+        candidates = (
+            fuse_query_candidates(query_rankings, retrieve_k)
+            if len(query_rankings) > 1
+            else original_candidates
         )
         retrieval_ms = _elapsed(retrieval_started)
         if not candidates:
@@ -147,6 +172,12 @@ class RAGService:
             model_metadata=model_metadata,
             prompt_version=prompt.version,
             prompt_hash=prompt.sha256,
+            query_metadata={
+                "strategy": query_plan.strategy,
+                "query_count": len(query_rankings),
+                "expansion_count": query_plan.expansion_count,
+                "fallback_used": fallback_used,
+            },
             latency_ms={
                 "retrieval": retrieval_ms,
                 "rerank": rerank_ms,
@@ -220,4 +251,5 @@ def _source(item: RetrievedChunk) -> Source:
         vector_score=item.vector_score,
         lexical_score=item.lexical_score,
         retrieval_methods=item.retrieval_methods or ["vector"],
+        query_match_count=item.query_match_count,
     )

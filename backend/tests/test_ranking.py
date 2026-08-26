@@ -1,6 +1,6 @@
 import pytest
 
-from backend.app.ranking import fuse_retrieval_candidates, rank_candidates
+from backend.app.ranking import fuse_query_candidates, fuse_retrieval_candidates, rank_candidates
 from backend.app.store import RetrievedChunk
 
 
@@ -59,3 +59,14 @@ def test_fuse_retrieval_candidates_validates_parameters_and_ties() -> None:
         fuse_retrieval_candidates([], [], limit=0)
     with pytest.raises(ValueError, match="rank_constant"):
         fuse_retrieval_candidates([], [], limit=1, rank_constant=0)
+
+
+def test_fuse_query_candidates_deduplicates_and_counts_query_matches() -> None:
+    shared = candidate("shared", 0.8)
+    first = [shared, candidate("first", 0.7)]
+    second = [candidate("shared", 0.9), candidate("second", 0.6)]
+
+    fused = fuse_query_candidates([first, second], limit=3)
+
+    assert [item.chunk_id for item in fused] == ["shared", "first", "second"]
+    assert fused[0].query_match_count == 2

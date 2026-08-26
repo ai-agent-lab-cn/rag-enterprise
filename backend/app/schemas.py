@@ -195,6 +195,14 @@ class Source(BaseModel):
     vector_score: float | None = None
     lexical_score: float | None = None
     retrieval_methods: list[Literal["vector", "lexical"]] = Field(default_factory=list)
+    query_match_count: int = Field(default=1, ge=1)
+
+
+class QueryExecutionMetadata(BaseModel):
+    strategy: Literal["original", "normalized", "controlled_expansion"]
+    query_count: int = Field(ge=1, le=4)
+    expansion_count: int = Field(ge=0, le=3)
+    fallback_used: bool = False
 
 
 class QueryResponse(BaseModel):
@@ -211,6 +219,7 @@ class QueryResponse(BaseModel):
     model_metadata: dict[str, str | int | float | bool] = Field(default_factory=dict)
     prompt_version: str | None = None
     prompt_hash: str | None = None
+    query_metadata: QueryExecutionMetadata | None = None
 
 
 class AnswerRecordResponse(BaseModel):
@@ -226,6 +235,7 @@ class AnswerRecordResponse(BaseModel):
     model_metadata: dict[str, str | int | float | bool]
     prompt_version: str | None
     prompt_hash: str | None
+    query_metadata: QueryExecutionMetadata | None = None
     error_code: str | None
     error_message: str | None
     created_at: datetime

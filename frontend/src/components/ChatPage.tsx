@@ -76,6 +76,7 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
     model_metadata: activeRecord.model_metadata,
     prompt_version: activeRecord.prompt_version,
     prompt_hash: activeRecord.prompt_hash,
+    query_metadata: activeRecord.query_metadata,
   } : null, [activeRecord]);
   const sources = result?.sources ?? activeRecord?.sources ?? [];
   const selectBase = (id: string) => { setResult(null); setHistory(null); setBaseId(id); onOpen(`/chat?knowledge_base_id=${id}`); };

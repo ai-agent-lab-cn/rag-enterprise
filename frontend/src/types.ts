@@ -29,6 +29,7 @@ export interface Source {
   vector_score?: number | null;
   lexical_score?: number | null;
   retrieval_methods?: Array<"vector" | "lexical">;
+  query_match_count?: number;
 }
 
 export interface QueryResult {
@@ -45,6 +46,12 @@ export interface QueryResult {
   model_metadata: Record<string, string | number | boolean>;
   prompt_version: string | null;
   prompt_hash: string | null;
+  query_metadata?: {
+    strategy: "original" | "normalized" | "controlled_expansion";
+    query_count: number;
+    expansion_count: number;
+    fallback_used: boolean;
+  } | null;
 }
 
 export interface ApiErrorPayload {
@@ -180,6 +187,12 @@ export interface AnswerRecord {
   model_metadata: Record<string, string | number | boolean>;
   prompt_version: string | null;
   prompt_hash: string | null;
+  query_metadata?: {
+    strategy: "original" | "normalized" | "controlled_expansion";
+    query_count: number;
+    expansion_count: number;
+    fallback_used: boolean;
+  } | null;
   error_code: string | null;
   error_message: string | null;
   created_at: string;

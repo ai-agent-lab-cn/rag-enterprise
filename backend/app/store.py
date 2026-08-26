@@ -19,6 +19,7 @@ class RetrievedChunk:
     vector_score: float | None = None
     lexical_score: float | None = None
     retrieval_methods: list[str] | None = None
+    query_match_count: int = 1
 
 
 class ChromaStore:

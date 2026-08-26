@@ -15,6 +15,12 @@ export function TechnicalDrawer({ result }: TechnicalDrawerProps) {
   const firstSource = result.sources[0];
   const retrievalMethods = new Set(result.sources.flatMap((source) => source.retrieval_methods ?? ["vector"]));
   const retrievalLabel = retrievalMethods.has("lexical") ? "向量 + 关键词混合召回" : "向量召回";
+  const queryMetadata = result.query_metadata;
+  const queryStrategy = queryMetadata?.strategy === "controlled_expansion"
+    ? "可控查询扩展"
+    : queryMetadata?.strategy === "normalized"
+      ? "查询规范化"
+      : "原始查询";
   return (
     <details className="technical-drawer">
       <summary>查看技术细节 <span aria-hidden="true">＋</span></summary>
@@ -23,6 +29,9 @@ export function TechnicalDrawer({ result }: TechnicalDrawerProps) {
           <span className="section-kicker">检索过程</span>
           <h3>{retrievalLabel} → 精排 → 生成</h3>
           <p>返回 {result.sources.length} 条来源，并按融合排序结果展示。</p>
+          {queryMetadata ? (
+            <p>{queryStrategy} · {queryMetadata.query_count} 路查询{queryMetadata.fallback_used ? " · 已降级" : ""}</p>
+          ) : null}
           {firstSource ? (
             <p>最高来源分数：融合 {firstSource.retrieval_score.toFixed(3)} / 精排 {firstSource.rerank_score.toFixed(3)}</p>
           ) : null}
