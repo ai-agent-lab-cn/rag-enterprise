@@ -51,15 +51,30 @@ def test_v2_chroma_metadata_is_migrated_to_default_knowledge_base(tmp_path: Path
 
     migrated = store.collection.get(ids=["legacy:chunk:00000"], include=["metadatas"])
     assert migrated["metadatas"][0]["knowledge_base_id"] == DEFAULT_KNOWLEDGE_BASE_ID
-    assert store.list_documents() == [
-        {
-            "knowledge_base_id": DEFAULT_KNOWLEDGE_BASE_ID,
-            "document_id": "legacy",
-            "filename": "legacy.md",
-            "chunk_count": 1,
-            "status": "ready",
-        }
-    ]
+    documents = store.list_documents()
+    assert len(documents) == 1
+    assert documents[0] == {
+        "knowledge_base_id": DEFAULT_KNOWLEDGE_BASE_ID,
+        "document_id": "legacy",
+        "filename": "legacy.md",
+        "chunk_count": 1,
+        "status": "ready",
+        "category": "未分类",
+        "tags": [],
+        "source_type": "file",
+        "created_at": None,
+        "source_system": "upload",
+        "external_resource_id": None,
+        "owner_user_id": None,
+        "department": None,
+        "sensitivity": "internal",
+        "valid_from": None,
+        "valid_to": None,
+        "retrieval_status": "searchable",
+        "acl_version": 1,
+        "allow_user_ids": [],
+        "deny_user_ids": [],
+    }
 
     # 再次初始化验证迁移幂等，不会复制或丢失 chunk。
     assert ChromaStore(path, collection_name, model_name).count() == 1
