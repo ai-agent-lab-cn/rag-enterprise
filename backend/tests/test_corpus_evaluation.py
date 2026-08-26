@@ -17,7 +17,6 @@ from backend.evaluation import (
     paragraph_key,
 )
 from backend.evaluation.run_corpus_baseline import (
-    HYBRID_MRR_THRESHOLD,
     RECALL_AT_5_THRESHOLD,
     RERANK_MRR_THRESHOLD,
     VECTOR_MRR_THRESHOLD,
@@ -28,6 +27,8 @@ DATASET_PATH = Path("backend/evaluation/datasets/corpus_v2.json")
 
 
 class _FakeEmbedder:
+    model_name = "test/embedding"
+
     def encode(self, texts: list[str]) -> list[list[float]]:
         return [[float(len(text) % 7), float(sum(map(ord, text)) % 11), 1.0] for text in texts]
 
@@ -69,14 +70,8 @@ def test_corpus_dataset_is_versioned_and_anchored_to_real_documents() -> None:
 
 
 def test_corpus_gate_is_frozen_before_the_first_reproducible_report() -> None:
-    assert (
-        RECALL_AT_5_THRESHOLD,
-        VECTOR_MRR_THRESHOLD,
-        HYBRID_MRR_THRESHOLD,
-        RERANK_MRR_THRESHOLD,
-    ) == (
+    assert (RECALL_AT_5_THRESHOLD, VECTOR_MRR_THRESHOLD, RERANK_MRR_THRESHOLD) == (
         0.70,
-        0.55,
         0.55,
         0.65,
     )
@@ -104,11 +99,56 @@ def test_corpus_baseline_uses_postgres_pipeline_and_cleans_temporary_data(monkey
 
     assert report.query_count == len(dataset.queries)
     assert report.parameters["chunk_count"] > 0
-    assert report.parameters["retrieval_strategy"] == "vector_lexical_rrf"
-    assert report.hybrid_mrr is not None
     with psycopg.connect(database_url) as connection:
         assert connection.execute("SELECT count(*) FROM knowledge_bases").fetchone()[0] == 0
         assert connection.execute("SELECT count(*) FROM chunks").fetchone()[0] == 0
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+@pytest.mark.parametrize("retrieval_mode", ["lexical", "hybrid"])
+def test_corpus_baseline_supports_lexical_and_hybrid_retrieval(retrieval_mode, monkeypatch) -> None:
+    """三种召回模式共用同一套精排与指标，报告必须如实记录所用模式。"""
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset_postgres(database_url)
+    dataset, contents = load_corpus_dataset(DATASET_PATH)
+    monkeypatch.setattr(
+        "backend.evaluation.run_corpus_baseline.resolved_model", lambda model: f"{model}@test"
+    )
+
+    report = run_corpus_baseline(
+        dataset,
+        contents,
+        "a" * 40,
+        700,
+        100,
+        database_url=database_url,
+        embedder=_FakeEmbedder(),
+        reranker=_FakeReranker(),
+        retrieval_mode=retrieval_mode,
+    )
+
+    assert report.query_count == len(dataset.queries)
+    assert report.parameters["retrieval_mode"] == retrieval_mode
+    assert str(report.parameters["ranking_strategy"]).startswith("rrf_recall_then")
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT count(*) FROM knowledge_bases").fetchone()[0] == 0
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_corpus_baseline_rejects_unknown_retrieval_mode() -> None:
+    dataset, contents = load_corpus_dataset(DATASET_PATH)
+
+    with pytest.raises(ValueError, match="retrieval_mode"):
+        run_corpus_baseline(
+            dataset,
+            contents,
+            "a" * 40,
+            700,
+            100,
+            database_url=os.environ["TEST_DATABASE_URL"],
+            retrieval_mode="bm25",
+        )
 
 
 def test_corpus_load_rejects_modified_document(tmp_path: Path) -> None:

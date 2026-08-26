@@ -16,8 +16,11 @@ class RetrievedChunk:
     metadata: dict[str, Any]
     retrieval_score: float
     rerank_score: float = 0.0
-    vector_score: float | None = None
+    # 命中该候选的召回通路。默认只有向量，混合召回会在融合阶段改写。
+    channels: tuple[str, ...] = ("vector",)
     lexical_score: float | None = None
+    # 兼容已发布的 V5-1 融合接口；新链路优先读取 channels。
+    vector_score: float | None = None
     retrieval_methods: list[str] | None = None
 
 
@@ -66,7 +69,6 @@ class ChromaStore:
         embedding: list[float],
         limit: int,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
-        query_text: str | None = None,
     ) -> list[RetrievedChunk]:
         validate_knowledge_base_id(knowledge_base_id)
         scoped_count = self.count(knowledge_base_id)

@@ -10,7 +10,6 @@
 
 - Markdown、TXT、PDF 多格式解析，稳定文档 ID 与完整来源 metadata
 - 本地中文 Embedding + ChromaDB 持久化向量召回
-- PostgreSQL 生产路径使用 pgvector 与 pg_trgm 混合召回，并以 RRF 稳定融合候选
 - CrossEncoder 精排，同时展示粗召回与精排分数
 - Gemini 生成带 `[来源 N]` 标签的答案，未配置 Key 时仍可完成检索
 - FastAPI 类型化接口与 React/TypeScript 交互界面
@@ -217,16 +216,79 @@ uv run python -m backend.evaluation.run_corpus_baseline \
   --output backend/evaluation/reports/corpus_v2_baseline.json
 ```
 
-评测会真实写入 PostgreSQL、由索引 Worker 处理，并分别记录纯向量候选、pgvector 与
-pg_trgm 的 RRF 混合候选以及 CrossEncoder 最终排序。为避免污染业务数据，命令只接受
-schema 4 且不含用户或知识库的隔离数据库；运行结束会清理临时语料。冻结阈值为 Recall@5
-`0.70`、向量 MRR `0.55`、混合召回 MRR `0.55`、精排 MRR `0.65`，不按实测结果倒推。
+评测会真实写入 PostgreSQL、由索引 Worker 处理并通过 pgvector 查询。为避免污染业务数据，
+命令只接受 schema 3 且不含用户或知识库的隔离数据库；运行结束会清理临时语料。冻结阈值为
+Recall@5 `0.70`、向量 MRR `0.55`、精排 MRR `0.65`，不按实测结果倒推。
 
 首份 2.0.0 报告须在评测实现与数据集进入 commit 后生成，报告中的 `commit` 必须正好包含
 被测代码和冻结语料。未通过门槛的报告会保留为 `official: false`，不会进入只读评测 API。
 1.0.0 数据集与其正式报告保持不变，继续守护融合排序策略的回归。
 
 `--chunk-size` 与 `--chunk-overlap` 可覆盖切分配置，用于对比不同切分策略的实际收益。
+schema 版本以 `REQUIRED_DATABASE_SCHEMA_VERSION` 为准。
+
+### 同义改写评测集与召回诊断
+
+`corpus_v2.json` 的问句是照着原文写的，与原文用词高度重合，会系统性高估词法检索。
+`corpus_v2_paraphrased.json` 共用同一份语料与段落标注，只把问法换成口语化表达
+（与原问句的平均词元重合率 14%），用于检验结论是否可推广：
+
+```bash
+uv run python -m backend.evaluation.run_corpus_baseline \
+  --dataset backend/evaluation/datasets/corpus_v2_paraphrased.json \
+  --database-url "$TEST_DATABASE_URL" --commit "$(git rev-parse HEAD)" \
+  --retrieval-mode vector --output /tmp/para.json
+```
+
+**两个数据集难度不同，不共用阈值。** 同一配置下原始集 0.63、改写集 0.44；`0.70` 是为
+原始集定的，改写集只用于相对比较。
+
+聚合指标无法区分"语义匹配不上"与"排在第 17 名被 top-5 截断"，诊断工具用更大的窗口
+检索并记录每个标注段落的真实名次：
+
+```bash
+uv run python -m backend.evaluation.diagnose_retrieval \
+  --dataset backend/evaluation/datasets/corpus_v2_paraphrased.json \
+  --database-url "$TEST_DATABASE_URL" --retrieval-mode vector --diagnose-k 50
+```
+
+指标中 `recall_at_5` 统计的是召回阶段，`rerank_recall_at_5` 才对应用户实际看到的
+来源列表——扩大召回窗口的收益只有后者能体现。
+
+### 混合检索（默认关闭）
+
+`retrieval_mode` 支持 `vector`（默认）与 `hybrid`。hybrid 用 RRF 合并向量与 BM25
+两路名次：RRF 只看名次不看分数，因此余弦与 BM25 的量纲差异无需归一化即可合并。
+词法检索零依赖实现，中文按字符 bigram 切分、ASCII 标识符整体保留，`NodePort`、
+`30080`、`FOR UPDATE SKIP LOCKED` 这类词元不会被切碎。
+
+**实测结论：切分修复之后没有开启的理由。** 在改写集上 hybrid 反而落后于纯向量
+（精排后 Recall@5 `0.6048` vs `0.6410`）——hybrid 早期的领先来自补偿切分损坏造成的
+召回缺口，缺口修复后词法兜底的边际价值消失。代码保留以备语料形态变化时重新评估。
+
+### 解析切分的实测收益
+
+段落划分直接决定检索上限。以改写集与 `BAAI/bge-base-zh-v1.5` 衡量：
+
+| 解析策略 | 召回 Recall@5 | 精排后 Recall@5 | 精排 MRR | 分块数 |
+| --- | ---: | ---: | ---: | ---: |
+| 原始（按空行切分） | 0.4724 | 0.5345 | 0.4102 | 189 |
+| + 代码块并入上下文 | 0.5345 | 0.5759 | 0.4300 | 170 |
+| + 长列表按要点拆分 | 0.5428 | **0.6410** | **0.4723** | 232 |
+
+累计精排后 Recall@5 提升 `+0.107`（相对 20%），且第三行是在标注变严格
+（3 条问题改为多标注，分母变大）的前提下取得的。两项改动的机理不同：
+
+- **代码块并入上下文**：按空行切分会把 ``` 代码块拦腰截断，并使其独立成段。
+  纯命令文本没有任何自然语言描述，"怎么校验备份包"与一段 shell 命令之间没有可
+  匹配的语义，任何向量模型都命中不了。
+- **长列表按要点拆分**：一个段落塞进五六个要点，只会得到一个被稀释的向量。收益
+  几乎全部体现在精排后（`+0.065`）而非召回阶段（`+0.008`）——拆分没让向量多找到
+  什么，但候选变纯净后精排器能排得准得多。
+
+**失败的尝试**：给每个段落注入所属小节标题，实测有害（召回 Recall@5 从 `0.5345`
+跌到 `0.4586`）——同一小节下的段落因共享标题前缀而向量趋同，区分度被破坏。原因
+记录在 `parsers.py` 的注释里，避免重复试错。
 
 ### V3 回答质量工具链
 

@@ -15,9 +15,9 @@ from .chunking import chunking_version, parse_chunking_version, split_sections
 from .config import Settings
 from .errors import AppError
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID, validate_knowledge_base_id
+from .lexical import LexicalIndexCache
 from .models import EmbeddingModel, GeminiGenerator, Reranker
 from .parsers import parse_document
-from .ranking import fuse_retrieval_candidates
 from .schemas import DocumentInfo
 from .security import write_private_file
 from .service import RAGService
@@ -39,12 +39,11 @@ class PostgresVectorStore:
         embedding: list[float],
         limit: int,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
-        query_text: str | None = None,
     ) -> list[RetrievedChunk]:
         validate_knowledge_base_id(knowledge_base_id)
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             register_vector(connection)
-            vector_rows = connection.execute(
+            rows = connection.execute(
                 """SELECT c.chunk_id, c.content, c.metadata,
                           1 - (c.embedding <=> %s::vector) AS retrieval_score
                    FROM chunks c
@@ -52,60 +51,98 @@ class PostgresVectorStore:
                      ON d.knowledge_base_id = c.knowledge_base_id
                     AND d.document_id = (c.metadata->>'document_id')
                     AND d.current_version_id = c.document_version_id
-                   JOIN document_versions v
-                     ON v.document_version_id = c.document_version_id
-                    AND v.status = 'ready'
                    WHERE c.knowledge_base_id = %s
                    ORDER BY c.embedding <=> %s::vector
                    LIMIT %s""",
                 (embedding, knowledge_base_id, embedding, limit),
             ).fetchall()
-            lexical_rows = connection.execute(
-                """SELECT c.chunk_id, c.content, c.metadata,
-                          GREATEST(
-                              similarity(lower(c.content), lower(%s)),
-                              word_similarity(lower(%s), lower(c.content))
-                          ) AS retrieval_score
+        return [
+            RetrievedChunk(
+                chunk_id=str(row["chunk_id"]),
+                text=str(row["content"]),
+                metadata=dict(row["metadata"]),
+                retrieval_score=round(float(row["retrieval_score"]), 6),
+            )
+            for row in rows
+        ]
+
+    def load_current_chunks(
+        self,
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> list[RetrievedChunk]:
+        """读回当前版本的全部分块，供词法索引构建与融合阶段复原候选。
+
+        过滤条件与 ``query`` 完全一致，两路召回因此始终看到同一批分块；
+        ``retrieval_score`` 留 0，由调用方在需要时补算。
+        """
+
+        validate_knowledge_base_id(knowledge_base_id)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                """SELECT c.chunk_id, c.content, c.metadata
                    FROM chunks c
                    JOIN documents d
                      ON d.knowledge_base_id = c.knowledge_base_id
                     AND d.document_id = (c.metadata->>'document_id')
                     AND d.current_version_id = c.document_version_id
-                   JOIN document_versions v
-                     ON v.document_version_id = c.document_version_id
-                    AND v.status = 'ready'
                    WHERE c.knowledge_base_id = %s
-                     AND GREATEST(
-                         similarity(lower(c.content), lower(%s)),
-                         word_similarity(lower(%s), lower(c.content))
-                     ) > 0
-                   ORDER BY retrieval_score DESC, c.chunk_id
-                   LIMIT %s""",
-                (query_text, query_text, knowledge_base_id, query_text, query_text, limit),
-            ).fetchall() if query_text else []
-        vectors = [
+                   ORDER BY c.chunk_id""",
+                (knowledge_base_id,),
+            ).fetchall()
+        return [
             RetrievedChunk(
                 chunk_id=str(row["chunk_id"]),
                 text=str(row["content"]),
                 metadata=dict(row["metadata"]),
-                retrieval_score=round(float(row["retrieval_score"]), 6),
-                vector_score=round(float(row["retrieval_score"]), 6),
-                retrieval_methods=["vector"],
+                retrieval_score=0.0,
             )
-            for row in vector_rows
+            for row in rows
         ]
-        lexical = [
-            RetrievedChunk(
-                chunk_id=str(row["chunk_id"]),
-                text=str(row["content"]),
-                metadata=dict(row["metadata"]),
-                retrieval_score=round(float(row["retrieval_score"]), 6),
-                lexical_score=round(float(row["retrieval_score"]), 6),
-                retrieval_methods=["lexical"],
-            )
-            for row in lexical_rows
-        ]
-        return fuse_retrieval_candidates(vectors, lexical, limit)
+
+    def chunk_fingerprint(self, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID) -> str:
+        """当前版本分块集合的廉价指纹，用于跨进程判断词法索引是否已经过期。
+
+        新增与删除会改变计数，索引重建会改变最新写入时间，因此三类变更都能被捕获。
+        """
+
+        validate_knowledge_base_id(knowledge_base_id)
+        with psycopg.connect(self.database_url) as connection:
+            row = connection.execute(
+                """SELECT count(*), COALESCE(max(c.created_at), to_timestamp(0))
+                   FROM chunks c
+                   JOIN documents d
+                     ON d.knowledge_base_id = c.knowledge_base_id
+                    AND d.document_id = (c.metadata->>'document_id')
+                    AND d.current_version_id = c.document_version_id
+                   WHERE c.knowledge_base_id = %s""",
+                (knowledge_base_id,),
+            ).fetchone()
+        return f"{int(row[0])}:{row[1].isoformat()}"
+
+    def score_by_ids(
+        self,
+        chunk_ids: list[str],
+        embedding: list[float],
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> dict[str, float]:
+        """为指定分块补算向量相似度。
+
+        词法独有的候选若把 ``retrieval_score`` 留在 0，会被 ``rank_candidates``
+        的归一化压到最低，等于无理由给词法召回降权，页面上的相关度也会显示为 0。
+        """
+
+        validate_knowledge_base_id(knowledge_base_id)
+        if not chunk_ids:
+            return {}
+        with psycopg.connect(self.database_url) as connection:
+            register_vector(connection)
+            rows = connection.execute(
+                """SELECT chunk_id, 1 - (embedding <=> %s::vector)
+                   FROM chunks
+                   WHERE knowledge_base_id = %s AND chunk_id = ANY(%s)""",
+                (embedding, knowledge_base_id, chunk_ids),
+            ).fetchall()
+        return {str(row[0]): round(float(row[1]), 6) for row in rows}
 
     def list_documents(self, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID) -> list[dict[str, Any]]:
         validate_knowledge_base_id(knowledge_base_id)
@@ -229,12 +266,22 @@ class PostgresAsyncRAGService(RAGService):
         if not settings.database_url:
             raise ValueError("DATABASE_URL is required")
         self.database_url = settings.database_url
+        store = PostgresVectorStore(settings.database_url, settings.upload_path)
         super().__init__(
             settings,
-            PostgresVectorStore(settings.database_url, settings.upload_path),
+            store,
             embedder,
             reranker,
             generator,
+            # 词法倒排按知识库懒加载，并在每次取用时比对分块指纹，
+            # 因此独立 Worker 进程写入的新分块无需显式通知即可被感知。
+            LexicalIndexCache(
+                lambda knowledge_base_id: [
+                    (item.chunk_id, item.text)
+                    for item in store.load_current_chunks(knowledge_base_id)
+                ],
+                store.chunk_fingerprint,
+            ),
         )
 
     def index_document(
@@ -349,6 +396,49 @@ class PostgresAsyncRAGService(RAGService):
             filename=safe_name,
             chunk_count=0,
             status="pending",
+        )
+
+
+def register_embedding_model(database_url: str, model_name: str, dimension: int) -> None:
+    """首次写入分块时登记向量模型，之后拒绝任何不一致的写入。
+
+    没有这道校验，换模型后新旧维度会混存在同一张 chunks 表里，直到检索执行 ``<=>``
+    才报错——那时索引已经被污染，只能全量重建。
+    """
+
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        row = connection.execute(
+            "SELECT embedding_model, embedding_dimension FROM index_settings WHERE singleton"
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                """INSERT INTO index_settings (embedding_model, embedding_dimension)
+                   VALUES (%s, %s)""",
+                (model_name, dimension),
+            )
+            return
+        if str(row[0]) != model_name or int(row[1]) != dimension:
+            raise AppError(
+                "EMBEDDING_MODEL_MISMATCH",
+                f"索引使用 {row[0]}（{row[1]} 维），当前配置为 {model_name}（{dimension} 维）。"
+                "请先清空索引或执行全量重建。",
+                409,
+            )
+
+
+def check_embedding_model(database_url: str, model_name: str) -> None:
+    """启动时校验配置的模型与已有索引一致；尚未索引过任何内容时跳过。
+
+    启动阶段不加载模型，因此只能比对名称，维度由写入路径的 register 负责。
+    """
+
+    with psycopg.connect(database_url) as connection:
+        row = connection.execute(
+            "SELECT embedding_model FROM index_settings WHERE singleton"
+        ).fetchone()
+    if row is not None and str(row[0]) != model_name:
+        raise RuntimeError(
+            f"索引使用 {row[0]}，当前配置为 {model_name}；请先执行全量重建或恢复原模型配置"
         )
 
 
@@ -538,6 +628,11 @@ class IndexWorker:
             str(version["knowledge_base_id"]),
         )
         embeddings = self.embedder.encode([chunk.text for chunk in chunks])
+        if embeddings:
+            # 在写入分块之前登记/校验，避免污染后才在检索时发现维度冲突。
+            register_embedding_model(
+                self.database_url, self.embedder.model_name, len(embeddings[0])
+            )
         now = datetime.now(UTC)
         with psycopg.connect(self.database_url) as connection:
             register_vector(connection)

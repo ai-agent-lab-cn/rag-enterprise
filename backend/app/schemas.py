@@ -156,7 +156,7 @@ class DataSourceResponse(BaseModel):
     last_synced_at: datetime | None
     failure_reason: str | None
     updated_at: datetime
-    allowed_actions: list[Literal["detail", "edit", "disable", "enable", "sync", "delete"]]
+    allowed_actions: list[Literal["detail", "edit", "disable", "enable", "update_file", "delete"]]
 
 
 class QueryRequest(BaseModel):
@@ -192,9 +192,10 @@ class Source(BaseModel):
     text: str
     retrieval_score: float
     rerank_score: float
-    vector_score: float | None = None
+    # 默认为空表示通路未知：V5 之前保存的历史回答没有这两个字段，
+    # 页面必须按"缺失即不展示"处理，不能把旧记录当成向量召回。
+    retrieval_channels: list[str] = Field(default_factory=list)
     lexical_score: float | None = None
-    retrieval_methods: list[Literal["vector", "lexical"]] = Field(default_factory=list)
 
 
 class QueryResponse(BaseModel):
@@ -313,7 +314,6 @@ class EvaluationReportResponse(EvaluationReportSummary):
     recall_at_5: EvaluationMetricResponse
     vector_mrr: EvaluationMetricResponse
     rerank_mrr: EvaluationMetricResponse
-    hybrid_mrr: EvaluationMetricResponse | None = None
 
 
 class AnswerEvaluationMetricResponse(EvaluationMetricResponse):

@@ -32,6 +32,9 @@ class RetrievalMetrics:
     recall_at_5: float
     vector_mrr: float
     rerank_mrr: float
+    # 精排后前 5 条的覆盖率。recall_at_5 衡量的是召回阶段的中间产物，
+    # 而用户看到的是精排后的来源列表，因此扩大召回窗口的收益只有这一项能体现。
+    rerank_recall_at_5: float = 0.0
     hybrid_mrr: float | None = None
 
 
@@ -56,12 +59,14 @@ def evaluate_rankings(
             raise ValueError(f"混合召回缺少问题结果：{sorted(missing)}")
 
     recalls: list[float] = []
+    rerank_recalls: list[float] = []
     vector_rrs: list[float] = []
     rerank_rrs: list[float] = []
     hybrid_rrs: list[float] = []
     for query in queries:
         relevant = set(query.relevant_chunk_ids)
         recalls.append(recall_at_k(vector_rankings[query.query_id], relevant, 5))
+        rerank_recalls.append(recall_at_k(reranked_rankings[query.query_id], relevant, 5))
         vector_rrs.append(reciprocal_rank(vector_rankings[query.query_id], relevant))
         rerank_rrs.append(reciprocal_rank(reranked_rankings[query.query_id], relevant))
         if hybrid_rankings is not None:
@@ -73,5 +78,6 @@ def evaluate_rankings(
         recall_at_5=sum(recalls) / count,
         vector_mrr=sum(vector_rrs) / count,
         rerank_mrr=sum(rerank_rrs) / count,
+        rerank_recall_at_5=sum(rerank_recalls) / count,
         hybrid_mrr=sum(hybrid_rrs) / count if hybrid_rrs else None,
     )

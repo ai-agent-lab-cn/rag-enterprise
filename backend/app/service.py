@@ -1,4 +1,5 @@
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
 
@@ -6,6 +7,7 @@ from .chunking import split_sections, stable_document_id
 from .config import Settings
 from .errors import AppError
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
+from .lexical import LexicalIndexCache
 from .models import EmbeddingModel, GeminiGenerator, Reranker
 from .parsers import parse_document
 from .prompts import (
@@ -15,7 +17,7 @@ from .prompts import (
     build_prompt,
     parse_answer,
 )
-from .ranking import rank_candidates
+from .ranking import rank_candidates, reciprocal_rank_fusion
 from .schemas import DocumentInfo, QueryResponse, Source
 from .store import ChromaStore, RetrievedChunk
 
@@ -52,12 +54,15 @@ class RAGService:
         embedder: EmbeddingModel,
         reranker: Reranker,
         generator: GeminiGenerator,
+        lexical: LexicalIndexCache | None = None,
     ):
         self.settings = settings
         self.store = store
         self.embedder = embedder
         self.reranker = reranker
         self.generator = generator
+        # 未注入词法索引的运行时（如单机 Chroma）只走向量召回。
+        self.lexical = lexical
 
     def index_document(
         self,
@@ -101,6 +106,79 @@ class RAGService:
     ) -> bool:
         return self.store.delete_document(document_id, knowledge_base_id)
 
+    def retrieve_candidates(
+        self,
+        question: str,
+        embedding: list[float],
+        retrieve_k: int,
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        retrieval_mode: str | None = None,
+    ) -> list[RetrievedChunk]:
+        """产出召回候选。在线查询与离线评测共用此方法，避免两个入口得出不同结论。
+
+        hybrid 用 RRF 合并向量与词法两路名次：RRF 只看名次不看分数，因此余弦与 BM25
+        的量纲差异无需归一化即可合并。词法独有的候选会补算真实余弦，否则它们的
+        ``retrieval_score`` 会留在 0，被后续 ``rank_candidates`` 的归一化压到最低。
+        """
+
+        mode = retrieval_mode or self.settings.retrieval_mode
+        if mode == "vector" or self.lexical is None:
+            return self.store.query(embedding, retrieve_k, knowledge_base_id)
+
+        hits = self.lexical.get(knowledge_base_id).search(question, retrieve_k)
+        lexical_scores = {hit.chunk_id: hit.score for hit in hits}
+        if mode == "lexical":
+            fused_ids = [hit.chunk_id for hit in hits]
+            vector_candidates: list[RetrievedChunk] = []
+        else:
+            vector_candidates = self.store.query(embedding, retrieve_k, knowledge_base_id)
+            fused_ids = [
+                chunk_id
+                for chunk_id, _ in reciprocal_rank_fusion(
+                    [
+                        [item.chunk_id for item in vector_candidates],
+                        [hit.chunk_id for hit in hits],
+                    ],
+                    retrieve_k,
+                )
+            ]
+
+        by_id = {item.chunk_id: item for item in vector_candidates}
+        missing = [chunk_id for chunk_id in fused_ids if chunk_id not in by_id]
+        lookup: dict[str, RetrievedChunk] = {}
+        scores: dict[str, float] = {}
+        if missing:
+            wanted = set(missing)
+            lookup = {
+                item.chunk_id: item
+                for item in self.store.load_current_chunks(knowledge_base_id)
+                if item.chunk_id in wanted
+            }
+            scores = self.store.score_by_ids(missing, embedding, knowledge_base_id)
+
+        candidates: list[RetrievedChunk] = []
+        for chunk_id in fused_ids:
+            if chunk_id in by_id:
+                candidate = by_id[chunk_id]
+                channels = ("vector", "lexical") if chunk_id in lexical_scores else ("vector",)
+                candidates.append(
+                    replace(
+                        candidate,
+                        channels=channels,
+                        lexical_score=lexical_scores.get(chunk_id),
+                    )
+                )
+            elif chunk_id in lookup:
+                candidates.append(
+                    replace(
+                        lookup[chunk_id],
+                        retrieval_score=scores.get(chunk_id, 0.0),
+                        channels=("lexical",),
+                        lexical_score=lexical_scores.get(chunk_id),
+                    )
+                )
+        return candidates
+
     def query(
         self,
         question: str,
@@ -111,11 +189,8 @@ class RAGService:
         total_started = time.perf_counter()
         retrieval_started = time.perf_counter()
         query_embedding = self.embedder.encode([question])[0]
-        candidates = self.store.query(
-            query_embedding,
-            retrieve_k,
-            knowledge_base_id,
-            query_text=question,
+        candidates = self.retrieve_candidates(
+            question, query_embedding, retrieve_k, knowledge_base_id
         )
         retrieval_ms = _elapsed(retrieval_started)
         if not candidates:
@@ -217,7 +292,6 @@ def _source(item: RetrievedChunk) -> Source:
         text=item.text,
         retrieval_score=item.retrieval_score,
         rerank_score=item.rerank_score,
-        vector_score=item.vector_score,
+        retrieval_channels=list(item.channels),
         lexical_score=item.lexical_score,
-        retrieval_methods=item.retrieval_methods or ["vector"],
     )

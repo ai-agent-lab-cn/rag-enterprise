@@ -24,7 +24,7 @@ from .knowledge_bases import (
 )
 from .models import get_embedding_model, get_generator, get_reranker
 from .observability import MetricsRegistry, ObservabilityMiddleware, bind_actor, hash_identifier
-from .postgres_documents import PostgresAsyncRAGService
+from .postgres_documents import PostgresAsyncRAGService, check_embedding_model
 from .postgres_repositories import (
     PostgresAuthRepository,
     PostgresDataSourceRepository,
@@ -188,6 +188,10 @@ def create_app() -> FastAPI:
                 settings.database_url,
                 settings.required_database_schema_version,
             )
+            # 换了向量模型却直接启动，会把新维度写进既有索引，必须尽早失败。
+            await run_in_threadpool(
+                check_embedding_model, settings.database_url, settings.embedding_model
+            )
         # 服务启动时迁移 V2 原始文件；只移动根目录文件，不扫描其他知识库目录。
         KnowledgeBaseScope(DEFAULT_KNOWLEDGE_BASE_ID, settings.upload_path).migrate_legacy_uploads()
         get_knowledge_bases()
@@ -254,7 +258,7 @@ def create_app() -> FastAPI:
             ("knowledge_base_registry", knowledge_bases.list),
             (
                 "conversation_store",
-                lambda: conversations.list_conversations(DEFAULT_KNOWLEDGE_BASE_ID),
+                lambda: conversations.count_conversations(DEFAULT_KNOWLEDGE_BASE_ID),
             ),
         ):
             try:
@@ -543,37 +547,6 @@ def create_app() -> FastAPI:
             data_source_id,
         )
 
-    @app.post("/api/data-sources/{data_source_id}/sync", response_model=DocumentInfo, status_code=202)
-    async def sync_data_source(
-        data_source_id: str,
-        sources: DataSourcesDependency,
-        service: ServiceDependency,
-        current: CurrentSessionDependency,
-        auth: AuthRepositoryDependency,
-        audit: AuditRepositoryDependency,
-    ) -> DocumentInfo:
-        if sources is None:
-            raise AppError("POSTGRES_REQUIRED", "数据源同步需要 PostgreSQL 运行时。", 503)
-        payload = await run_in_threadpool(sources.sync_payload, data_source_id)
-        if payload is None:
-            raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
-        _require_knowledge_base_access(auth, current.user, str(payload["knowledge_base_id"]))
-        if not payload["enabled"]:
-            raise AppError("DATA_SOURCE_DISABLED", "数据源已停用，请先启用。", 409)
-        if not payload["source_path"]:
-            raise AppError("DATA_SOURCE_EMPTY", "数据源没有可同步的当前文件。", 409)
-        source_path = (settings.upload_path / str(payload["source_path"])).resolve()
-        if not source_path.is_relative_to(settings.upload_path.resolve()) or not source_path.is_file():
-            raise AppError("SOURCE_FILE_MISSING", "数据源原始文件不存在。", 409)
-        result = await run_in_threadpool(
-            service.index_document,
-            str(payload["name"]),
-            source_path.read_bytes(),
-            str(payload["knowledge_base_id"]),
-        )
-        await _record_audit(audit, "data_source.sync", current.user, "data_source", data_source_id)
-        return result
-
     @app.delete("/api/data-sources/{data_source_id}", status_code=204)
     async def delete_data_source(
         data_source_id: str,
@@ -757,7 +730,7 @@ def create_app() -> FastAPI:
         documents = await run_in_threadpool(service.list_documents, knowledge_base_id)
         upload_scope = KnowledgeBaseScope(knowledge_base_id, settings.upload_path)
         has_original_files = upload_scope.upload_path.exists() and any(upload_scope.upload_path.iterdir())
-        history = await run_in_threadpool(conversations.list_conversations, knowledge_base_id)
+        history = await run_in_threadpool(conversations.count_conversations, knowledge_base_id)
         if documents or has_original_files or history:
             raise AppError("KNOWLEDGE_BASE_NOT_EMPTY", "请先删除知识库中的文档和会话。", 409)
         await run_in_threadpool(knowledge_bases.delete, knowledge_base_id)
@@ -984,7 +957,9 @@ def create_app() -> FastAPI:
         limit: PageLimit = 50,
     ) -> list[ConversationSummaryResponse]:
         await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
-        items = await run_in_threadpool(conversations.list_conversations, knowledge_base_id)
+        items = await run_in_threadpool(
+            conversations.list_conversations, knowledge_base_id, current.user.user_id
+        )
         return [ConversationSummaryResponse(**item) for item in _page(items, offset, limit)]
 
     @app.get(
@@ -1005,6 +980,7 @@ def create_app() -> FastAPI:
                 conversations.get_conversation,
                 knowledge_base_id,
                 conversation_id,
+                current.user.user_id,
             )
         except ValueError as exc:
             raise AppError("CONVERSATION_NOT_FOUND", "未找到该会话。", 404) from exc
@@ -1030,6 +1006,7 @@ def create_app() -> FastAPI:
                 conversations.delete_conversation,
                 knowledge_base_id,
                 conversation_id,
+                current.user.user_id,
             )
         except ValueError as exc:
             raise AppError("CONVERSATION_NOT_FOUND", "未找到该会话。", 404) from exc
@@ -1054,6 +1031,7 @@ def create_app() -> FastAPI:
                 conversations.get_answer,
                 knowledge_base_id,
                 record_id,
+                current.user.user_id,
             )
         except ValueError as exc:
             raise AppError("ANSWER_RECORD_NOT_FOUND", "未找到该回答记录。", 404) from exc
@@ -1171,7 +1149,7 @@ def _data_source_response(row: dict[str, object], user: UserRecord) -> DataSourc
     raw_status = str(row.get("sync_status") or "idle")
     index_status = raw_status if raw_status in {"queued", "running", "succeeded", "failed"} else "idle"
     upload_status = "succeeded" if row.get("upload_status") == "succeeded" else "idle"
-    actions = ["detail", "sync"]
+    actions = ["detail", "update_file"]
     if user.role == "admin":
         actions.extend(["edit", "disable" if row["enabled"] else "enable"])
         if not row["document_count"] and index_status not in {"queued", "running"}:
@@ -1277,6 +1255,7 @@ async def _execute_recorded_query(
             knowledge_base_id,
             question,
             payload.conversation_id,
+            user_id,
         )
     except (LookupError, PermissionError, ValueError) as exc:
         raise AppError("CONVERSATION_NOT_FOUND", "未找到该知识库中的会话。", 404) from exc
