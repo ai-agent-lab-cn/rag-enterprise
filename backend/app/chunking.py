@@ -1,6 +1,7 @@
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID, validate_knowledge_base_id
 from .parsers import ParsedSection
@@ -47,9 +48,10 @@ class Chunk:
     chunk_index: int
     char_count: int
     summary: str
+    governance_metadata: dict[str, Any] = field(default_factory=dict)
 
-    def metadata(self) -> dict[str, str | int]:
-        data: dict[str, str | int] = {
+    def metadata(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "knowledge_base_id": self.knowledge_base_id,
             "document_id": self.document_id,
             "filename": self.filename,
@@ -60,7 +62,7 @@ class Chunk:
         }
         if self.page is not None:
             data["page"] = self.page
-        return data
+        return {**data, **self.governance_metadata}
 
 
 def stable_document_id(filename: str, content: bytes) -> str:
@@ -77,6 +79,7 @@ def split_sections(
     chunk_size: int,
     overlap: int,
     knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    governance_metadata: dict[str, Any] | None = None,
 ) -> list[Chunk]:
     if overlap >= chunk_size:
         raise ValueError("chunk overlap must be smaller than chunk size")
@@ -107,6 +110,7 @@ def split_sections(
                         chunk_index=index,
                         char_count=len(text),
                         summary=text[:80].replace("\n", " "),
+                        governance_metadata=dict(governance_metadata or {}),
                     )
                 )
             if start + chunk_size >= len(section.text):

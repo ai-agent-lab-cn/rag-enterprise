@@ -13,6 +13,10 @@ const base = {
   is_default: true,
   document_count: 1,
   chunk_count: 3,
+  source_file_bytes: 2048,
+  index_status: "ready",
+  current_user_permission: "admin",
+  allowed_actions: ["detail", "edit", "delete"],
 };
 const document = {
   knowledge_base_id: "kb_default",
@@ -20,6 +24,27 @@ const document = {
   filename: "profile.md",
   chunk_count: 3,
   status: "ready",
+  category: "安全",
+  category_id: "cat_1234567890abcdef",
+  tags: ["ACL"],
+  source_type: "file",
+  created_at: "2026-08-12T00:00:00Z",
+  source_system: "upload",
+  external_resource_id: null,
+  owner_user_id: null,
+  department: null,
+  sensitivity: "internal",
+  valid_from: null,
+  valid_to: null,
+  retrieval_status: "searchable",
+  acl_version: 1,
+  allow_user_ids: [],
+  deny_user_ids: [],
+  classification_status: "manual",
+  classification_confidence: null,
+  suggested_category_id: null,
+  classification_model: null,
+  classified_at: null,
 };
 const dataSource = {
   data_source_id: "src_1", name: "profile.md", source_type: "file",
@@ -28,6 +53,12 @@ const dataSource = {
   sync_status: "succeeded", document_count: 1, source_file_bytes: 2048,
   last_indexed_at: "2026-08-12T00:00:00Z", last_synced_at: "2026-08-12T00:00:00Z", failure_reason: null,
   updated_at: "2026-08-12T00:00:00Z", allowed_actions: ["detail", "edit", "disable", "update_file"],
+  acl_version: 1, allow_user_ids: [], deny_user_ids: [],
+};
+const category = {
+  category_id: "cat_1234567890abcdef", knowledge_base_id: "kb_default", name: "安全",
+  description: "安全资料", sort_order: 100, active: true, is_system: false,
+  document_count: 1, created_at: "2026-08-12T00:00:00Z", updated_at: "2026-08-12T00:00:00Z",
 };
 const answerSummary = {
   report_id: "answer-official",
@@ -150,10 +181,14 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if (url === "/api/knowledge-bases/kb_default/documents/doc_1" && init?.method === "DELETE") return Promise.resolve(new Response(null, { status: 204 }));
   if ((url === "/api/knowledge-bases" || url.startsWith("/api/knowledge-bases?")) && !init?.method) return Promise.resolve(json([base]));
   if (url === "/api/data-sources?offset=0&limit=21") return Promise.resolve(json([dataSource]));
+  if (url === "/api/data-sources?offset=0&limit=100") return Promise.resolve(json([dataSource]));
+  if (url === "/api/knowledge-bases/kb_default/documents/doc_1/acl" && init?.method === "PUT")
+    return Promise.resolve(json({ version: 2, allow_user_ids: [member.user_id], deny_user_ids: [] }));
   if (url === "/api/knowledge-bases/kb_default") return Promise.resolve(json(base));
   if (url === "/api/knowledge-bases/kb_default/documents" && init?.method === "POST")
     return Promise.resolve(json({ ...document, status: "pending" }, 201));
   if (url === "/api/knowledge-bases/kb_default/documents") return Promise.resolve(json([document]));
+  if (url === "/api/knowledge-bases/kb_default/categories") return Promise.resolve(json([category]));
   if (url === "/api/knowledge-bases/kb_default/document-versions?offset=0&limit=100") return Promise.resolve(json([]));
   if (url === "/api/knowledge-bases/kb_default/conversations") return Promise.resolve(json([]));
   if (url === "/api/evaluations/answers/reports") return Promise.resolve(json([answerSummary]));
@@ -177,6 +212,11 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
           query_count: 2,
           expansion_count: 1,
           fallback_used: false,
+          retrieved_candidate_count: 8,
+          fused_candidate_count: 5,
+          returned_source_count: 1,
+          filter_match_count: 5,
+          applied_filters: { categories: ["安全"], tags: ["ACL"], source_types: ["file"], created_from: null, created_to: null },
         },
         sources: [
           {
@@ -281,7 +321,43 @@ test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
   expect(screen.getByText("默认知识库", { selector: ".base-type-tag" })).toHaveClass("is-default");
   await userEvent.click(await screen.findByRole("button", { name: "详情" }));
   expect(await screen.findByText("profile.md")).toBeInTheDocument();
+  expect(screen.queryByText("正在读取知识库详情…")).not.toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: /资料/ })).toHaveAttribute("aria-selected", "true");
+  await userEvent.click(screen.getByRole("button", { name: "编辑 profile.md 元数据" }));
+  expect(screen.getByRole("dialog", { name: "编辑资料元数据" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "取消" }));
+  await userEvent.click(screen.getByRole("tab", { name: /版本治理/ }));
+  expect(screen.getByRole("tab", { name: /版本治理/ })).toHaveAttribute("aria-selected", "true");
+  expect(screen.queryByRole("heading", { name: "文档与版本" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("tab", { name: /权限边界/ }));
+  expect(screen.getByRole("tab", { name: /权限边界/ })).toHaveAttribute("aria-selected", "true");
+  expect(screen.queryByRole("heading", { name: "权限边界" })).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "数据源 ACL" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "文档 ACL" })).toBeInTheDocument();
+  await userEvent.click(screen.getAllByRole("button", { name: "配置" })[1]);
+  expect(screen.getByRole("dialog", { name: "配置 ACL" })).toBeInTheDocument();
+  await userEvent.selectOptions(screen.getByLabelText("资料成员 ACL"), "allow");
+  await userEvent.click(screen.getByRole("button", { name: "保存并立即生效" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+    "/api/knowledge-bases/kb_default/documents/doc_1/acl",
+    expect.objectContaining({ method: "PUT" }),
+  ));
   expect(window.location.pathname).toBe("/knowledge-bases/kb_default");
+});
+
+test("资料库支持一次选择多个文件并逐个上传", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default");
+  render(<App />);
+  const input = await screen.findByLabelText("批量上传资料");
+  await userEvent.upload(input, [
+    new File(["one"], "one.md", { type: "text/markdown" }),
+    new File(["two"], "two.txt", { type: "text/plain" }),
+  ]);
+  await waitFor(() => {
+    const uploads = fetchMock.mock.calls.filter(([url, init]) => String(url) === "/api/knowledge-bases/kb_default/documents" && init?.method === "POST");
+    expect(uploads).toHaveLength(2);
+  });
 });
 
 test("通过弹框创建知识库并支持取消", async () => {
@@ -315,12 +391,20 @@ test("问答工作台使用所选知识库接口并渲染来源", async () => {
   expect(basePicker.closest(".question-box")).not.toBeNull();
   expect(screen.getByRole("tab", { name: /引用来源/ })).toHaveAttribute("aria-selected", "true");
   expect(screen.queryByRole("tab", { name: /资料库/ })).not.toBeInTheDocument();
+  await screen.findByRole("option", { name: "安全" });
+  await userEvent.selectOptions(screen.getByLabelText("过滤分类"), "安全");
+  await userEvent.type(screen.getByLabelText("过滤标签"), "ACL");
+  await userEvent.selectOptions(screen.getByLabelText("过滤来源类型"), "file");
   await userEvent.type(await screen.findByLabelText("向知识库提问"), "系统如何工作？");
   await userEvent.click(screen.getByRole("button", { name: /提问/ }));
   expect(await screen.findByText("系统使用可追溯检索。")).toBeInTheDocument();
   await userEvent.click(screen.getByText("查看技术细节"));
   expect(screen.getByText("可控查询扩展 · 2 路查询")).toBeInTheDocument();
+  expect(screen.getByLabelText("实际生效的过滤条件")).toHaveTextContent("分类：安全标签：ACL来源：文件");
+  expect(screen.getByText("候选：召回 8 / 融合 5 / 返回 1 · 过滤命中 5")).toBeInTheDocument();
   expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/query", expect.objectContaining({ method: "POST" }));
+  const queryCall = fetchMock.mock.calls.find(([url]) => String(url) === "/api/knowledge-bases/kb_default/query");
+  expect(JSON.parse(String(queryCall?.[1]?.body))).toMatchObject({ filters: { category_ids: ["cat_1234567890abcdef"], tags: ["ACL"], source_types: ["file"] } });
 });
 
 test("回答评测页只读展示正式指标", async () => {

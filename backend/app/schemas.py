@@ -1,8 +1,9 @@
+import re
 import unicodedata
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
 
@@ -82,6 +83,160 @@ class DocumentInfo(BaseModel):
     filename: str
     chunk_count: int
     status: str = "ready"
+    category: str = "未分类"
+    category_id: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    source_type: str = "file"
+    created_at: datetime | None = None
+    source_system: str = "upload"
+    external_resource_id: str | None = None
+    owner_user_id: str | None = None
+    department: str | None = None
+    sensitivity: Literal["public", "internal", "confidential", "restricted"] = "internal"
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    retrieval_status: Literal["searchable", "expired", "deleted"] = "searchable"
+    acl_version: int = 1
+    allow_user_ids: list[str] = Field(default_factory=list)
+    deny_user_ids: list[str] = Field(default_factory=list)
+    classification_status: Literal[
+        "pending", "auto_assigned", "review_required", "manual", "failed"
+    ] = "pending"
+    classification_confidence: float | None = Field(default=None, ge=0, le=1)
+    suggested_category_id: str | None = None
+    classification_model: str | None = None
+    classified_at: datetime | None = None
+
+
+class CategoryCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=64)
+    description: str = Field(default="", max_length=300)
+    sort_order: int = Field(default=100, ge=0, le=10000)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        if not (normalized := value.strip()):
+            raise ValueError("分类名称不能为空")
+        return normalized
+
+
+class CategoryUpdate(CategoryCreate):
+    active: bool = True
+
+
+class CategoryResponse(BaseModel):
+    category_id: str
+    knowledge_base_id: str
+    name: str
+    description: str
+    sort_order: int
+    active: bool
+    is_system: bool
+    document_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class BatchCategoryUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    document_ids: list[str] = Field(min_length=1, max_length=500)
+    category_id: str = Field(pattern=r"^cat_[a-f0-9]{16}$")
+
+
+class ClassificationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    category_id: str = Field(pattern=r"^cat_[a-f0-9]{16}$")
+
+
+class DocumentMetadata(BaseModel):
+    """文档级治理属性；版本与分块只能继承，不能自行扩大范围。"""
+
+    model_config = ConfigDict(extra="forbid")
+    category: str = Field(default="未分类", min_length=1, max_length=64)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    source_system: str = Field(default="upload", min_length=1, max_length=80)
+    external_resource_id: str | None = Field(default=None, max_length=200)
+    owner_user_id: str | None = Field(default=None, pattern=r"^usr_[a-f0-9]{16}$")
+    department: str | None = Field(default=None, max_length=80)
+    sensitivity: Literal["public", "internal", "confidential", "restricted"] = "internal"
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    retrieval_status: Literal["searchable", "expired", "deleted"] = "searchable"
+    acl_version: int = Field(default=1, ge=1)
+    allow_user_ids: list[str] = Field(default_factory=list, max_length=100)
+    deny_user_ids: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("category")
+    @classmethod
+    def normalize_category(cls, value: str) -> str:
+        if not (normalized := value.strip()):
+            raise ValueError("文档分类不能为空")
+        return normalized
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            tag = value.strip()
+            if not tag:
+                raise ValueError("文档标签不能为空")
+            if len(tag) > 64:
+                raise ValueError("文档标签不能超过 64 个字符")
+            if tag not in normalized:
+                normalized.append(tag)
+        return normalized
+
+    @field_validator("source_system", "external_resource_id", "department")
+    @classmethod
+    def normalize_optional_terms(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("allow_user_ids", "deny_user_ids")
+    @classmethod
+    def normalize_acl_users(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            if not re.fullmatch(r"usr_[a-f0-9]{16}", value):
+                raise ValueError("ACL 用户 ID 格式无效")
+            if value not in normalized:
+                normalized.append(value)
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_governance_boundaries(self) -> "DocumentMetadata":
+        if self.valid_from and self.valid_to and self.valid_from > self.valid_to:
+            raise ValueError("valid_from 不能晚于 valid_to")
+        if set(self.allow_user_ids).intersection(self.deny_user_ids):
+            raise ValueError("同一用户不能同时出现在 Allow 与 Deny")
+        return self
+
+
+class AclUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    allow_user_ids: list[str] = Field(default_factory=list, max_length=100)
+    deny_user_ids: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("allow_user_ids", "deny_user_ids")
+    @classmethod
+    def normalize_users(cls, values: list[str]) -> list[str]:
+        return DocumentMetadata.normalize_acl_users(values)
+
+    @model_validator(mode="after")
+    def validate_precedence(self) -> "AclUpdate":
+        if set(self.allow_user_ids).intersection(self.deny_user_ids):
+            raise ValueError("同一用户不能同时出现在 Allow 与 Deny")
+        return self
+
+
+class AclPolicyResponse(BaseModel):
+    version: int = Field(ge=1)
+    allow_user_ids: list[str]
+    deny_user_ids: list[str]
 
 
 class DocumentVersionResponse(BaseModel):
@@ -156,7 +311,52 @@ class DataSourceResponse(BaseModel):
     last_synced_at: datetime | None
     failure_reason: str | None
     updated_at: datetime
+    acl_version: int = Field(default=1, ge=1)
+    allow_user_ids: list[str] = Field(default_factory=list)
+    deny_user_ids: list[str] = Field(default_factory=list)
     allowed_actions: list[Literal["detail", "edit", "disable", "enable", "update_file", "delete"]]
+
+
+class QueryMetadataFilter(BaseModel):
+    """受控检索过滤条件；禁止透传 SQL、JSONPath 或任意表达式。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    categories: list[str] = Field(default_factory=list, max_length=10)
+    category_ids: list[str] = Field(default_factory=list, max_length=10)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    source_types: list[Literal["file", "object_storage", "web", "connector"]] = Field(
+        default_factory=list, max_length=4
+    )
+    created_from: datetime | None = None
+    created_to: datetime | None = None
+
+    @field_validator("categories", "tags")
+    @classmethod
+    def normalize_terms(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            term = value.strip()
+            if not term:
+                raise ValueError("过滤值不能为空")
+            if len(term) > 64:
+                raise ValueError("过滤值不能超过 64 个字符")
+            if term not in normalized:
+                normalized.append(term)
+        return normalized
+
+    @field_validator("category_ids")
+    @classmethod
+    def normalize_category_ids(cls, values: list[str]) -> list[str]:
+        if any(not re.fullmatch(r"cat_[a-f0-9]{16}", value) for value in values):
+            raise ValueError("分类 ID 格式无效")
+        return list(dict.fromkeys(values))
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> "QueryMetadataFilter":
+        if self.created_from and self.created_to and self.created_from > self.created_to:
+            raise ValueError("created_from 不能晚于 created_to")
+        return self
 
 
 class QueryRequest(BaseModel):
@@ -164,6 +364,7 @@ class QueryRequest(BaseModel):
     retrieve_k: int = Field(default=10, ge=1, le=50)
     rerank_k: int = Field(default=5, ge=1, le=20)
     conversation_id: str | None = Field(default=None, pattern=r"^conv_[a-f0-9]{16}$")
+    filters: QueryMetadataFilter | None = None
 
     @field_validator("question")
     @classmethod
@@ -205,6 +406,11 @@ class QueryExecutionMetadata(BaseModel):
     query_count: int = Field(ge=1, le=4)
     expansion_count: int = Field(ge=0, le=3)
     fallback_used: bool = False
+    applied_filters: QueryMetadataFilter | None = None
+    retrieved_candidate_count: int = Field(default=0, ge=0)
+    fused_candidate_count: int = Field(default=0, ge=0)
+    returned_source_count: int = Field(default=0, ge=0)
+    filter_match_count: int | None = Field(default=None, ge=0)
 
 
 class QueryResponse(BaseModel):
@@ -238,8 +444,21 @@ class AnswerRecordResponse(BaseModel):
     prompt_version: str | None
     prompt_hash: str | None
     query_metadata: QueryExecutionMetadata | None = None
+    bad_case_category: str | None = None
     error_code: str | None
     error_message: str | None
+    created_at: datetime
+
+
+class BadCaseResponse(BaseModel):
+    record_id: str
+    conversation_id: str
+    knowledge_base_id: str
+    question: str
+    bad_case_category: str
+    error_code: str | None
+    error_message: str | None
+    query_metadata: QueryExecutionMetadata | None = None
     created_at: datetime
 
 

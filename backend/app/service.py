@@ -1,5 +1,7 @@
+import json
 import time
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -19,17 +21,60 @@ from .prompts import (
 )
 from .query_understanding import build_query_plan
 from .ranking import fuse_query_candidates, rank_candidates, reciprocal_rank_fusion
-from .schemas import DocumentInfo, QueryResponse, Source
+from .retrieval_access import RetrievalAccessContext, can_retrieve_metadata
+from .schemas import DocumentInfo, QueryMetadataFilter, QueryResponse, Source
 from .store import ChromaStore, RetrievedChunk
 
 # 完整 RAG 编排：入库、召回、精排、Prompt、生成
+
+
+def _filter_candidates(
+    candidates: list[RetrievedChunk], filters: QueryMetadataFilter | None,
+    access: RetrievalAccessContext | None = None,
+) -> list[RetrievedChunk]:
+    """所有召回通路共用同一判定，过滤发生在融合和 Rerank 之前。"""
+
+    def matches(candidate: RetrievedChunk) -> bool:
+        metadata = candidate.metadata
+        if not can_retrieve_metadata(metadata, access):
+            return False
+        if filters is None:
+            return True
+        if filters.category_ids and metadata.get("category_id") not in filters.category_ids:
+            return False
+        if filters.categories and metadata.get("category") not in filters.categories:
+            return False
+        raw_tags = metadata.get("tags") or []
+        if isinstance(raw_tags, str):
+            try:
+                raw_tags = json.loads(raw_tags)
+            except json.JSONDecodeError:
+                raw_tags = [raw_tags]
+        candidate_tags = set(raw_tags)
+        if filters.tags and not candidate_tags.intersection(filters.tags):
+            return False
+        if filters.source_types and metadata.get("source_type") not in filters.source_types:
+            return False
+        created_at = metadata.get("created_at")
+        if (filters.created_from or filters.created_to) and not created_at:
+            return False
+        if created_at:
+            created = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+            if filters.created_from and created < filters.created_from:
+                return False
+            if filters.created_to and created > filters.created_to:
+                return False
+        return True
+
+    return [candidate for candidate in candidates if matches(candidate)]
 
 
 class RAGServiceProtocol(Protocol):
     stores_source_files: bool
 
     def index_document(
-        self, filename: str, content: bytes, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
+        self, filename: str, content: bytes, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        metadata: dict[str, object] | None = None,
     ) -> DocumentInfo: ...
     def list_documents(
         self, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
@@ -37,12 +82,22 @@ class RAGServiceProtocol(Protocol):
     def delete_document(
         self, document_id: str, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
     ) -> bool: ...
+    def update_document_metadata(
+        self, document_id: str, metadata: dict[str, object],
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> bool: ...
+    def update_document_acl(
+        self, document_id: str, allow_user_ids: list[str], deny_user_ids: list[str],
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> int | None: ...
     def query(
         self,
         question: str,
         retrieve_k: int,
         rerank_k: int,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        filters: QueryMetadataFilter | None = None,
+        access: RetrievalAccessContext | None = None,
     ) -> QueryResponse: ...
 
 
@@ -70,6 +125,7 @@ class RAGService:
         filename: str,
         content: bytes,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        metadata: dict[str, object] | None = None,
     ) -> DocumentInfo:
         document_id = stable_document_id(filename, content)
         for document in self.store.list_documents(knowledge_base_id):
@@ -84,6 +140,11 @@ class RAGService:
             self.settings.chunk_size,
             self.settings.chunk_overlap,
             knowledge_base_id,
+            {
+                **(metadata or {}),
+                "source_type": "file",
+                "created_at": datetime.now().astimezone().isoformat(),
+            },
         )
         embeddings = self.embedder.encode([chunk.text for chunk in chunks])
         self.store.upsert(chunks, embeddings)
@@ -107,6 +168,25 @@ class RAGService:
     ) -> bool:
         return self.store.delete_document(document_id, knowledge_base_id)
 
+    def update_document_metadata(
+        self,
+        document_id: str,
+        metadata: dict[str, object],
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> bool:
+        return self.store.update_document_metadata(document_id, metadata, knowledge_base_id)
+
+    def update_document_acl(
+        self,
+        document_id: str,
+        allow_user_ids: list[str],
+        deny_user_ids: list[str],
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> int | None:
+        return self.store.update_document_acl(
+            document_id, allow_user_ids, deny_user_ids, knowledge_base_id
+        )
+
     def retrieve_candidates(
         self,
         question: str,
@@ -114,6 +194,8 @@ class RAGService:
         retrieve_k: int,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
         retrieval_mode: str | None = None,
+        filters: QueryMetadataFilter | None = None,
+        access: RetrievalAccessContext | None = None,
     ) -> list[RetrievedChunk]:
         """产出召回候选。在线查询与离线评测共用此方法，避免两个入口得出不同结论。
 
@@ -124,19 +206,29 @@ class RAGService:
 
         mode = retrieval_mode or self.settings.retrieval_mode
         if mode == "vector" or self.lexical is None:
-            return self.store.query(
-                embedding, retrieve_k, knowledge_base_id, query_text=question
-            )
+            return _filter_candidates(self.store.query(
+                embedding, retrieve_k, knowledge_base_id, query_text=question,
+                **({"filters": filters} if filters else {}),
+                **({"access": access} if access else {}),
+            ), filters, access)
 
         hits = self.lexical.get(knowledge_base_id).search(question, retrieve_k)
+        current_chunks = self.store.load_current_chunks(
+            knowledge_base_id, **({"access": access} if access else {})
+        ) if filters or access else []
+        allowed_ids = {item.chunk_id for item in _filter_candidates(current_chunks, filters, access)}
+        if filters or access:
+            hits = [hit for hit in hits if hit.chunk_id in allowed_ids]
         lexical_scores = {hit.chunk_id: hit.score for hit in hits}
         if mode == "lexical":
             fused_ids = [hit.chunk_id for hit in hits]
             vector_candidates: list[RetrievedChunk] = []
         else:
-            vector_candidates = self.store.query(
-                embedding, retrieve_k, knowledge_base_id, query_text=question
-            )
+            vector_candidates = _filter_candidates(self.store.query(
+                embedding, retrieve_k, knowledge_base_id, query_text=question,
+                **({"filters": filters} if filters else {}),
+                **({"access": access} if access else {}),
+            ), filters, access)
             fused_ids = [
                 chunk_id
                 for chunk_id, _ in reciprocal_rank_fusion(
@@ -190,13 +282,16 @@ class RAGService:
         retrieve_k: int,
         rerank_k: int,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        filters: QueryMetadataFilter | None = None,
+        access: RetrievalAccessContext | None = None,
     ) -> QueryResponse:
         total_started = time.perf_counter()
         retrieval_started = time.perf_counter()
         query_plan = build_query_plan(question)
         original_embedding = self.embedder.encode([query_plan.normalized])[0]
         original_candidates = self.retrieve_candidates(
-            query_plan.normalized, original_embedding, retrieve_k, knowledge_base_id
+            query_plan.normalized, original_embedding, retrieve_k, knowledge_base_id,
+            filters=filters, access=access,
         )
         query_rankings = [original_candidates]
         fallback_used = False
@@ -204,7 +299,8 @@ class RAGService:
             try:
                 expanded_embedding = self.embedder.encode([expanded_query])[0]
                 expanded_candidates = self.retrieve_candidates(
-                    expanded_query, expanded_embedding, retrieve_k, knowledge_base_id
+                    expanded_query, expanded_embedding, retrieve_k, knowledge_base_id,
+                    filters=filters, access=access,
                 )
             except Exception:
                 fallback_used = True
@@ -220,7 +316,65 @@ class RAGService:
         )
         retrieval_ms = _elapsed(retrieval_started)
         if not candidates:
-            raise AppError("NO_DOCUMENTS", "知识库为空，请先上传文档。", 409)
+            query_metadata = {
+                "strategy": query_plan.strategy,
+                "query_count": len(query_rankings),
+                "expansion_count": query_plan.expansion_count,
+                "fallback_used": fallback_used,
+                "applied_filters": filters.model_dump(mode="json") if filters else None,
+                "retrieved_candidate_count": sum(len(items) for items in query_rankings),
+                "fused_candidate_count": 0,
+                "returned_source_count": 0,
+                "filter_match_count": 0 if filters else None,
+            }
+            documents = self.store.list_documents(knowledge_base_id)
+            indexed_documents = [
+                item for item in documents
+                if item.get("status") == "ready" and int(item.get("chunk_count", 0)) > 0
+            ]
+            processing_documents = any(
+                item.get("status") in {"pending", "indexing"} for item in documents
+            )
+            visible_documents = [
+                item for item in indexed_documents if can_retrieve_metadata(item, access)
+            ]
+            if not indexed_documents and processing_documents:
+                raise AppError(
+                    "DOCUMENTS_PROCESSING",
+                    "当前资料仍在处理，请稍后重试。",
+                    409,
+                    {"bad_case_category": "documents_processing", "query_metadata": query_metadata},
+                )
+            if access is not None and indexed_documents and not visible_documents:
+                raise AppError(
+                    "NO_AUTHORIZED_DOCUMENTS",
+                    "当前权限范围内没有可检索资料。",
+                    403,
+                    {"bad_case_category": "acl_no_visible_documents", "query_metadata": query_metadata},
+                )
+            if filters and indexed_documents:
+                raise AppError(
+                    "NO_MATCHING_DOCUMENTS",
+                    "没有符合当前过滤条件的资料，请调整分类、标签或来源范围。",
+                    409,
+                    {
+                        "bad_case_category": "metadata_filter_no_match",
+                        "query_metadata": query_metadata,
+                    },
+                )
+            if documents:
+                raise AppError(
+                    "NO_RETRIEVABLE_DOCUMENTS",
+                    "当前资料尚不可检索，请检查处理状态。",
+                    409,
+                    {"bad_case_category": "no_retrievable_documents", "query_metadata": query_metadata},
+                )
+            raise AppError(
+                "NO_DOCUMENTS",
+                "知识库为空，请先上传文档。",
+                409,
+                {"bad_case_category": "knowledge_base_empty", "query_metadata": query_metadata},
+            )
 
         rerank_started = time.perf_counter()
         scores = self.reranker.score(question, [candidate.text for candidate in candidates])
@@ -253,6 +407,11 @@ class RAGService:
                 "query_count": len(query_rankings),
                 "expansion_count": query_plan.expansion_count,
                 "fallback_used": fallback_used,
+                "applied_filters": filters,
+                "retrieved_candidate_count": sum(len(items) for items in query_rankings),
+                "fused_candidate_count": len(candidates),
+                "returned_source_count": len(ranked),
+                "filter_match_count": len(candidates) if filters else None,
             },
             latency_ms={
                 "retrieval": retrieval_ms,

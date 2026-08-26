@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -6,6 +7,8 @@ import chromadb
 
 from .chunking import Chunk
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID, validate_knowledge_base_id
+from .retrieval_access import RetrievalAccessContext, can_retrieve_metadata
+from .schemas import QueryMetadataFilter
 
 
 # ChromaDB 持久化、查询、列出和删除
@@ -23,6 +26,18 @@ class RetrievedChunk:
     vector_score: float | None = None
     retrieval_methods: list[str] | None = None
     query_match_count: int = 1
+
+
+def _metadata_list(value: Any) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return [value]
+        return [str(item) for item in parsed] if isinstance(parsed, list) else [str(parsed)]
+    return [str(item) for item in value]
 
 
 class ChromaStore:
@@ -62,7 +77,13 @@ class ChromaStore:
             ids=[chunk.chunk_id for chunk in chunks],
             documents=[chunk.text for chunk in chunks],
             embeddings=embeddings,
-            metadatas=[chunk.metadata() for chunk in chunks],
+            metadatas=[
+                {
+                    key: json.dumps(value, ensure_ascii=False) if isinstance(value, list) else value
+                    for key, value in chunk.metadata().items()
+                }
+                for chunk in chunks
+            ],
         )
 
     def query(
@@ -71,22 +92,35 @@ class ChromaStore:
         limit: int,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
         query_text: str | None = None,
+        filters: QueryMetadataFilter | None = None,
+        access: RetrievalAccessContext | None = None,
     ) -> list[RetrievedChunk]:
         validate_knowledge_base_id(knowledge_base_id)
-        scoped_count = self.count(knowledge_base_id)
+        conditions: list[dict[str, Any]] = [{"knowledge_base_id": knowledge_base_id}]
+        if filters:
+            if filters.categories:
+                conditions.append({"category": {"$in": filters.categories}})
+            if filters.source_types:
+                conditions.append({"source_type": {"$in": filters.source_types}})
+            if filters.created_from:
+                conditions.append({"created_at_epoch": {"$gte": filters.created_from.timestamp()}})
+            if filters.created_to:
+                conditions.append({"created_at_epoch": {"$lte": filters.created_to.timestamp()}})
+        where = conditions[0] if len(conditions) == 1 else {"$and": conditions}
+        scoped_count = len(self.collection.get(where=where, include=[]).get("ids") or [])
         if scoped_count == 0:
             return []
         result = self.collection.query(
             query_embeddings=[embedding],
-            n_results=min(limit, scoped_count),
-            where={"knowledge_base_id": knowledge_base_id},
+            n_results=scoped_count if access else min(limit, scoped_count),
+            where=where,
             include=["documents", "metadatas", "distances"],
         )
         ids = (result.get("ids") or [[]])[0]
         documents = (result.get("documents") or [[]])[0]
         metadatas = (result.get("metadatas") or [[]])[0]
         distances = (result.get("distances") or [[]])[0]
-        return [
+        candidates = [
             RetrievedChunk(
                 chunk_id=chunk_id,
                 text=text,
@@ -95,6 +129,7 @@ class ChromaStore:
             )
             for chunk_id, text, metadata, distance in zip(ids, documents, metadatas, distances, strict=True)
         ]
+        return [item for item in candidates if can_retrieve_metadata(item.metadata, access)][:limit]
 
     def list_documents(
         self,
@@ -118,10 +153,81 @@ class ChromaStore:
                     "filename": metadata["filename"],
                     "chunk_count": 0,
                     "status": "ready",
+                    "category": metadata.get("category", "未分类"),
+                    "tags": (
+                        json.loads(metadata.get("tags", "[]"))
+                        if isinstance(metadata.get("tags", "[]"), str)
+                        else metadata.get("tags", [])
+                    ),
+                    "source_type": metadata.get("source_type", "file"),
+                    "created_at": metadata.get("created_at"),
+                    "source_system": metadata.get("source_system", "upload"),
+                    "external_resource_id": metadata.get("external_resource_id"),
+                    "owner_user_id": metadata.get("owner_user_id"),
+                    "department": metadata.get("department"),
+                    "sensitivity": metadata.get("sensitivity", "internal"),
+                    "valid_from": metadata.get("valid_from"),
+                    "valid_to": metadata.get("valid_to"),
+                    "retrieval_status": metadata.get("retrieval_status", "searchable"),
+                    "acl_version": int(metadata.get("acl_version", 1)),
+                    "allow_user_ids": _metadata_list(metadata.get("allow_user_ids")),
+                    "deny_user_ids": _metadata_list(metadata.get("deny_user_ids")),
                 },
             )
             item["chunk_count"] += 1
         return sorted(grouped.values(), key=lambda item: str(item["filename"]).lower())
+
+    def update_document_metadata(
+        self,
+        document_id: str,
+        metadata: dict[str, object],
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> bool:
+        validate_knowledge_base_id(knowledge_base_id)
+        where = {"$and": [{"knowledge_base_id": knowledge_base_id}, {"document_id": document_id}]}
+        result = self.collection.get(where=where, include=["metadatas"])
+        ids = result.get("ids") or []
+        if not ids:
+            return False
+        updated = []
+        for current in result.get("metadatas") or []:
+            merged = {**dict(current or {}), **metadata}
+            updated.append({
+                key: json.dumps(value, ensure_ascii=False) if isinstance(value, list) else value
+                for key, value in merged.items()
+            })
+        self.collection.update(ids=ids, metadatas=updated)
+        return True
+
+    def update_document_acl(
+        self,
+        document_id: str,
+        allow_user_ids: list[str],
+        deny_user_ids: list[str],
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> int | None:
+        validate_knowledge_base_id(knowledge_base_id)
+        where = {"$and": [{"knowledge_base_id": knowledge_base_id}, {"document_id": document_id}]}
+        result = self.collection.get(where=where, include=["metadatas"])
+        ids = result.get("ids") or []
+        if not ids:
+            return None
+        metadatas = result.get("metadatas") or []
+        version = max(int((item or {}).get("acl_version", 1)) for item in metadatas) + 1
+        policy = {
+            "acl_version": version,
+            "allow_user_ids": allow_user_ids,
+            "deny_user_ids": deny_user_ids,
+        }
+        updated = []
+        for current in metadatas:
+            merged = {**dict(current or {}), **policy}
+            updated.append({
+                key: json.dumps(value, ensure_ascii=False) if isinstance(value, list) else value
+                for key, value in merged.items()
+            })
+        self.collection.update(ids=ids, metadatas=updated)
+        return version
 
     def delete_document(
         self,

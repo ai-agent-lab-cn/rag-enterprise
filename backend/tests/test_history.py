@@ -181,8 +181,14 @@ def test_failed_answer_is_included_in_summary(tmp_path: Path) -> None:
         prompt_hash=None,
         error_code="MODEL_UNAVAILABLE",
         error_message="模型不可用",
+        bad_case_category="answer_generation_failed",
     )
 
+    bad_cases = repository.list_bad_cases(
+        "kb_default", OWNER, category="answer_generation_failed", error_code="MODEL_UNAVAILABLE"
+    )
+    assert [item["record_id"] for item in bad_cases] == [record["record_id"]]
+    assert repository.list_bad_cases("kb_default", OTHER) == []
     summary = repository.list_conversations("kb_default", OWNER)[0]
     assert summary["turn_count"] == 1
     assert summary["last_status"] == "failed"

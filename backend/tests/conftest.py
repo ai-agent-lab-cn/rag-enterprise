@@ -26,6 +26,7 @@ class FakeService:
         filename: str,
         content: bytes,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        metadata: dict[str, object] | None = None,
     ) -> DocumentInfo:
         if filename.endswith(".exe"):
             from backend.app.errors import AppError
@@ -53,12 +54,46 @@ class FakeService:
     ) -> bool:
         return self.documents.get(knowledge_base_id, {}).pop(document_id, None) is not None
 
+    def update_document_metadata(
+        self,
+        document_id: str,
+        metadata: dict[str, object],
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> bool:
+        document = self.documents.get(knowledge_base_id, {}).get(document_id)
+        if document is None:
+            return False
+        self.documents[knowledge_base_id][document_id] = document.model_copy(update=metadata)
+        return True
+
+    def update_document_acl(
+        self,
+        document_id: str,
+        allow_user_ids: list[str],
+        deny_user_ids: list[str],
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> int | None:
+        document = self.documents.get(knowledge_base_id, {}).get(document_id)
+        if document is None:
+            return None
+        version = document.acl_version + 1
+        self.documents[knowledge_base_id][document_id] = document.model_copy(
+            update={
+                "acl_version": version,
+                "allow_user_ids": allow_user_ids,
+                "deny_user_ids": deny_user_ids,
+            }
+        )
+        return version
+
     def query(
         self,
         question: str,
         retrieve_k: int,
         rerank_k: int,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        filters=None,
+        access=None,
     ) -> QueryResponse:
         return QueryResponse(
             answer=f"回答：{question}",

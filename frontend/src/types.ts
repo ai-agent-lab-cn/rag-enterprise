@@ -4,6 +4,40 @@ export interface DocumentInfo {
   filename: string;
   chunk_count: number;
   status: string;
+  category: string;
+  category_id: string | null;
+  tags: string[];
+  source_type: string;
+  created_at: string | null;
+  source_system: string;
+  external_resource_id: string | null;
+  owner_user_id: string | null;
+  department: string | null;
+  sensitivity: "public" | "internal" | "confidential" | "restricted";
+  valid_from: string | null;
+  valid_to: string | null;
+  retrieval_status: "searchable" | "expired" | "deleted";
+  acl_version: number;
+  allow_user_ids: string[];
+  deny_user_ids: string[];
+  classification_status: "pending" | "auto_assigned" | "review_required" | "manual" | "failed";
+  classification_confidence: number | null;
+  suggested_category_id: string | null;
+  classification_model: string | null;
+  classified_at: string | null;
+}
+
+export interface DocumentCategory {
+  category_id: string;
+  knowledge_base_id: string;
+  name: string;
+  description: string;
+  sort_order: number;
+  active: boolean;
+  is_system: boolean;
+  document_count: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface DocumentVersion {
@@ -52,6 +86,14 @@ export interface QueryResult {
     query_count: number;
     expansion_count: number;
     fallback_used: boolean;
+    retrieved_candidate_count: number;
+    fused_candidate_count: number;
+    returned_source_count: number;
+    filter_match_count: number | null;
+    applied_filters?: {
+      category_ids: string[]; categories: string[]; tags: string[]; source_types: string[];
+      created_from: string | null; created_to: string | null;
+    } | null;
   } | null;
 }
 
@@ -163,6 +205,7 @@ export interface DataSource {
   sync_status: "idle" | "queued" | "running" | "succeeded" | "failed";
   document_count: number; source_file_bytes: number; last_indexed_at: string | null; last_synced_at: string | null;
   failure_reason: string | null; updated_at: string;
+  acl_version: number; allow_user_ids: string[]; deny_user_ids: string[];
   allowed_actions: Array<"detail" | "edit" | "disable" | "enable" | "update_file" | "delete">;
 }
 
@@ -194,6 +237,14 @@ export interface AnswerRecord {
     query_count: number;
     expansion_count: number;
     fallback_used: boolean;
+    retrieved_candidate_count: number;
+    fused_candidate_count: number;
+    returned_source_count: number;
+    filter_match_count: number | null;
+    applied_filters?: {
+      category_ids: string[]; categories: string[]; tags: string[]; source_types: string[];
+      created_from: string | null; created_to: string | null;
+    } | null;
   } | null;
   error_code: string | null;
   error_message: string | null;

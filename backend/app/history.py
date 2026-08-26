@@ -97,7 +97,8 @@ class ConversationRepository:
         model_metadata: dict[str, str | int | float | bool],
         prompt_version: str | None,
         prompt_hash: str | None,
-        query_metadata: dict[str, str | int | bool] | None = None,
+        query_metadata: dict[str, Any] | None = None,
+        bad_case_category: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> dict[str, Any]:
@@ -132,6 +133,7 @@ class ConversationRepository:
                 "prompt_version": prompt_version,
                 "prompt_hash": prompt_hash,
                 "query_metadata": query_metadata,
+                "bad_case_category": bad_case_category,
                 "error_code": error_code,
                 "error_message": error_message,
                 "created_at": now,
@@ -140,6 +142,42 @@ class ConversationRepository:
             conversation["updated_at"] = now
             self._save(payload)
             return dict(record)
+
+    def list_bad_cases(
+        self,
+        knowledge_base_id: str,
+        owner_id: str,
+        category: str | None = None,
+        error_code: str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """只返回当前用户自己的失败记录，不因知识库授权扩大到他人会话。"""
+
+        validate_knowledge_base_id(knowledge_base_id)
+        with self._lock:
+            payload = self._load()
+        owned_conversations = {
+            item["conversation_id"]
+            for item in payload["conversations"]
+            if item["knowledge_base_id"] == knowledge_base_id and _owned_by(item, owner_id)
+        }
+        results: list[dict[str, Any]] = []
+        for record in payload["answers"]:
+            if record["conversation_id"] not in owned_conversations or record["status"] != "failed":
+                continue
+            record_category = record.get("bad_case_category") or "unclassified"
+            if category and record_category != category:
+                continue
+            if error_code and record.get("error_code") != error_code:
+                continue
+            created_at = datetime.fromisoformat(str(record["created_at"]).replace("Z", "+00:00"))
+            if created_from and created_at < created_from:
+                continue
+            if created_to and created_at > created_to:
+                continue
+            results.append({**record, "bad_case_category": record_category})
+        return sorted(results, key=lambda item: item["created_at"], reverse=True)
 
     def list_conversations(self, knowledge_base_id: str, owner_id: str) -> list[dict[str, Any]]:
         validate_knowledge_base_id(knowledge_base_id)

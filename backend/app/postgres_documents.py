@@ -13,12 +13,14 @@ from psycopg.types.json import Jsonb
 
 from .chunking import chunking_version, parse_chunking_version, split_sections
 from .config import Settings
+from .document_classifier import DocumentClassifier
 from .errors import AppError
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID, validate_knowledge_base_id
 from .lexical import LexicalIndexCache
-from .models import EmbeddingModel, GeminiGenerator, Reranker
+from .models import EmbeddingModel, GeminiGenerator, Reranker, get_generator
 from .parsers import parse_document
-from .schemas import DocumentInfo
+from .retrieval_access import RetrievalAccessContext
+from .schemas import DocumentInfo, QueryMetadataFilter
 from .security import write_private_file
 from .service import RAGService
 from .store import RetrievedChunk
@@ -40,22 +42,68 @@ class PostgresVectorStore:
         limit: int,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
         query_text: str | None = None,
+        filters: QueryMetadataFilter | None = None,
+        access: RetrievalAccessContext | None = None,
     ) -> list[RetrievedChunk]:
         validate_knowledge_base_id(knowledge_base_id)
+        clauses = ["c.knowledge_base_id = %s"]
+        parameters: list[Any] = [knowledge_base_id]
+        if filters:
+            if filters.category_ids:
+                clauses.append("c.metadata->>'category_id' = ANY(%s)")
+                parameters.append(filters.category_ids)
+            if filters.categories:
+                clauses.append("c.metadata->>'category' = ANY(%s)")
+                parameters.append(filters.categories)
+            if filters.tags:
+                clauses.append("c.metadata->'tags' ?| %s")
+                parameters.append(filters.tags)
+            if filters.source_types:
+                clauses.append("c.metadata->>'source_type' = ANY(%s)")
+                parameters.append(filters.source_types)
+            if filters.created_from:
+                clauses.append("c.created_at >= %s")
+                parameters.append(filters.created_from)
+            if filters.created_to:
+                clauses.append("c.created_at <= %s")
+                parameters.append(filters.created_to)
+        clauses.extend(
+            [
+                "COALESCE(c.metadata->>'retrieval_status', 'searchable') = 'searchable'",
+                "(c.metadata->>'valid_from' IS NULL OR (c.metadata->>'valid_from')::timestamptz <= now())",
+                "(c.metadata->>'valid_to' IS NULL OR (c.metadata->>'valid_to')::timestamptz >= now())",
+            ]
+        )
+        if access:
+            clauses.extend(
+                [
+                    "NOT (COALESCE(c.metadata->'deny_user_ids', '[]'::jsonb) ? %s)",
+                    "(jsonb_array_length(COALESCE(c.metadata->'allow_user_ids', "
+                    "'[]'::jsonb)) = 0 OR COALESCE(c.metadata->'allow_user_ids', "
+                    "'[]'::jsonb) ? %s)",
+                    "NOT (COALESCE(s.acl->'deny_user_ids', '[]'::jsonb) ? %s)",
+                    "(jsonb_array_length(COALESCE(s.acl->'allow_user_ids', "
+                    "'[]'::jsonb)) = 0 OR COALESCE(s.acl->'allow_user_ids', "
+                    "'[]'::jsonb) ? %s)",
+                ]
+            )
+            parameters.extend([access.user_id] * 4)
+        where_clause = " AND ".join(clauses)
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             register_vector(connection)
             rows = connection.execute(
-                """SELECT c.chunk_id, c.content, c.metadata,
+                f"""SELECT c.chunk_id, c.content, c.metadata,
                           1 - (c.embedding <=> %s::vector) AS retrieval_score
                    FROM chunks c
                    JOIN documents d
                      ON d.knowledge_base_id = c.knowledge_base_id
                     AND d.document_id = (c.metadata->>'document_id')
                     AND d.current_version_id = c.document_version_id
-                   WHERE c.knowledge_base_id = %s
+                   JOIN data_sources s ON s.data_source_id = d.data_source_id
+                   WHERE {where_clause}
                    ORDER BY c.embedding <=> %s::vector
                    LIMIT %s""",
-                (embedding, knowledge_base_id, embedding, limit),
+                (embedding, *parameters, embedding, limit),
             ).fetchall()
         return [
             RetrievedChunk(
@@ -70,6 +118,7 @@ class PostgresVectorStore:
     def load_current_chunks(
         self,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        access: RetrievalAccessContext | None = None,
     ) -> list[RetrievedChunk]:
         """读回当前版本的全部分块，供词法索引构建与融合阶段复原候选。
 
@@ -79,16 +128,32 @@ class PostgresVectorStore:
 
         validate_knowledge_base_id(knowledge_base_id)
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            access_sql = ""
+            parameters: list[Any] = [knowledge_base_id]
+            if access:
+                access_sql = """AND NOT (COALESCE(c.metadata->'deny_user_ids', '[]'::jsonb) ? %s)
+                    AND (jsonb_array_length(COALESCE(c.metadata->'allow_user_ids', '[]'::jsonb)) = 0
+                         OR COALESCE(c.metadata->'allow_user_ids', '[]'::jsonb) ? %s)
+                    AND NOT (COALESCE(s.acl->'deny_user_ids', '[]'::jsonb) ? %s)
+                    AND (jsonb_array_length(COALESCE(s.acl->'allow_user_ids', '[]'::jsonb)) = 0
+                         OR COALESCE(s.acl->'allow_user_ids', '[]'::jsonb) ? %s)"""
+                parameters.extend([access.user_id] * 4)
             rows = connection.execute(
-                """SELECT c.chunk_id, c.content, c.metadata
+                f"""SELECT c.chunk_id, c.content, c.metadata
                    FROM chunks c
                    JOIN documents d
                      ON d.knowledge_base_id = c.knowledge_base_id
                     AND d.document_id = (c.metadata->>'document_id')
                     AND d.current_version_id = c.document_version_id
+                   JOIN data_sources s ON s.data_source_id = d.data_source_id
                    WHERE c.knowledge_base_id = %s
+                     AND COALESCE(c.metadata->>'retrieval_status', 'searchable') = 'searchable'
+                     AND (c.metadata->>'valid_from' IS NULL
+                          OR (c.metadata->>'valid_from')::timestamptz <= now())
+                     AND (c.metadata->>'valid_to' IS NULL OR (c.metadata->>'valid_to')::timestamptz >= now())
+                     {access_sql}
                    ORDER BY c.chunk_id""",
-                (knowledge_base_id,),
+                parameters,
             ).fetchall()
         return [
             RetrievedChunk(
@@ -103,13 +168,16 @@ class PostgresVectorStore:
     def chunk_fingerprint(self, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID) -> str:
         """当前版本分块集合的廉价指纹，用于跨进程判断词法索引是否已经过期。
 
-        新增与删除会改变计数，索引重建会改变最新写入时间，因此三类变更都能被捕获。
+        新增与删除会改变计数，索引重建会改变最新写入时间；ACL 版本变化也会立即失效缓存。
         """
 
         validate_knowledge_base_id(knowledge_base_id)
         with psycopg.connect(self.database_url) as connection:
             row = connection.execute(
-                """SELECT count(*), COALESCE(max(c.created_at), to_timestamp(0))
+                """SELECT count(*), COALESCE(max(c.created_at), to_timestamp(0)),
+                          COALESCE(max((c.metadata->>'acl_version')::integer), 1),
+                          COALESCE(max((c.metadata->'data_source_acl'->>'version')::integer), 1),
+                          COALESCE(max(c.metadata->>'classified_at'), '')
                    FROM chunks c
                    JOIN documents d
                      ON d.knowledge_base_id = c.knowledge_base_id
@@ -118,7 +186,7 @@ class PostgresVectorStore:
                    WHERE c.knowledge_base_id = %s""",
                 (knowledge_base_id,),
             ).fetchone()
-        return f"{int(row[0])}:{row[1].isoformat()}"
+        return f"{int(row[0])}:{row[1].isoformat()}:{int(row[2])}:{int(row[3])}:{row[4]}"
 
     def score_by_ids(
         self,
@@ -149,11 +217,13 @@ class PostgresVectorStore:
         validate_knowledge_base_id(knowledge_base_id)
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             rows = connection.execute(
-                """SELECT d.document_id, d.filename, d.current_version_id,
+                """SELECT d.document_id, d.filename, d.current_version_id, d.metadata,
+                          d.created_at, s.source_type,
                           current_version.status AS current_status,
                           count(c.chunk_id) AS chunk_count,
                           pending.status AS pending_status
                    FROM documents d
+                   JOIN data_sources s ON s.data_source_id = d.data_source_id
                    LEFT JOIN document_versions current_version
                      ON current_version.document_version_id = d.current_version_id
                    LEFT JOIN chunks c ON c.document_version_id = d.current_version_id
@@ -165,8 +235,8 @@ class PostgresVectorStore:
                        ORDER BY dv.version_number DESC LIMIT 1
                    ) pending ON true
                    WHERE d.knowledge_base_id = %s
-                   GROUP BY d.document_id, d.filename, d.current_version_id,
-                            current_version.status, pending.status
+                   GROUP BY d.document_id, d.filename, d.current_version_id, d.metadata,
+                            d.created_at, s.source_type, current_version.status, pending.status
                    ORDER BY lower(d.filename)""",
                 (knowledge_base_id,),
             ).fetchall()
@@ -177,9 +247,101 @@ class PostgresVectorStore:
                 "filename": row["filename"],
                 "chunk_count": int(row["chunk_count"]),
                 "status": row["pending_status"] or row["current_status"] or "pending",
+                "category": dict(row["metadata"] or {}).get("category", "未分类"),
+                "category_id": dict(row["metadata"] or {}).get("category_id"),
+                "tags": dict(row["metadata"] or {}).get("tags", []),
+                "source_type": row["source_type"],
+                "created_at": row["created_at"],
+                "source_system": dict(row["metadata"] or {}).get("source_system", "upload"),
+                "external_resource_id": dict(row["metadata"] or {}).get("external_resource_id"),
+                "owner_user_id": dict(row["metadata"] or {}).get("owner_user_id"),
+                "department": dict(row["metadata"] or {}).get("department"),
+                "sensitivity": dict(row["metadata"] or {}).get("sensitivity", "internal"),
+                "valid_from": dict(row["metadata"] or {}).get("valid_from"),
+                "valid_to": dict(row["metadata"] or {}).get("valid_to"),
+                "retrieval_status": dict(row["metadata"] or {}).get(
+                    "retrieval_status", "searchable"
+                ),
+                "acl_version": dict(row["metadata"] or {}).get("acl_version", 1),
+                "allow_user_ids": dict(row["metadata"] or {}).get("allow_user_ids", []),
+                "deny_user_ids": dict(row["metadata"] or {}).get("deny_user_ids", []),
+                "classification_status": dict(row["metadata"] or {}).get(
+                    "classification_status", "pending"
+                ),
+                "classification_confidence": dict(row["metadata"] or {}).get(
+                    "classification_confidence"
+                ),
+                "suggested_category_id": dict(row["metadata"] or {}).get(
+                    "suggested_category_id"
+                ),
+                "classification_model": dict(row["metadata"] or {}).get(
+                    "classification_model"
+                ),
+                "classified_at": dict(row["metadata"] or {}).get("classified_at"),
             }
             for row in rows
         ]
+
+    def update_document_metadata(
+        self,
+        document_id: str,
+        metadata: dict[str, object],
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> bool:
+        validate_knowledge_base_id(knowledge_base_id)
+        with psycopg.connect(self.database_url) as connection, connection.transaction():
+            row = connection.execute(
+                """UPDATE documents SET metadata = metadata || %s, updated_at = %s
+                   WHERE knowledge_base_id = %s AND document_id = %s
+                   RETURNING current_version_id""",
+                (Jsonb(metadata), datetime.now(UTC), knowledge_base_id, document_id),
+            ).fetchone()
+            if row is None:
+                return False
+            if row[0]:
+                connection.execute(
+                    """UPDATE chunks SET metadata = metadata || %s
+                       WHERE knowledge_base_id = %s AND document_version_id = %s""",
+                    (Jsonb(metadata), knowledge_base_id, row[0]),
+                )
+        return True
+
+    def update_document_acl(
+        self,
+        document_id: str,
+        allow_user_ids: list[str],
+        deny_user_ids: list[str],
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> int | None:
+        validate_knowledge_base_id(knowledge_base_id)
+        now = datetime.now(UTC)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            with connection.transaction():
+                document = connection.execute(
+                    """SELECT metadata, current_version_id FROM documents
+                       WHERE knowledge_base_id = %s AND document_id = %s FOR UPDATE""",
+                    (knowledge_base_id, document_id),
+                ).fetchone()
+                if document is None:
+                    return None
+                version = int(dict(document["metadata"] or {}).get("acl_version", 1)) + 1
+                policy = {
+                    "acl_version": version,
+                    "allow_user_ids": allow_user_ids,
+                    "deny_user_ids": deny_user_ids,
+                }
+                connection.execute(
+                    """UPDATE documents SET metadata = metadata || %s, updated_at = %s
+                       WHERE knowledge_base_id = %s AND document_id = %s""",
+                    (Jsonb(policy), now, knowledge_base_id, document_id),
+                )
+                if document["current_version_id"]:
+                    connection.execute(
+                        """UPDATE chunks SET metadata = metadata || %s
+                           WHERE knowledge_base_id = %s AND document_version_id = %s""",
+                        (Jsonb(policy), knowledge_base_id, document["current_version_id"]),
+                    )
+        return version
 
     def delete_document(
         self,
@@ -290,6 +452,7 @@ class PostgresAsyncRAGService(RAGService):
         filename: str,
         content: bytes,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        metadata: dict[str, object] | None = None,
     ) -> DocumentInfo:
         validate_knowledge_base_id(knowledge_base_id)
         safe_name = Path(filename).name
@@ -342,11 +505,13 @@ class PostgresAsyncRAGService(RAGService):
                 )
                 connection.execute(
                     """INSERT INTO documents
-                       (document_id, knowledge_base_id, data_source_id, filename, created_at, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s)
+                       (document_id, knowledge_base_id, data_source_id, filename,
+                        metadata, created_at, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (knowledge_base_id, document_id)
-                       DO UPDATE SET filename = EXCLUDED.filename, updated_at = EXCLUDED.updated_at""",
-                    (document_id, knowledge_base_id, source_id, safe_name, now, now),
+                       DO UPDATE SET filename = EXCLUDED.filename, metadata = EXCLUDED.metadata,
+                                     updated_at = EXCLUDED.updated_at""",
+                    (document_id, knowledge_base_id, source_id, safe_name, Jsonb(metadata or {}), now, now),
                 )
                 version_number = int(
                     connection.execute(
@@ -552,12 +717,18 @@ def chunking_inventory(database_url: str, knowledge_base_id: str) -> dict[str, i
 
 
 class IndexWorker:
-    def __init__(self, settings: Settings, embedder: EmbeddingModel):
+    def __init__(
+        self,
+        settings: Settings,
+        embedder: EmbeddingModel,
+        generator: GeminiGenerator | None = None,
+    ):
         if not settings.database_url:
             raise ValueError("DATABASE_URL is required")
         self.settings = settings
         self.database_url = settings.database_url
         self.embedder = embedder
+        self.generator = generator or get_generator()
 
     def recover_stale_jobs(self) -> int:
         cutoff = datetime.now(UTC) - timedelta(seconds=self.settings.index_job_stale_seconds)
@@ -604,9 +775,13 @@ class IndexWorker:
     def _process(self, job: dict[str, Any]) -> None:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             version = connection.execute(
-                """SELECT v.*, d.filename FROM document_versions v
+                """SELECT v.*, d.filename, d.metadata AS document_metadata,
+                          d.created_at AS document_created_at, s.source_type,
+                          s.acl AS data_source_acl
+                   FROM document_versions v
                    JOIN documents d ON d.knowledge_base_id = v.knowledge_base_id
                                    AND d.document_id = v.document_id
+                   JOIN data_sources s ON s.data_source_id = d.data_source_id
                    WHERE v.document_version_id = %s""",
                 (job["document_version_id"],),
             ).fetchone()
@@ -620,6 +795,50 @@ class IndexWorker:
         _, chunk_size, chunk_overlap = parse_chunking_version(target_version)
         content = (self.settings.upload_path / version["source_path"]).read_bytes()
         sections = parse_document(str(version["filename"]), content)
+        classifier = DocumentClassifier(self.generator)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            categories = [
+                dict(row)
+                for row in connection.execute(
+                    """SELECT category_id, name, description, active, is_system
+                       FROM document_categories WHERE knowledge_base_id=%s""",
+                    (version["knowledge_base_id"],),
+                ).fetchall()
+            ]
+            uncategorized = next((item for item in categories if item["is_system"]), None)
+        summary = "\n".join(section.text[:500] for section in sections[:4])
+        classification = classifier.classify(str(version["filename"]), summary, categories)
+        selected = next(
+            (
+                item
+                for item in categories
+                if classification.status == "auto_assigned"
+                and item["category_id"] == classification.category_id
+            ),
+            uncategorized,
+        )
+        classification_patch = {
+            "category_id": selected["category_id"] if selected else None,
+            "category": selected["name"] if selected else "未分类",
+            "classification_status": classification.status,
+            "classification_confidence": classification.confidence,
+            "suggested_category_id": (
+                classification.category_id if classification.status == "review_required" else None
+            ),
+            "classification_model": self.generator.model_name,
+            "classification_reason": classification.reason,
+            "classified_at": datetime.now(UTC).isoformat(),
+        }
+        with psycopg.connect(self.database_url) as connection:
+            connection.execute(
+                """UPDATE documents SET metadata=metadata || %s, updated_at=now()
+                   WHERE knowledge_base_id=%s AND document_id=%s""",
+                (Jsonb(classification_patch), version["knowledge_base_id"], version["document_id"]),
+            )
+        version["document_metadata"] = {
+            **dict(version["document_metadata"] or {}),
+            **classification_patch,
+        }
         chunks = split_sections(
             str(version["document_id"]),
             str(version["filename"]),
@@ -627,6 +846,12 @@ class IndexWorker:
             chunk_size,
             chunk_overlap,
             str(version["knowledge_base_id"]),
+            {
+                **dict(version["document_metadata"] or {}),
+                "source_type": str(version["source_type"]),
+                "created_at": version["document_created_at"].isoformat(),
+                "data_source_acl": dict(version["data_source_acl"] or {}),
+            },
         )
         embeddings = self.embedder.encode([chunk.text for chunk in chunks])
         if embeddings:

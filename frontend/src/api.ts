@@ -2,6 +2,7 @@ import type {
   ApiErrorPayload,
   AuthToken,
   DocumentInfo,
+  DocumentCategory,
   DocumentVersion,
   EvaluationReport,
   EvaluationReportSummary,
@@ -126,6 +127,15 @@ export const api = {
   setDataSourceEnabled: (id: string, enabled: boolean) => request<void>(`/api/data-sources/${id}/enabled?enabled=${enabled}`, { method: "PUT" }),
   deleteDataSource: (id: string) => request<void>(`/api/data-sources/${id}`, { method: "DELETE" }),
   listKnowledgeBaseDocuments: (id: string) => request<DocumentInfo[]>(`/api/knowledge-bases/${id}/documents`),
+  listKnowledgeBaseCategories: (id: string) => request<DocumentCategory[]>(`/api/knowledge-bases/${id}/categories`),
+  createKnowledgeBaseCategory: (id: string, payload: { name: string; description: string; sort_order: number }) =>
+    request<DocumentCategory>(`/api/knowledge-bases/${id}/categories`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
+  updateKnowledgeBaseCategory: (id: string, categoryId: string, payload: { name: string; description: string; sort_order: number; active: boolean }) =>
+    request<DocumentCategory>(`/api/knowledge-bases/${id}/categories/${categoryId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
+  deleteKnowledgeBaseCategory: (id: string, categoryId: string) =>
+    request<void>(`/api/knowledge-bases/${id}/categories/${categoryId}`, { method: "DELETE" }),
+  batchAssignDocumentCategory: (id: string, documentIds: string[], categoryId: string) =>
+    request<{ updated: number }>(`/api/knowledge-bases/${id}/documents/categories`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ document_ids: documentIds, category_id: categoryId }) }),
   listKnowledgeBaseDocumentVersions: (id: string) => request<DocumentVersion[]>(`/api/knowledge-bases/${id}/document-versions?offset=0&limit=100`),
   uploadKnowledgeBaseDocument: (id: string, file: File) => {
     const body = new FormData();
@@ -134,11 +144,39 @@ export const api = {
   },
   deleteKnowledgeBaseDocument: (knowledgeBaseId: string, documentId: string) =>
     request<void>(`/api/knowledge-bases/${knowledgeBaseId}/documents/${documentId}`, { method: "DELETE" }),
-  queryKnowledgeBase: (id: string, question: string, conversationId?: string) =>
+  updateKnowledgeBaseDocumentMetadata: (
+    knowledgeBaseId: string,
+    documentId: string,
+    metadata: { category: string; tags: string[] },
+  ) => request<DocumentInfo>(
+    `/api/knowledge-bases/${knowledgeBaseId}/documents/${documentId}/metadata`,
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(metadata) },
+  ),
+  updateKnowledgeBaseDocumentAcl: (
+    knowledgeBaseId: string,
+    documentId: string,
+    policy: { allow_user_ids: string[]; deny_user_ids: string[] },
+  ) => request<{ version: number; allow_user_ids: string[]; deny_user_ids: string[] }>(
+    `/api/knowledge-bases/${knowledgeBaseId}/documents/${documentId}/acl`,
+    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(policy) },
+  ),
+  updateDataSourceAcl: (
+    dataSourceId: string,
+    policy: { allow_user_ids: string[]; deny_user_ids: string[] },
+  ) => request<{ version: number; allow_user_ids: string[]; deny_user_ids: string[] }>(
+    `/api/data-sources/${dataSourceId}/acl`,
+    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(policy) },
+  ),
+  queryKnowledgeBase: (
+    id: string,
+    question: string,
+    conversationId?: string,
+    filters?: { category_ids?: string[]; categories?: string[]; tags?: string[]; source_types?: string[] },
+  ) =>
     request<QueryResult>(`/api/knowledge-bases/${id}/query`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, retrieve_k: 10, rerank_k: 5, conversation_id: conversationId || null }),
+      body: JSON.stringify({ question, retrieve_k: 10, rerank_k: 5, conversation_id: conversationId || null, ...(filters ? { filters } : {}) }),
     }),
   listConversations: (id: string) =>
     request<ConversationSummary[]>(`/api/knowledge-bases/${id}/conversations`),

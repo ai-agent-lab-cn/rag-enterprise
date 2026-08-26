@@ -1,7 +1,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, Download, FileText, MessageSquarePlus, Paperclip, Send, Trash2 } from "lucide-react";
 import { api } from "../api";
-import type { AnswerRecord, ConversationDetail, ConversationSummary, DocumentInfo, KnowledgeBase, QueryResult, Source } from "../types";
+import type { AnswerRecord, ConversationDetail, ConversationSummary, DocumentCategory, DocumentInfo, KnowledgeBase, QueryResult, Source } from "../types";
 import { AnswerPanel } from "./AnswerPanel";
 import { Modal } from "./Modal";
 import { SourceCard } from "./SourceCard";
@@ -41,6 +41,7 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
   const [bases, setBases] = useState<KnowledgeBase[]>([]);
   const [baseId, setBaseId] = useState(initialBase);
   const [documents, setDocuments] = useState<DocumentInfo[]>([]);
+  const [categories, setCategories] = useState<DocumentCategory[]>([]);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [history, setHistory] = useState<ConversationDetail | null>(null);
   const [question, setQuestion] = useState("");
@@ -48,11 +49,15 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const [tagFilter, setTagFilter] = useState("");
+  const [sourceTypeFilter, setSourceTypeFilter] = useState("");
 
   const loadBase = useCallback(async (id: string) => {
-    const [docs, items] = await Promise.all([api.listKnowledgeBaseDocuments(id), api.listConversations(id)]);
+    const [docs, items, categoryItems] = await Promise.all([api.listKnowledgeBaseDocuments(id), api.listConversations(id), api.listKnowledgeBaseCategories(id)]);
     setDocuments(docs);
     setConversations(items);
+    setCategories(categoryItems);
   }, []);
   useEffect(() => { api.listKnowledgeBases().then(setBases, (reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取知识库。")); }, []);
   useEffect(() => { Promise.resolve().then(() => loadBase(baseId)).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取工作台。")); }, [baseId, loadBase]);
@@ -79,10 +84,10 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
     query_metadata: activeRecord.query_metadata,
   } : null, [activeRecord]);
   const sources = result?.sources ?? activeRecord?.sources ?? [];
-  const selectBase = (id: string) => { setResult(null); setHistory(null); setBaseId(id); onOpen(`/chat?knowledge_base_id=${id}`); };
+  const selectBase = (id: string) => { setResult(null); setHistory(null); setCategoryFilter(""); setTagFilter(""); setSourceTypeFilter(""); setBaseId(id); onOpen(`/chat?knowledge_base_id=${id}`); };
   const newConversation = () => { setResult(null); setHistory(null); onOpen(`/chat?knowledge_base_id=${baseId}`); };
   const openConversation = (id: string) => { setResult(null); onOpen(`/chat/${id}?knowledge_base_id=${baseId}`); };
-  const ask = async (event: FormEvent) => { event.preventDefault(); const value = question.trim(); if (!value) return; setBusy(true); setError(""); try { const answer = await api.queryKnowledgeBase(baseId, value, conversationId); setResult(answer); setQuestion(""); await loadBase(baseId); if (!conversationId && answer.conversation_id) onOpen(`/chat/${answer.conversation_id}?knowledge_base_id=${baseId}`); } catch (reason) { setError(reason instanceof Error ? reason.message : "查询失败。"); } finally { setBusy(false); } };
+  const ask = async (event: FormEvent) => { event.preventDefault(); const value = question.trim(); if (!value) return; const tags = tagFilter.split(/[，,]/).map((item) => item.trim()).filter(Boolean); const filters = categoryFilter || tags.length || sourceTypeFilter ? { ...(categoryFilter ? { category_ids: [categoryFilter] } : {}), ...(tags.length ? { tags: [...new Set(tags)] } : {}), ...(sourceTypeFilter ? { source_types: [sourceTypeFilter] } : {}) } : undefined; setBusy(true); setError(""); try { const answer = await api.queryKnowledgeBase(baseId, value, conversationId, filters); setResult(answer); setQuestion(""); await loadBase(baseId); if (!conversationId && answer.conversation_id) onOpen(`/chat/${answer.conversation_id}?knowledge_base_id=${baseId}`); } catch (reason) { setError(reason instanceof Error ? reason.message : "查询失败。"); } finally { setBusy(false); } };
   const removeConversation = async () => { if (!conversationId) return; setBusy(true); try { await api.deleteConversation(baseId, conversationId); await loadBase(baseId); setConfirmDelete(false); onOpen(`/chat?knowledge_base_id=${baseId}`); } catch (reason) { setError(reason instanceof Error ? reason.message : "删除会话失败。"); } finally { setBusy(false); } };
   const exportConversation = () => {
     if (!history) return;
@@ -106,7 +111,7 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
           {!history?.records.length && !result ? <AnswerPanel result={null} loading={false} showSources={false}/> : null}
           {result || (busy && Boolean(question)) ? <AnswerPanel result={result} loading={busy && Boolean(question)} showSources={false}/> : null}
         </div>
-        <div className="composer-wrap"><div className="examples">{EXAMPLES.map((item) => <button key={item} onClick={() => setQuestion(item)}>{item}</button>)}</div><form className="question-box" onSubmit={ask}><label className="sr-only" htmlFor="question">向知识库提问</label><textarea id="question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="输入你的问题…" rows={2} maxLength={2000}/><div className="question-footer"><div className="composer-context"><label className="base-picker"><span>知识库：</span><select aria-label="当前知识库" value={baseId} onChange={(event) => selectBase(event.target.value)}>{bases.map((item) => <option key={item.knowledge_base_id} value={item.knowledge_base_id}>{item.name}</option>)}</select></label><span className="connected-documents"><Paperclip size={15}/>{documents.length ? `已连接 ${documents.length} 份资料` : "暂无资料"}</span></div><button aria-label="提问并发送" disabled={busy || !question.trim()}>{busy ? <span className="button-spinner"/> : <Send size={17}/>}</button></div></form><small className="ai-notice">内容由人工智能生成，请注意甄别信息准确性</small></div>
+        <div className="composer-wrap"><div className="examples">{EXAMPLES.map((item) => <button key={item} onClick={() => setQuestion(item)}>{item}</button>)}</div><form className="question-box" onSubmit={ask}><div className="query-filters" aria-label="检索过滤条件"><label>分类<select aria-label="过滤分类" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="">全部</option>{categories.map((item) => <option key={item.category_id} value={item.category_id}>{item.name}{item.active ? "" : "（已停用）"}</option>)}</select></label><label>标签<input aria-label="过滤标签" value={tagFilter} onChange={(event) => setTagFilter(event.target.value)} placeholder="逗号分隔"/></label><label>来源<select aria-label="过滤来源类型" value={sourceTypeFilter} onChange={(event) => setSourceTypeFilter(event.target.value)}><option value="">全部</option><option value="file">文件</option><option value="object_storage">对象存储</option><option value="web">网页</option><option value="connector">连接器</option></select></label></div><label className="sr-only" htmlFor="question">向知识库提问</label><textarea id="question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="输入你的问题…" rows={2} maxLength={2000}/><div className="question-footer"><div className="composer-context"><label className="base-picker"><span>知识库：</span><select aria-label="当前知识库" value={baseId} onChange={(event) => selectBase(event.target.value)}>{bases.map((item) => <option key={item.knowledge_base_id} value={item.knowledge_base_id}>{item.name}</option>)}</select></label><span className="connected-documents"><Paperclip size={15}/>{documents.length ? `已连接 ${documents.length} 份资料` : "暂无资料"}</span></div><button aria-label="提问并发送" disabled={busy || !question.trim()}>{busy ? <span className="button-spinner"/> : <Send size={17}/>}</button></div></form><small className="ai-notice">内容由人工智能生成，请注意甄别信息准确性</small></div>
       </section>
       <EvidencePanel sources={sources} documents={documents} activeRecord={activeRecord} conversation={history} result={result}/>
     </div>

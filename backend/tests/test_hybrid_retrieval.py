@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from backend.app.config import Settings
 from backend.app.lexical import LexicalIndexCache
+from backend.app.schemas import QueryMetadataFilter
 from backend.app.service import RAGService
 from backend.app.store import RetrievedChunk
 
@@ -17,10 +18,16 @@ CHUNKS = {
 
 
 def _chunk(chunk_id: str, retrieval_score: float) -> RetrievedChunk:
+    governance = {
+        "c1": {"category": "运维", "tags": ["备份"], "source_type": "file"},
+        "c2": {"category": "部署", "tags": ["端口"], "source_type": "file"},
+        "c3": {"category": "运维", "tags": ["恢复"], "source_type": "web"},
+        "c4": {"category": "研发", "tags": ["任务"], "source_type": "connector"},
+    }
     return RetrievedChunk(
         chunk_id=chunk_id,
         text=CHUNKS[chunk_id],
-        metadata={"filename": "doc.md", "paragraph": 0},
+        metadata={"filename": "doc.md", "paragraph": 0, **governance[chunk_id]},
         retrieval_score=retrieval_score,
     )
 
@@ -31,14 +38,14 @@ class _FakeStore:
         self.query_calls = 0
         self.scored_ids: list[str] = []
 
-    def query(self, embedding, limit, knowledge_base_id, query_text=None):
+    def query(self, embedding, limit, knowledge_base_id, query_text=None, filters=None, access=None):
         self.query_calls += 1
         return [
             _chunk(chunk_id, round(0.9 - 0.1 * index, 6))
             for index, chunk_id in enumerate(self.vector_order[:limit])
         ]
 
-    def load_current_chunks(self, knowledge_base_id):
+    def load_current_chunks(self, knowledge_base_id, access=None):
         return [_chunk(chunk_id, 0.0) for chunk_id in CHUNKS]
 
     def score_by_ids(self, chunk_ids, embedding, knowledge_base_id):
@@ -115,6 +122,18 @@ def test_hybrid_respects_retrieve_k() -> None:
     candidates = service.retrieve_candidates("备份与任务", [0.1, 0.2, 0.3], 2)
 
     assert len(candidates) == 2
+
+
+def test_hybrid_applies_one_metadata_boundary_to_vector_and_lexical() -> None:
+    service = _service(["c1", "c2", "c3", "c4"], mode="hybrid")
+    filters = QueryMetadataFilter(categories=["运维"], tags=["备份"])
+
+    candidates = service.retrieve_candidates(
+        "备份恢复", [0.1, 0.2, 0.3], 5, filters=filters
+    )
+
+    assert [item.chunk_id for item in candidates] == ["c1"]
+    assert candidates[0].channels == ("vector", "lexical")
 
 
 def test_explicit_mode_argument_overrides_settings() -> None:

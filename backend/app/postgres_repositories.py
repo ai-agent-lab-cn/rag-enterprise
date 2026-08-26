@@ -7,6 +7,7 @@ from uuid import uuid4
 import psycopg
 from psycopg import errors
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from .auth import (
     AuthenticatedSession,
@@ -128,7 +129,7 @@ class PostgresDataSourceRepository:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             rows = connection.execute(
                 """SELECT s.data_source_id, s.name, s.source_type, s.knowledge_base_id,
-                          k.name AS knowledge_base_name, s.enabled, s.updated_at,
+                          k.name AS knowledge_base_name, s.enabled, s.updated_at, s.acl,
                           count(DISTINCT d.document_id) AS document_count,
                           COALESCE(sum(v.source_file_bytes), 0) AS source_file_bytes,
                           CASE WHEN EXISTS (
@@ -181,27 +182,201 @@ class PostgresDataSourceRepository:
             )
         return result.rowcount > 0
 
+    def update_acl(
+        self, data_source_id: str, allow_user_ids: list[str], deny_user_ids: list[str]
+    ) -> dict[str, object] | None:
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            with connection.transaction():
+                source = connection.execute(
+                    "SELECT knowledge_base_id, acl FROM data_sources WHERE data_source_id=%s FOR UPDATE",
+                    (data_source_id,),
+                ).fetchone()
+                if source is None:
+                    return None
+                version = int(dict(source["acl"] or {}).get("version", 1)) + 1
+                policy = {
+                    "version": version,
+                    "allow_user_ids": allow_user_ids,
+                    "deny_user_ids": deny_user_ids,
+                }
+                connection.execute(
+                    "UPDATE data_sources SET acl=%s, updated_at=now() WHERE data_source_id=%s",
+                    (Jsonb(policy), data_source_id),
+                )
+                connection.execute(
+                    """UPDATE chunks c SET metadata=c.metadata || %s FROM documents d
+                       WHERE d.data_source_id=%s AND c.knowledge_base_id=d.knowledge_base_id
+                         AND c.document_version_id=d.current_version_id""",
+                    (Jsonb({"data_source_acl": policy}), data_source_id),
+                )
+        return {"knowledge_base_id": source["knowledge_base_id"], **policy}
+
     def delete(self, data_source_id: str) -> bool:
         with psycopg.connect(self.database_url) as connection, connection.transaction():
             row = connection.execute(
-                "SELECT count(*) FROM documents WHERE data_source_id = %s", (data_source_id,)
+                "SELECT count(*) FROM documents WHERE data_source_id=%s", (data_source_id,)
             ).fetchone()
             if row is None:
                 return False
             if row[0]:
                 raise ValueError("data source has documents")
             active = connection.execute(
-                """SELECT EXISTS (SELECT 1 FROM index_jobs
-                   WHERE data_source_id = %s AND status IN ('queued','running'))""",
-                (data_source_id,),
+                """SELECT EXISTS (SELECT 1 FROM index_jobs WHERE data_source_id=%s
+                   AND status IN ('queued','running'))""", (data_source_id,)
             ).fetchone()[0]
             if active:
                 raise ValueError("data source has active jobs")
             result = connection.execute(
-                "DELETE FROM data_sources WHERE data_source_id = %s", (data_source_id,)
+                "DELETE FROM data_sources WHERE data_source_id=%s", (data_source_id,)
             )
         return result.rowcount > 0
 
+
+class PostgresCategoryRepository:
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+
+    def list(self, knowledge_base_id: str) -> list[dict[str, object]]:
+        validate_knowledge_base_id(knowledge_base_id)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                """SELECT c.*, count(d.document_id) AS document_count
+                   FROM document_categories c
+                   LEFT JOIN documents d ON d.knowledge_base_id = c.knowledge_base_id
+                    AND d.metadata->>'category_id' = c.category_id
+                   WHERE c.knowledge_base_id = %s
+                   GROUP BY c.category_id
+                   ORDER BY c.is_system DESC, c.sort_order, c.normalized_name""",
+                (knowledge_base_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create(
+        self, knowledge_base_id: str, name: str, description: str, sort_order: int
+    ) -> dict[str, object]:
+        validate_knowledge_base_id(knowledge_base_id)
+        try:
+            with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+                row = connection.execute(
+                    """INSERT INTO document_categories
+                       (category_id, knowledge_base_id, name, normalized_name,
+                        description, sort_order)
+                       VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
+                    (
+                        f"cat_{uuid4().hex[:16]}", knowledge_base_id, name,
+                        name.casefold(), description, sort_order,
+                    ),
+                ).fetchone()
+        except errors.UniqueViolation as exc:
+            raise ValueError("category name already exists") from exc
+        return {**dict(row), "document_count": 0}
+
+    def update(
+        self, knowledge_base_id: str, category_id: str, name: str,
+        description: str, sort_order: int, active: bool,
+    ) -> dict[str, object] | None:
+        validate_knowledge_base_id(knowledge_base_id)
+        try:
+            with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+                with connection.transaction():
+                    current = connection.execute(
+                        """SELECT * FROM document_categories
+                           WHERE knowledge_base_id = %s AND category_id = %s FOR UPDATE""",
+                        (knowledge_base_id, category_id),
+                    ).fetchone()
+                    if current is None:
+                        return None
+                    if current["is_system"] and name != current["name"]:
+                        raise PermissionError("system category cannot be renamed")
+                    if current["is_system"] and not active:
+                        raise PermissionError("system category cannot be disabled")
+                    row = connection.execute(
+                        """UPDATE document_categories SET name=%s, normalized_name=%s,
+                                  description=%s, sort_order=%s, active=%s, updated_at=now()
+                           WHERE knowledge_base_id=%s AND category_id=%s RETURNING *""",
+                        (name, name.casefold(), description, sort_order, active,
+                         knowledge_base_id, category_id),
+                    ).fetchone()
+                    if name != current["name"]:
+                        patch = Jsonb({"category": name})
+                        connection.execute(
+                            """UPDATE documents SET metadata=metadata || %s, updated_at=now()
+                               WHERE knowledge_base_id=%s AND metadata->>'category_id'=%s""",
+                            (patch, knowledge_base_id, category_id),
+                        )
+                        connection.execute(
+                            """UPDATE chunks SET metadata=metadata || %s
+                               WHERE knowledge_base_id=%s AND metadata->>'category_id'=%s""",
+                            (patch, knowledge_base_id, category_id),
+                        )
+                    count = connection.execute(
+                        """SELECT count(*) FROM documents WHERE knowledge_base_id=%s
+                           AND metadata->>'category_id'=%s""",
+                        (knowledge_base_id, category_id),
+                    ).fetchone()[0]
+        except errors.UniqueViolation as exc:
+            raise ValueError("category name already exists") from exc
+        return {**dict(row), "document_count": int(count)}
+
+    def delete(self, knowledge_base_id: str, category_id: str) -> bool:
+        validate_knowledge_base_id(knowledge_base_id)
+        with psycopg.connect(self.database_url) as connection, connection.transaction():
+            row = connection.execute(
+                """SELECT is_system FROM document_categories
+                   WHERE knowledge_base_id=%s AND category_id=%s FOR UPDATE""",
+                (knowledge_base_id, category_id),
+            ).fetchone()
+            if row is None:
+                return False
+            if row[0]:
+                raise PermissionError("system category cannot be deleted")
+            count = connection.execute(
+                """SELECT count(*) FROM documents WHERE knowledge_base_id=%s
+                   AND metadata->>'category_id'=%s""",
+                (knowledge_base_id, category_id),
+            ).fetchone()[0]
+            if count:
+                raise ValueError(str(count))
+            connection.execute(
+                "DELETE FROM document_categories WHERE category_id=%s", (category_id,)
+            )
+        return True
+
+    def assign(
+        self, knowledge_base_id: str, document_ids: list[str], category_id: str
+    ) -> int | None:
+        validate_knowledge_base_id(knowledge_base_id)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            with connection.transaction():
+                category = connection.execute(
+                    """SELECT name FROM document_categories
+                       WHERE knowledge_base_id=%s AND category_id=%s AND active FOR UPDATE""",
+                    (knowledge_base_id, category_id),
+                ).fetchone()
+                if category is None:
+                    return None
+                patch = {
+                    "category_id": category_id,
+                    "category": str(category["name"]),
+                    "classification_status": "manual",
+                    "classification_confidence": None,
+                    "suggested_category_id": None,
+                    "classification_model": None,
+                    "classified_at": datetime.now(UTC).isoformat(),
+                }
+                updated = connection.execute(
+                    """UPDATE documents SET metadata=metadata || %s, updated_at=now()
+                       WHERE knowledge_base_id=%s AND document_id=ANY(%s)""",
+                    (Jsonb(patch), knowledge_base_id, document_ids),
+                ).rowcount
+                connection.execute(
+                    """UPDATE chunks c SET metadata=c.metadata || %s
+                       FROM documents d WHERE d.knowledge_base_id=%s
+                        AND d.document_id=ANY(%s) AND c.knowledge_base_id=d.knowledge_base_id
+                        AND c.document_version_id=d.current_version_id""",
+                    (Jsonb(patch), knowledge_base_id, document_ids),
+                )
+        return updated
 
 class PostgresAuthRepository:
     def __init__(self, database_url: str, session_ttl_hours: int = 12):

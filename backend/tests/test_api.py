@@ -174,6 +174,14 @@ def test_scoped_document_and_query_routes_are_isolated(client) -> None:
     assert client.get("/api/documents").json() == []
     assert len(client.get(f"/api/knowledge-bases/{knowledge_base_id}/documents").json()) == 1
 
+    metadata = client.patch(
+        f"/api/knowledge-bases/{knowledge_base_id}/documents/doc_test/metadata",
+        json={"category": "安全", "tags": ["ACL", "企业"]},
+    )
+    assert metadata.status_code == 200
+    assert metadata.json()["category"] == "安全"
+    assert metadata.json()["tags"] == ["ACL", "企业"]
+
     queried = client.post(
         f"/api/knowledge-bases/{knowledge_base_id}/query",
         json={"question": "隔离内容是什么？", "retrieve_k": 5, "rerank_k": 3},
@@ -193,6 +201,42 @@ def test_scoped_document_and_query_routes_are_isolated(client) -> None:
         + queried.json()["conversation_id"]
     ).status_code == 204
     assert client.delete(f"/api/knowledge-bases/{knowledge_base_id}").status_code == 204
+
+
+def test_document_acl_update_is_versioned(client) -> None:
+    uploaded = client.post(
+        "/api/knowledge-bases/kb_default/documents",
+        files={"file": ("acl.md", "权限资料", "text/markdown")},
+    )
+    assert uploaded.status_code == 201
+
+    updated = client.put(
+        "/api/knowledge-bases/kb_default/documents/doc_test/acl",
+        json={
+            "allow_user_ids": ["usr_0123456789abcdef"],
+            "deny_user_ids": ["usr_fedcba9876543210"],
+        },
+    )
+
+    assert updated.status_code == 200
+    assert updated.json() == {
+        "version": 2,
+        "allow_user_ids": ["usr_0123456789abcdef"],
+        "deny_user_ids": ["usr_fedcba9876543210"],
+    }
+    document = client.get("/api/knowledge-bases/kb_default/documents").json()[0]
+    assert document["acl_version"] == 2
+    assert document["allow_user_ids"] == ["usr_0123456789abcdef"]
+
+
+def test_acl_update_rejects_conflicting_users(client) -> None:
+    user_id = "usr_0123456789abcdef"
+    response = client.put(
+        "/api/knowledge-bases/kb_default/documents/doc_test/acl",
+        json={"allow_user_ids": [user_id], "deny_user_ids": [user_id]},
+    )
+
+    assert response.status_code == 422
 
 
 def test_unknown_knowledge_base_is_rejected_before_scoped_operation(client) -> None:
@@ -264,6 +308,11 @@ def test_failed_query_is_saved_in_history(client, fake_service) -> None:
     assert saved.json()["status"] == "failed"
     assert saved.json()["error_code"] == "MODEL_UNAVAILABLE"
     assert saved.json()["answer"] is None
+    bad_cases = client.get(
+        "/api/knowledge-bases/kb_default/bad-cases?category=unclassified&error_code=MODEL_UNAVAILABLE"
+    )
+    assert bad_cases.status_code == 200
+    assert [item["record_id"] for item in bad_cases.json()] == [details["record_id"]]
 
 
 def test_conversation_cannot_cross_knowledge_base_boundary(client) -> None:

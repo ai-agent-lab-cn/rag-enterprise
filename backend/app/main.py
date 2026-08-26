@@ -1,9 +1,10 @@
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, Query, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Query, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -27,10 +28,14 @@ from .observability import MetricsRegistry, ObservabilityMiddleware, bind_actor,
 from .postgres_documents import PostgresAsyncRAGService, check_embedding_model
 from .postgres_repositories import (
     PostgresAuthRepository,
+    PostgresCategoryRepository,
     PostgresDataSourceRepository,
     PostgresKnowledgeBaseRepository,
 )
+from .retrieval_access import RetrievalAccessContext
 from .schemas import (
+    AclPolicyResponse,
+    AclUpdate,
     AnswerEvaluationReportResponse,
     AnswerEvaluationReportSummary,
     AnswerRecordResponse,
@@ -39,10 +44,17 @@ from .schemas import (
     AuthBootstrapStatus,
     AuthLoginRequest,
     AuthTokenResponse,
+    BadCaseResponse,
+    BatchCategoryUpdate,
+    CategoryCreate,
+    CategoryResponse,
+    CategoryUpdate,
+    ClassificationUpdate,
     ConversationDetailResponse,
     ConversationSummaryResponse,
     DataSourceResponse,
     DocumentInfo,
+    DocumentMetadata,
     DocumentVersionResponse,
     EvaluationReportResponse,
     EvaluationReportSummary,
@@ -116,6 +128,15 @@ def get_data_sources() -> PostgresDataSourceRepository | None:
 
 
 DataSourcesDependency = Annotated[PostgresDataSourceRepository | None, Depends(get_data_sources)]
+
+
+@lru_cache
+def get_categories() -> PostgresCategoryRepository | None:
+    database_url = get_settings().database_url
+    return PostgresCategoryRepository(database_url) if database_url else None
+
+
+CategoriesDependency = Annotated[PostgresCategoryRepository | None, Depends(get_categories)]
 
 
 @lru_cache
@@ -612,6 +633,157 @@ def create_app() -> FastAPI:
         return await _knowledge_base_response(record, service, current.user)
 
     @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/categories",
+        response_model=list[CategoryResponse],
+    )
+    async def list_categories(
+        knowledge_base_id: str,
+        categories: CategoriesDependency,
+        knowledge_bases: KnowledgeBasesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> list[CategoryResponse]:
+        await _require_accessible_knowledge_base(
+            knowledge_bases, auth, current.user, knowledge_base_id
+        )
+        if categories is None:
+            raise AppError("POSTGRES_REQUIRED", "分类治理需要 PostgreSQL 运行时。", 503)
+        rows = await run_in_threadpool(categories.list, knowledge_base_id)
+        return [CategoryResponse(**row) for row in rows]
+
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/categories",
+        response_model=CategoryResponse,
+        status_code=201,
+    )
+    async def create_category(
+        knowledge_base_id: str,
+        payload: CategoryCreate,
+        categories: CategoriesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> CategoryResponse:
+        _require_admin(current.user)
+        if categories is None:
+            raise AppError("POSTGRES_REQUIRED", "分类治理需要 PostgreSQL 运行时。", 503)
+        try:
+            row = await run_in_threadpool(
+                categories.create, knowledge_base_id, payload.name,
+                payload.description, payload.sort_order,
+            )
+        except ValueError as exc:
+            raise AppError("CATEGORY_NAME_CONFLICT", "分类名称已存在。", 409) from exc
+        await _record_audit(audit, "category.create", current.user, "category", str(row["category_id"]))
+        return CategoryResponse(**row)
+
+    @app.put(
+        "/api/knowledge-bases/{knowledge_base_id}/categories/{category_id}",
+        response_model=CategoryResponse,
+    )
+    async def update_category(
+        knowledge_base_id: str,
+        category_id: str,
+        payload: CategoryUpdate,
+        categories: CategoriesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> CategoryResponse:
+        _require_admin(current.user)
+        if categories is None:
+            raise AppError("POSTGRES_REQUIRED", "分类治理需要 PostgreSQL 运行时。", 503)
+        try:
+            row = await run_in_threadpool(
+                categories.update, knowledge_base_id, category_id, payload.name,
+                payload.description, payload.sort_order, payload.active,
+            )
+        except PermissionError as exc:
+            raise AppError("SYSTEM_CATEGORY_PROTECTED", "系统分类不可重命名或停用。", 409) from exc
+        except ValueError as exc:
+            raise AppError("CATEGORY_NAME_CONFLICT", "分类名称已存在。", 409) from exc
+        if row is None:
+            raise AppError("CATEGORY_NOT_FOUND", "未找到该分类。", 404)
+        await _record_audit(audit, "category.update", current.user, "category", category_id)
+        return CategoryResponse(**row)
+
+    @app.delete(
+        "/api/knowledge-bases/{knowledge_base_id}/categories/{category_id}", status_code=204
+    )
+    async def delete_category(
+        knowledge_base_id: str,
+        category_id: str,
+        categories: CategoriesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> None:
+        _require_admin(current.user)
+        if categories is None:
+            raise AppError("POSTGRES_REQUIRED", "分类治理需要 PostgreSQL 运行时。", 503)
+        try:
+            deleted = await run_in_threadpool(categories.delete, knowledge_base_id, category_id)
+        except PermissionError as exc:
+            raise AppError("SYSTEM_CATEGORY_PROTECTED", "系统分类不可删除。", 409) from exc
+        except ValueError as exc:
+            raise AppError(
+                "CATEGORY_IN_USE", "分类仍被资料引用，请先批量迁移资料。", 409,
+                {"document_count": int(str(exc))},
+            ) from exc
+        if not deleted:
+            raise AppError("CATEGORY_NOT_FOUND", "未找到该分类。", 404)
+        await _record_audit(audit, "category.delete", current.user, "category", category_id)
+
+    @app.put(
+        "/api/knowledge-bases/{knowledge_base_id}/documents/categories",
+        response_model=dict[str, int],
+    )
+    async def batch_assign_category(
+        knowledge_base_id: str,
+        payload: BatchCategoryUpdate,
+        categories: CategoriesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> dict[str, int]:
+        _require_admin(current.user)
+        if categories is None:
+            raise AppError("POSTGRES_REQUIRED", "分类治理需要 PostgreSQL 运行时。", 503)
+        updated = await run_in_threadpool(
+            categories.assign, knowledge_base_id, payload.document_ids, payload.category_id
+        )
+        if updated is None:
+            raise AppError("CATEGORY_NOT_FOUND", "分类不存在或已停用。", 404)
+        await _record_audit(
+            audit, "document.category.batch_update", current.user, "knowledge_base",
+            knowledge_base_id, metadata={"updated": updated},
+        )
+        return {"updated": updated}
+
+    @app.put(
+        "/api/knowledge-bases/{knowledge_base_id}/documents/{document_id}/classification",
+        response_model=dict[str, int],
+    )
+    async def confirm_document_classification(
+        knowledge_base_id: str,
+        document_id: str,
+        payload: ClassificationUpdate,
+        categories: CategoriesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> dict[str, int]:
+        _require_admin(current.user)
+        if categories is None:
+            raise AppError("POSTGRES_REQUIRED", "分类治理需要 PostgreSQL 运行时。", 503)
+        updated = await run_in_threadpool(
+            categories.assign, knowledge_base_id, [document_id], payload.category_id
+        )
+        if updated is None:
+            raise AppError("CATEGORY_NOT_FOUND", "分类不存在或已停用。", 404)
+        if updated == 0:
+            raise AppError("DOCUMENT_NOT_FOUND", "未找到该文档。", 404)
+        await _record_audit(
+            audit, "document.classification.confirm", current.user, "document", document_id
+        )
+        return {"updated": updated}
+
+    @app.get(
         "/api/knowledge-bases/{knowledge_base_id}/members",
         response_model=list[UserResponse],
     )
@@ -756,6 +928,8 @@ def create_app() -> FastAPI:
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
         audit: AuditRepositoryDependency,
+        category: Annotated[str, Form()] = "未分类",
+        tags: Annotated[list[str] | None, Form()] = None,
     ) -> DocumentInfo:
         await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         return await _upload_document(
@@ -767,6 +941,7 @@ def create_app() -> FastAPI:
             metrics,
             audit,
             current.user,
+            DocumentMetadata(category=category, tags=tags or []).model_dump(mode="json"),
         )
 
     @app.get(
@@ -785,6 +960,116 @@ def create_app() -> FastAPI:
         await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         documents = await run_in_threadpool(service.list_documents, knowledge_base_id)
         return _page(documents, offset, limit)
+
+    @app.patch(
+        "/api/knowledge-bases/{knowledge_base_id}/documents/{document_id}/metadata",
+        response_model=DocumentInfo,
+    )
+    async def update_scoped_document_metadata(
+        knowledge_base_id: str,
+        document_id: str,
+        payload: DocumentMetadata,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> DocumentInfo:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(
+            knowledge_bases, auth, current.user, knowledge_base_id
+        )
+        updated = await run_in_threadpool(
+            service.update_document_metadata,
+            document_id,
+            payload.model_dump(mode="json", exclude_unset=True),
+            knowledge_base_id,
+        )
+        if not updated:
+            raise AppError("DOCUMENT_NOT_FOUND", "未找到该文档。", 404)
+        await _record_audit(
+            audit,
+            "document.metadata.update",
+            current.user,
+            "document",
+            document_id,
+            metadata={"knowledge_base_id": knowledge_base_id},
+        )
+        documents = await run_in_threadpool(service.list_documents, knowledge_base_id)
+        return next(item for item in documents if item.document_id == document_id)
+
+    @app.put(
+        "/api/knowledge-bases/{knowledge_base_id}/documents/{document_id}/acl",
+        response_model=AclPolicyResponse,
+    )
+    async def update_scoped_document_acl(
+        knowledge_base_id: str,
+        document_id: str,
+        payload: AclUpdate,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> AclPolicyResponse:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(
+            knowledge_bases, auth, current.user, knowledge_base_id
+        )
+        version = await run_in_threadpool(
+            service.update_document_acl,
+            document_id,
+            payload.allow_user_ids,
+            payload.deny_user_ids,
+            knowledge_base_id,
+        )
+        if version is None:
+            raise AppError("DOCUMENT_NOT_FOUND", "未找到该文档。", 404)
+        await _record_audit(
+            audit,
+            "document.acl.update",
+            current.user,
+            "document",
+            document_id,
+            metadata={"knowledge_base_id": knowledge_base_id, "acl_version": version},
+        )
+        return AclPolicyResponse(version=version, **payload.model_dump())
+
+    @app.put(
+        "/api/data-sources/{data_source_id}/acl",
+        response_model=AclPolicyResponse,
+    )
+    async def update_data_source_acl(
+        data_source_id: str,
+        payload: AclUpdate,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> AclPolicyResponse:
+        _require_admin(current.user)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "数据源 ACL 管理需要 PostgreSQL 运行时。", 503)
+        updated = await run_in_threadpool(
+            sources.update_acl,
+            data_source_id,
+            payload.allow_user_ids,
+            payload.deny_user_ids,
+        )
+        if updated is None:
+            raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
+        version = int(updated["version"])
+        await _record_audit(
+            audit,
+            "data_source.acl.update",
+            current.user,
+            "data_source",
+            data_source_id,
+            metadata={
+                "knowledge_base_id": str(updated["knowledge_base_id"]),
+                "acl_version": version,
+            },
+        )
+        return AclPolicyResponse(version=version, **payload.model_dump())
 
     @app.get(
         "/api/knowledge-bases/{knowledge_base_id}/document-versions",
@@ -961,6 +1246,39 @@ def create_app() -> FastAPI:
             conversations.list_conversations, knowledge_base_id, current.user.user_id
         )
         return [ConversationSummaryResponse(**item) for item in _page(items, offset, limit)]
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/bad-cases",
+        response_model=list[BadCaseResponse],
+    )
+    async def list_bad_cases(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        conversations: ConversationsDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        category: str | None = Query(default=None, max_length=80),
+        error_code: str | None = Query(default=None, max_length=80),
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+        offset: PageOffset = 0,
+        limit: PageLimit = 50,
+    ) -> list[BadCaseResponse]:
+        await _require_accessible_knowledge_base(
+            knowledge_bases, auth, current.user, knowledge_base_id
+        )
+        if created_from and created_to and created_from > created_to:
+            raise AppError("INVALID_TIME_RANGE", "created_from 不能晚于 created_to。")
+        items = await run_in_threadpool(
+            conversations.list_bad_cases,
+            knowledge_base_id,
+            current.user.user_id,
+            category,
+            error_code,
+            created_from,
+            created_to,
+        )
+        return [BadCaseResponse(**item) for item in _page(items, offset, limit)]
 
     @app.get(
         "/api/knowledge-bases/{knowledge_base_id}/conversations/{conversation_id}",
@@ -1149,6 +1467,7 @@ def _data_source_response(row: dict[str, object], user: UserRecord) -> DataSourc
     raw_status = str(row.get("sync_status") or "idle")
     index_status = raw_status if raw_status in {"queued", "running", "succeeded", "failed"} else "idle"
     upload_status = "succeeded" if row.get("upload_status") == "succeeded" else "idle"
+    acl = dict(row.get("acl") or {})
     actions = ["detail", "update_file"]
     if user.role == "admin":
         actions.extend(["edit", "disable" if row["enabled"] else "enable"])
@@ -1160,6 +1479,9 @@ def _data_source_response(row: dict[str, object], user: UserRecord) -> DataSourc
         "index_status": index_status,
         "sync_status": index_status,
         "last_indexed_at": row.get("last_indexed_at") or row.get("last_synced_at"),
+        "acl_version": int(acl.get("version", 1)),
+        "allow_user_ids": list(acl.get("allow_user_ids", [])),
+        "deny_user_ids": list(acl.get("deny_user_ids", [])),
         "allowed_actions": actions,
     }
     return DataSourceResponse(**normalized)
@@ -1174,6 +1496,7 @@ async def _upload_document(
     metrics: MetricsRegistry,
     audit: AuditRepository,
     user: UserRecord,
+    metadata: dict[str, object] | None = None,
 ) -> DocumentInfo:
     abuse_protection.check_expensive(user.user_id)
     started = time.perf_counter()
@@ -1188,11 +1511,11 @@ async def _upload_document(
             max_filename_chars=settings.max_filename_chars,
         )
         with abuse_protection.concurrency.slot():
+            arguments = (filename, content, knowledge_base_id)
             result = await run_in_threadpool(
                 service.index_document,
-                filename,
-                content,
-                knowledge_base_id,
+                *arguments,
+                **({"metadata": metadata} if metadata is not None else {}),
             )
         if not getattr(service, "stores_source_files", False):
             scope = KnowledgeBaseScope(knowledge_base_id, settings.upload_path)
@@ -1269,10 +1592,13 @@ async def _execute_recorded_query(
                 payload.retrieve_k,
                 payload.rerank_k,
                 knowledge_base_id,
+                payload.filters,
+                RetrievalAccessContext(user_id),
             )
     except AppError as exc:
         failure_latency = {"total": _duration_ms(started)}
         metrics.record_rag(failure_latency, retrieval_failed=True, answer_failed=True)
+        error_details = dict(exc.details) if isinstance(exc.details, dict) else {}
         record = await run_in_threadpool(
             conversations.record,
             conversation_id=conversation["conversation_id"],
@@ -1290,10 +1616,12 @@ async def _execute_recorded_query(
             model_metadata={"configured_model": settings.generation_model},
             prompt_version=None,
             prompt_hash=None,
+            query_metadata=error_details.get("query_metadata"),
+            bad_case_category=error_details.get("bad_case_category"),
             error_code=exc.code,
             error_message=exc.message,
         )
-        details = dict(exc.details) if isinstance(exc.details, dict) else {}
+        details = error_details
         details.update(
             {
                 "conversation_id": conversation["conversation_id"],
@@ -1327,6 +1655,9 @@ async def _execute_recorded_query(
         prompt_hash=result.prompt_hash,
         query_metadata=(
             result.query_metadata.model_dump(mode="json") if result.query_metadata else None
+        ),
+        bad_case_category=(
+            f"answer_{result.answer_status}" if record_status == "failed" else None
         ),
         error_code=result.error_code,
         error_message=result.error_message,

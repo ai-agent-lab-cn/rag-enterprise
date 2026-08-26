@@ -10,6 +10,7 @@ const LATENCY_LABELS: Record<string, string> = {
   generation: "答案生成",
   total: "总耗时",
 };
+const SOURCE_TYPE_LABELS: Record<string, string> = { file: "文件", object_storage: "对象存储", web: "网页", connector: "连接器" };
 
 /** 统计候选分别由哪几路召回命中；通路缺失的历史记录不参与统计。 */
 function channelBreakdown(sources: Source[]) {
@@ -35,6 +36,14 @@ export function TechnicalDrawer({ result }: TechnicalDrawerProps) {
   const breakdown = channelBreakdown(result.sources);
   const hybrid = breakdown.labelled > 0 && (breakdown.both > 0 || breakdown.lexicalOnly > 0);
   const queryMetadata = result.query_metadata;
+  const appliedFilters = queryMetadata?.applied_filters;
+  const filterLabels = [
+    ...(appliedFilters?.categories ?? []).map((item) => `分类：${item}`),
+    ...(appliedFilters?.tags ?? []).map((item) => `标签：${item}`),
+    ...(appliedFilters?.source_types ?? []).map((item) => `来源：${SOURCE_TYPE_LABELS[item] ?? item}`),
+    ...(appliedFilters?.created_from ? [`开始：${new Date(appliedFilters.created_from).toLocaleDateString("zh-CN")}`] : []),
+    ...(appliedFilters?.created_to ? [`结束：${new Date(appliedFilters.created_to).toLocaleDateString("zh-CN")}`] : []),
+  ];
   const queryStrategy = queryMetadata?.strategy === "controlled_expansion"
     ? "可控查询扩展"
     : queryMetadata?.strategy === "normalized"
@@ -57,6 +66,8 @@ export function TechnicalDrawer({ result }: TechnicalDrawerProps) {
           {queryMetadata ? (
             <p>{queryStrategy} · {queryMetadata.query_count} 路查询{queryMetadata.fallback_used ? " · 已降级" : ""}</p>
           ) : null}
+          {filterLabels.length ? <div className="applied-filters" aria-label="实际生效的过滤条件">{filterLabels.map((item) => <span key={item}>{item}</span>)}</div> : null}
+          {queryMetadata ? <p className="retrieval-diagnostics">候选：召回 {queryMetadata.retrieved_candidate_count} / 融合 {queryMetadata.fused_candidate_count} / 返回 {queryMetadata.returned_source_count}{queryMetadata.filter_match_count !== null ? ` · 过滤命中 ${queryMetadata.filter_match_count}` : ""}</p> : null}
           {firstSource ? (
             <p>最高来源分数：召回 {firstSource.retrieval_score.toFixed(3)} / 精排 {firstSource.rerank_score.toFixed(3)}</p>
           ) : null}

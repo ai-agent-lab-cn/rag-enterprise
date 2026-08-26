@@ -1,7 +1,9 @@
 import pytest
 
 from backend.app.config import Settings
+from backend.app.errors import AppError
 from backend.app.query_understanding import build_query_plan, normalize_query
+from backend.app.schemas import QueryMetadataFilter
 from backend.app.service import RAGService
 from backend.app.store import RetrievedChunk
 
@@ -70,12 +72,15 @@ class _Store:
         self.results = results
         self.queries: list[str] = []
 
-    def query(self, embedding, limit, knowledge_base_id, query_text=None):
+    def query(self, embedding, limit, knowledge_base_id, query_text=None, filters=None, access=None):
         self.queries.append(query_text)
         result = self.results.get(query_text, [])
         if isinstance(result, Exception):
             raise result
         return result[:limit]
+
+    def list_documents(self, knowledge_base_id):
+        return [{"document_id": "doc_ready", "filename": "ready.md", "chunk_count": 1, "status": "ready"}]
 
 
 def test_service_fuses_multiple_queries_and_reports_strategy() -> None:
@@ -99,6 +104,53 @@ def test_service_fuses_multiple_queries_and_reports_strategy() -> None:
     assert response.query_metadata.query_count == 3
     assert response.query_metadata.expansion_count == 2
     assert response.query_metadata.fallback_used is False
+    assert response.query_metadata.retrieved_candidate_count == 6
+    assert response.query_metadata.fused_candidate_count == 4
+    assert response.query_metadata.returned_source_count == 4
+    assert response.query_metadata.filter_match_count is None
+
+
+def test_query_expansion_reuses_the_same_metadata_filter() -> None:
+    original = 'RAG "权限隔离"'
+    allowed = _candidate("allowed")
+    allowed.metadata.update({"category": "安全", "tags": ["ACL"], "source_type": "file"})
+    blocked = _candidate("blocked")
+    blocked.metadata.update({"category": "运维", "tags": ["备份"], "source_type": "file"})
+    store = _Store({original: [allowed, blocked], "权限隔离": [blocked, allowed]})
+    service = RAGService(Settings(), store, _Embedder(), _Reranker(), _Generator())
+
+    response = service.query(
+        original,
+        retrieve_k=5,
+        rerank_k=5,
+        filters=QueryMetadataFilter(categories=["安全"], tags=["ACL"]),
+    )
+
+    assert [item.chunk_id for item in response.sources] == ["allowed"]
+    assert response.query_metadata is not None
+    assert response.query_metadata.applied_filters is not None
+    assert response.query_metadata.applied_filters.categories == ["安全"]
+    assert response.query_metadata.applied_filters.tags == ["ACL"]
+    assert response.query_metadata.retrieved_candidate_count == 2
+    assert response.query_metadata.fused_candidate_count == 1
+    assert response.query_metadata.returned_source_count == 1
+    assert response.query_metadata.filter_match_count == 1
+
+
+def test_filtered_query_records_a_distinct_no_match_bad_case() -> None:
+    service = RAGService(Settings(), _Store({}), _Embedder(), _Reranker(), _Generator())
+
+    with pytest.raises(AppError) as raised:
+        service.query(
+            "只查询安全资料",
+            retrieve_k=5,
+            rerank_k=5,
+            filters=QueryMetadataFilter(categories=["安全"]),
+        )
+
+    assert raised.value.code == "NO_MATCHING_DOCUMENTS"
+    assert raised.value.details["bad_case_category"] == "metadata_filter_no_match"
+    assert raised.value.details["query_metadata"]["applied_filters"]["categories"] == ["安全"]
 
 
 def test_service_falls_back_when_expansions_fail_or_return_empty() -> None:
