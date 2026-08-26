@@ -70,6 +70,7 @@ class ChromaStore:
         embedding: list[float],
         limit: int,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        query_text: str | None = None,
     ) -> list[RetrievedChunk]:
         validate_knowledge_base_id(knowledge_base_id)
         scoped_count = self.count(knowledge_base_id)
