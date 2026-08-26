@@ -22,6 +22,7 @@ class RetrievedChunk:
     # 兼容已发布的 V5-1 融合接口；新链路优先读取 channels。
     vector_score: float | None = None
     retrieval_methods: list[str] | None = None
+    query_match_count: int = 1
 
 
 class ChromaStore:

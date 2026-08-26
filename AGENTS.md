@@ -34,17 +34,20 @@
 - 面向用户的 Git 协作内容默认使用中文，包括分支用途说明、commit message、Issue、PR、CI 步骤、Tag/Release 说明和进度评论；Git 命令、分支名前缀、代码标识符、协议字段、依赖名称及容易产生歧义的行业术语保留英文。
 - 中文表述应简洁、可追溯，并链接对应 commit、PR、Issue 或 CI；不要在说明中复制维护代码事实。
 - 开发改动默认只保留在本地工作区，不直接提交或上传 Git 远端。
-- 用户通过 VS Code 检查并明确批准后，才允许创建 commit；批准 commit 前不得 push、创建 PR 或合并。
+- 用户通过 VS Code 检查并明确回复“提交代码”后，才允许创建 commit；批准前不得 commit 或 push。
+- 用户批准后，将 commit 直接 push 到 `main`；不再默认创建功能 Branch 或 PR。
+- push 后必须核对 `main CI`；只有 `main CI` 全部通过，才能关闭对应 Issue。
+- Tag、Release 和部署必须等待用户明确指令，不因 `main CI` 通过自动执行。
+- 未明确要求“完整验证、容器构建”时，只执行与改动相关的轻量验证。
 
-开发流程：本地 Branch → 本地修改 → 用户在 VS Code 检查 → 用户批准 → Commit → Push → PR → Merge → Release
+开发流程：本地修改 → 用户在 VS Code 检查 → 用户批准“提交代码” → Commit → Push 到 main → main CI 通过 → 关闭 Issue
 
 ## 个人开发流程
 
-1. 创建 Issue。
-2. 创建对应的本地短期 Branch。
-3. 仅在本地完成开发和测试。
-4. 用户通过 VS Code 检查改动。
-5. 用户明确批准后创建 Commit 并 Push。
-6. 创建独立 PR；PR CI 通过后合入 main。
-7. 确认 main CI 通过后关闭 Issue。
-8. 删除短期 Branch。
+1. 创建或确认对应 Issue。
+2. 在本地工作区完成修改和轻量验证。
+3. 用户通过 VS Code 检查改动。
+4. 用户明确回复“提交代码”。
+5. 创建 Commit 并直接 Push 到 `main`。
+6. 确认 `main CI` 全部通过后关闭 Issue。
+7. 仅在用户明确要求时执行 Tag、Release 或部署。

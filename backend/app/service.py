@@ -17,7 +17,8 @@ from .prompts import (
     build_prompt,
     parse_answer,
 )
-from .ranking import rank_candidates, reciprocal_rank_fusion
+from .query_understanding import build_query_plan
+from .ranking import fuse_query_candidates, rank_candidates, reciprocal_rank_fusion
 from .schemas import DocumentInfo, QueryResponse, Source
 from .store import ChromaStore, RetrievedChunk
 
@@ -123,7 +124,9 @@ class RAGService:
 
         mode = retrieval_mode or self.settings.retrieval_mode
         if mode == "vector" or self.lexical is None:
-            return self.store.query(embedding, retrieve_k, knowledge_base_id)
+            return self.store.query(
+                embedding, retrieve_k, knowledge_base_id, query_text=question
+            )
 
         hits = self.lexical.get(knowledge_base_id).search(question, retrieve_k)
         lexical_scores = {hit.chunk_id: hit.score for hit in hits}
@@ -131,7 +134,9 @@ class RAGService:
             fused_ids = [hit.chunk_id for hit in hits]
             vector_candidates: list[RetrievedChunk] = []
         else:
-            vector_candidates = self.store.query(embedding, retrieve_k, knowledge_base_id)
+            vector_candidates = self.store.query(
+                embedding, retrieve_k, knowledge_base_id, query_text=question
+            )
             fused_ids = [
                 chunk_id
                 for chunk_id, _ in reciprocal_rank_fusion(
@@ -188,9 +193,30 @@ class RAGService:
     ) -> QueryResponse:
         total_started = time.perf_counter()
         retrieval_started = time.perf_counter()
-        query_embedding = self.embedder.encode([question])[0]
-        candidates = self.retrieve_candidates(
-            question, query_embedding, retrieve_k, knowledge_base_id
+        query_plan = build_query_plan(question)
+        original_embedding = self.embedder.encode([query_plan.normalized])[0]
+        original_candidates = self.retrieve_candidates(
+            query_plan.normalized, original_embedding, retrieve_k, knowledge_base_id
+        )
+        query_rankings = [original_candidates]
+        fallback_used = False
+        for expanded_query in query_plan.queries[1:]:
+            try:
+                expanded_embedding = self.embedder.encode([expanded_query])[0]
+                expanded_candidates = self.retrieve_candidates(
+                    expanded_query, expanded_embedding, retrieve_k, knowledge_base_id
+                )
+            except Exception:
+                fallback_used = True
+                continue
+            if expanded_candidates:
+                query_rankings.append(expanded_candidates)
+            else:
+                fallback_used = True
+        candidates = (
+            fuse_query_candidates(query_rankings, retrieve_k)
+            if len(query_rankings) > 1
+            else original_candidates
         )
         retrieval_ms = _elapsed(retrieval_started)
         if not candidates:
@@ -222,6 +248,12 @@ class RAGService:
             model_metadata=model_metadata,
             prompt_version=prompt.version,
             prompt_hash=prompt.sha256,
+            query_metadata={
+                "strategy": query_plan.strategy,
+                "query_count": len(query_rankings),
+                "expansion_count": query_plan.expansion_count,
+                "fallback_used": fallback_used,
+            },
             latency_ms={
                 "retrieval": retrieval_ms,
                 "rerank": rerank_ms,
@@ -294,4 +326,6 @@ def _source(item: RetrievedChunk) -> Source:
         rerank_score=item.rerank_score,
         retrieval_channels=list(item.channels),
         lexical_score=item.lexical_score,
+        retrieval_methods=item.retrieval_methods or ["vector"],
+        query_match_count=item.query_match_count,
     )

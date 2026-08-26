@@ -34,6 +34,12 @@ export function TechnicalDrawer({ result }: TechnicalDrawerProps) {
   const firstSource = result.sources[0];
   const breakdown = channelBreakdown(result.sources);
   const hybrid = breakdown.labelled > 0 && (breakdown.both > 0 || breakdown.lexicalOnly > 0);
+  const queryMetadata = result.query_metadata;
+  const queryStrategy = queryMetadata?.strategy === "controlled_expansion"
+    ? "可控查询扩展"
+    : queryMetadata?.strategy === "normalized"
+      ? "查询规范化"
+      : "原始查询";
   return (
     <details className="technical-drawer">
       <summary>查看技术细节 <span aria-hidden="true">＋</span></summary>
@@ -47,6 +53,9 @@ export function TechnicalDrawer({ result }: TechnicalDrawerProps) {
               命中通路：双路 {breakdown.both} 条 / 仅向量 {breakdown.vectorOnly} 条 / 仅词法{" "}
               {breakdown.lexicalOnly} 条
             </p>
+          ) : null}
+          {queryMetadata ? (
+            <p>{queryStrategy} · {queryMetadata.query_count} 路查询{queryMetadata.fallback_used ? " · 已降级" : ""}</p>
           ) : null}
           {firstSource ? (
             <p>最高来源分数：召回 {firstSource.retrieval_score.toFixed(3)} / 精排 {firstSource.rerank_score.toFixed(3)}</p>

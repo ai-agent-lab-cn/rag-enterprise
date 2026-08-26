@@ -31,7 +31,7 @@ class _FakeStore:
         self.query_calls = 0
         self.scored_ids: list[str] = []
 
-    def query(self, embedding, limit, knowledge_base_id):
+    def query(self, embedding, limit, knowledge_base_id, query_text=None):
         self.query_calls += 1
         return [
             _chunk(chunk_id, round(0.9 - 0.1 * index, 6))

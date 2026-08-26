@@ -1325,6 +1325,9 @@ async def _execute_recorded_query(
         model_metadata=result.model_metadata,
         prompt_version=result.prompt_version,
         prompt_hash=result.prompt_hash,
+        query_metadata=(
+            result.query_metadata.model_dump(mode="json") if result.query_metadata else None
+        ),
         error_code=result.error_code,
         error_message=result.error_message,
     )

@@ -172,6 +172,12 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
         model_metadata: {},
         prompt_version: "v3",
         prompt_hash: "abc",
+        query_metadata: {
+          strategy: "controlled_expansion",
+          query_count: 2,
+          expansion_count: 1,
+          fallback_used: false,
+        },
         sources: [
           {
             knowledge_base_id: "kb_default",
@@ -186,6 +192,10 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
             text: "系统资料全文",
             retrieval_score: 0.82,
             rerank_score: 1.31,
+            vector_score: 0.78,
+            lexical_score: 0.64,
+            retrieval_methods: ["vector", "lexical"],
+            query_match_count: 2,
           },
         ],
       }),
@@ -308,6 +318,8 @@ test("问答工作台使用所选知识库接口并渲染来源", async () => {
   await userEvent.type(await screen.findByLabelText("向知识库提问"), "系统如何工作？");
   await userEvent.click(screen.getByRole("button", { name: /提问/ }));
   expect(await screen.findByText("系统使用可追溯检索。")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("查看技术细节"));
+  expect(screen.getByText("可控查询扩展 · 2 路查询")).toBeInTheDocument();
   expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/query", expect.objectContaining({ method: "POST" }));
 });
 

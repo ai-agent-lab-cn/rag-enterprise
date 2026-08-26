@@ -25,6 +25,12 @@ def test_history_persists_source_and_execution_metadata(tmp_path: Path) -> None:
         model_metadata={"configured_model": "test-model"},
         prompt_version="v1",
         prompt_hash="abc123",
+        query_metadata={
+            "strategy": "controlled_expansion",
+            "query_count": 2,
+            "expansion_count": 1,
+            "fallback_used": False,
+        },
     )
 
     restored = ConversationRepository(path)
@@ -33,6 +39,7 @@ def test_history_persists_source_and_execution_metadata(tmp_path: Path) -> None:
     assert detail["records"][0]["record_id"] == record["record_id"]
     assert detail["records"][0]["sources"][0]["text"] == "来源快照"
     assert detail["records"][0]["prompt_hash"] == "abc123"
+    assert detail["records"][0]["query_metadata"]["query_count"] == 2
     assert restored.get_answer("kb_default", record["record_id"], OWNER)["answer"] == "有来源的答案"
 
 
