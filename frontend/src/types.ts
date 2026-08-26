@@ -135,6 +135,8 @@ export interface EvaluationReport extends EvaluationReportSummary {
   recall_at_5: EvaluationMetric;
   vector_mrr: EvaluationMetric;
   rerank_mrr: EvaluationMetric;
+  hybrid_mrr?: EvaluationMetric | null;
+  rerank_recall_at_5?: EvaluationMetric | null;
 }
 
 export interface KnowledgeBase {
