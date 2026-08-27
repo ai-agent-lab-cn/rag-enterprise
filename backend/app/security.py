@@ -173,7 +173,11 @@ def validate_upload_filename(filename: str | None, *, max_filename_chars: int) -
     if any(unicodedata.category(character) == "Cc" for character in normalized):
         raise AppError("INVALID_FILENAME", "文件名包含不支持的控制字符。")
     if Path(normalized).suffix.lower() not in SUPPORTED_EXTENSIONS:
-        raise AppError("UNSUPPORTED_FILE", "仅支持 Markdown、TXT 和 PDF 文件。", 415)
+        raise AppError(
+            "UNSUPPORTED_FILE",
+            "仅支持 Markdown、TXT、PDF、HTML、DOCX、XLSX 和 CSV 文件。",
+            415,
+        )
     return normalized
 
 

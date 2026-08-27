@@ -18,7 +18,7 @@ from .errors import AppError
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID, validate_knowledge_base_id
 from .lexical import LexicalIndexCache
 from .models import EmbeddingModel, GeminiGenerator, Reranker, get_generator
-from .parsers import parse_document
+from .parsers import parse_structured_document
 from .retrieval_access import RetrievalAccessContext
 from .schemas import DocumentInfo, QueryMetadataFilter
 from .security import write_private_file
@@ -259,24 +259,14 @@ class PostgresVectorStore:
                 "sensitivity": dict(row["metadata"] or {}).get("sensitivity", "internal"),
                 "valid_from": dict(row["metadata"] or {}).get("valid_from"),
                 "valid_to": dict(row["metadata"] or {}).get("valid_to"),
-                "retrieval_status": dict(row["metadata"] or {}).get(
-                    "retrieval_status", "searchable"
-                ),
+                "retrieval_status": dict(row["metadata"] or {}).get("retrieval_status", "searchable"),
                 "acl_version": dict(row["metadata"] or {}).get("acl_version", 1),
                 "allow_user_ids": dict(row["metadata"] or {}).get("allow_user_ids", []),
                 "deny_user_ids": dict(row["metadata"] or {}).get("deny_user_ids", []),
-                "classification_status": dict(row["metadata"] or {}).get(
-                    "classification_status", "pending"
-                ),
-                "classification_confidence": dict(row["metadata"] or {}).get(
-                    "classification_confidence"
-                ),
-                "suggested_category_id": dict(row["metadata"] or {}).get(
-                    "suggested_category_id"
-                ),
-                "classification_model": dict(row["metadata"] or {}).get(
-                    "classification_model"
-                ),
+                "classification_status": dict(row["metadata"] or {}).get("classification_status", "pending"),
+                "classification_confidence": dict(row["metadata"] or {}).get("classification_confidence"),
+                "suggested_category_id": dict(row["metadata"] or {}).get("suggested_category_id"),
+                "classification_model": dict(row["metadata"] or {}).get("classification_model"),
                 "classified_at": dict(row["metadata"] or {}).get("classified_at"),
             }
             for row in rows
@@ -440,8 +430,7 @@ class PostgresAsyncRAGService(RAGService):
             # 因此独立 Worker 进程写入的新分块无需显式通知即可被感知。
             LexicalIndexCache(
                 lambda knowledge_base_id: [
-                    (item.chunk_id, item.text)
-                    for item in store.load_current_chunks(knowledge_base_id)
+                    (item.chunk_id, item.text) for item in store.load_current_chunks(knowledge_base_id)
                 ],
                 store.chunk_fingerprint,
             ),
@@ -599,13 +588,9 @@ def check_embedding_model(database_url: str, model_name: str) -> None:
     """
 
     with psycopg.connect(database_url) as connection:
-        row = connection.execute(
-            "SELECT embedding_model FROM index_settings WHERE singleton"
-        ).fetchone()
+        row = connection.execute("SELECT embedding_model FROM index_settings WHERE singleton").fetchone()
     if row is not None and str(row[0]) != model_name:
-        raise RuntimeError(
-            f"索引使用 {row[0]}，当前配置为 {model_name}；请先执行全量重建或恢复原模型配置"
-        )
+        raise RuntimeError(f"索引使用 {row[0]}，当前配置为 {model_name}；请先执行全量重建或恢复原模型配置")
 
 
 def enqueue_rebuild(
@@ -794,7 +779,14 @@ class IndexWorker:
         )
         _, chunk_size, chunk_overlap = parse_chunking_version(target_version)
         content = (self.settings.upload_path / version["source_path"]).read_bytes()
-        sections = parse_document(str(version["filename"]), content)
+        with psycopg.connect(self.database_url) as connection:
+            connection.execute(
+                """UPDATE document_versions SET parse_status='parsing', parse_failure_code=NULL
+                   WHERE document_version_id=%s""",
+                (version["document_version_id"],),
+            )
+        parsed = parse_structured_document(str(version["filename"]), content)
+        sections = parsed.sections
         classifier = DocumentClassifier(self.generator)
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             categories = [
@@ -839,6 +831,11 @@ class IndexWorker:
             **dict(version["document_metadata"] or {}),
             **classification_patch,
         }
+        with psycopg.connect(self.database_url) as connection:
+            connection.execute(
+                "UPDATE document_versions SET parse_status='chunking' WHERE document_version_id=%s",
+                (version["document_version_id"],),
+            )
         chunks = split_sections(
             str(version["document_id"]),
             str(version["filename"]),
@@ -851,14 +848,21 @@ class IndexWorker:
                 "source_type": str(version["source_type"]),
                 "created_at": version["document_created_at"].isoformat(),
                 "data_source_acl": dict(version["data_source_acl"] or {}),
+                "parser_name": parsed.parser_name,
+                "parser_version": parsed.parser_version,
+                "chunking_version": target_version,
+                "processing_options": {
+                    "chunk_size": chunk_size,
+                    "chunk_overlap": chunk_overlap,
+                    "preserve_heading_context": True,
+                    "table_rows_per_chunk": 20,
+                },
             },
         )
         embeddings = self.embedder.encode([chunk.text for chunk in chunks])
         if embeddings:
             # 在写入分块之前登记/校验，避免污染后才在检索时发现维度冲突。
-            register_embedding_model(
-                self.database_url, self.embedder.model_name, len(embeddings[0])
-            )
+            register_embedding_model(self.database_url, self.embedder.model_name, len(embeddings[0]))
         now = datetime.now(UTC)
         with psycopg.connect(self.database_url) as connection:
             register_vector(connection)
@@ -874,7 +878,7 @@ class IndexWorker:
                             content, metadata, embedding, created_at)
                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                         (
-                            f"{version['document_version_id']}:{chunk.chunk_index:05d}",
+                            f"{version['document_version_id']}:{hashlib.sha256(target_version.encode()).hexdigest()[:8]}:{chunk.chunk_index:05d}",
                             version["document_version_id"],
                             version["knowledge_base_id"],
                             chunk.chunk_index,
@@ -887,8 +891,20 @@ class IndexWorker:
                 if str(job.get("job_type", "index")) == "rebuild":
                     # 重建只替换同一版本的 chunks，不参与版本状态机，也不移动当前版本指针。
                     connection.execute(
-                        "UPDATE document_versions SET chunking_version = %s WHERE document_version_id = %s",
-                        (target_version, version["document_version_id"]),
+                        """UPDATE document_versions SET chunking_version=%s, parser_name=%s,
+                                  parser_version=%s, processing_options=%s,
+                                  parsed_content_hash=%s, parse_status='ready',
+                                  parse_failure_code=NULL, parsed_tree=%s
+                           WHERE document_version_id=%s""",
+                        (
+                            target_version,
+                            parsed.parser_name,
+                            parsed.parser_version,
+                            Jsonb({"chunk_size": chunk_size, "chunk_overlap": chunk_overlap}),
+                            hashlib.sha256(content).hexdigest(),
+                            Jsonb(parsed.tree_payload()),
+                            version["document_version_id"],
+                        ),
                     )
                 else:
                     connection.execute(
@@ -897,10 +913,22 @@ class IndexWorker:
                         (version["knowledge_base_id"], version["document_id"]),
                     )
                     connection.execute(
-                        """UPDATE document_versions SET status = 'ready', indexed_at = %s,
-                                  failure_reason = NULL, chunking_version = %s
-                           WHERE document_version_id = %s""",
-                        (now, target_version, version["document_version_id"]),
+                        """UPDATE document_versions SET status='ready', indexed_at=%s,
+                                  failure_reason=NULL, chunking_version=%s, parser_name=%s,
+                                  parser_version=%s, processing_options=%s,
+                                  parsed_content_hash=%s, parse_status='ready',
+                                  parse_failure_code=NULL, parsed_tree=%s
+                           WHERE document_version_id=%s""",
+                        (
+                            now,
+                            target_version,
+                            parsed.parser_name,
+                            parsed.parser_version,
+                            Jsonb({"chunk_size": chunk_size, "chunk_overlap": chunk_overlap}),
+                            hashlib.sha256(content).hexdigest(),
+                            Jsonb(parsed.tree_payload()),
+                            version["document_version_id"],
+                        ),
                     )
                     connection.execute(
                         """UPDATE documents SET current_version_id = %s, updated_at = %s
@@ -939,7 +967,14 @@ class IndexWorker:
                 # 重建失败时上一批 chunks 仍然完好，文档必须保持可检索，只由任务记录失败。
                 return
             connection.execute(
-                """UPDATE document_versions SET status = %s, failure_reason = %s
-                   WHERE document_version_id = %s""",
-                ("failed" if terminal else "pending", reason[:1000], job[2]),
+                """UPDATE document_versions SET status=%s, failure_reason=%s,
+                          parse_status=%s, parse_failure_code=%s
+                   WHERE document_version_id=%s""",
+                (
+                    "failed" if terminal else "pending",
+                    reason[:1000],
+                    "failed" if terminal else "pending",
+                    "PARSER_FAILED" if terminal else None,
+                    job[2],
+                ),
             )

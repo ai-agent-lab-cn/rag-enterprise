@@ -62,7 +62,7 @@ export function DocumentPanel({ documents, categories, loading, uploadProgress, 
         type="file"
         multiple
         aria-label="批量上传资料"
-        accept=".md,.txt,.pdf"
+        accept=".md,.txt,.pdf,.html,.htm,.docx,.xlsx,.csv"
         onChange={(event) => { if (event.target.files) void acceptFiles(event.target.files); event.currentTarget.value = ""; }}
       />
 

@@ -46,6 +46,7 @@ def test_migration_files_are_contiguous() -> None:
         "0006_document_metadata.sql",
         "0007_backfill_chunk_governance.sql",
         "0008_document_categories.sql",
+        "0009_structured_parsing.sql",
     ]
 
 
@@ -113,7 +114,7 @@ def test_schema_two_with_existing_data_upgrades_to_schema_three(tmp_path: Path) 
             (now, now),
         )
 
-    assert apply_migrations(database_url) == 8
+    assert apply_migrations(database_url) == 9
     check_schema_version(database_url, 8)
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
@@ -164,7 +165,7 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 8
+    assert apply_migrations(database_url) == 9
     check_schema_version(database_url, 8)
 
     now = "2026-08-22T00:00:00+00:00"

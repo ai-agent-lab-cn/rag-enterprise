@@ -45,6 +45,35 @@ export interface DocumentVersion {
   content_sha256: string; source_file_bytes: number; source_type: string;
   status: "pending" | "indexing" | "ready" | "failed" | "superseded";
   failure_reason: string | null; created_at: string; indexed_at: string | null; is_current: boolean;
+  parser_name: string | null; parser_version: string | null; chunking_version: string | null;
+  processing_options: Record<string, unknown>;
+  parse_status: "pending" | "parsing" | "chunking" | "ready" | "failed";
+  parse_failure_code: string | null; node_count: number; parsed_chunk_count: number;
+}
+
+export interface ParsingLocation {
+  page_number?: number | null; heading_path?: string[]; paragraph_index?: number | null;
+  sheet_name?: string | null; row_start?: number | null; row_end?: number | null;
+  column_start?: number | null; column_end?: number | null; source_url?: string | null;
+}
+
+export interface ParsingNode {
+  node_id: string; node_type: string; text: string; level: number;
+  location: ParsingLocation; children: ParsingNode[];
+}
+
+export interface ParsingChunk {
+  chunk_id: string; chunk_index: number; content: string;
+  metadata: Record<string, unknown> & { node_id?: string; heading_path?: string[]; page?: number; sheet_name?: string; row_start?: number; row_end?: number };
+}
+
+export interface ParsingPreview {
+  document_version_id: string; document_id: string; filename: string; version_number: number;
+  status: DocumentVersion["status"]; parse_status: DocumentVersion["parse_status"];
+  parse_failure_code: string | null; failure_reason: string | null;
+  parser_name: string | null; parser_version: string | null; chunking_version: string | null;
+  processing_options: Record<string, unknown>; is_current: boolean;
+  tree: ParsingNode[]; chunks: ParsingChunk[];
 }
 
 export interface Source {

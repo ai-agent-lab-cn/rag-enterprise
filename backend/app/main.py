@@ -11,6 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .audit import AuditRepository
 from .auth import AuthenticatedSession, AuthRepository, UserRecord
+from .chunking import chunking_version
 from .config import get_settings
 from .database import check_schema_version
 from .demo import seed_demo_document
@@ -66,9 +67,11 @@ from .schemas import (
     MemberCreate,
     MemberUpdate,
     MetricsResponse,
+    ParsingPreviewResponse,
     QueryRequest,
     QueryResponse,
     ReadinessResponse,
+    ReprocessDocumentVersionRequest,
     UserResponse,
 )
 from .security import AbuseProtection, SecurityBoundaryMiddleware, validate_upload, write_private_file
@@ -210,9 +213,7 @@ def create_app() -> FastAPI:
                 settings.required_database_schema_version,
             )
             # 换了向量模型却直接启动，会把新维度写进既有索引，必须尽早失败。
-            await run_in_threadpool(
-                check_embedding_model, settings.database_url, settings.embedding_model
-            )
+            await run_in_threadpool(check_embedding_model, settings.database_url, settings.embedding_model)
         # 服务启动时迁移 V2 原始文件；只移动根目录文件，不扫描其他知识库目录。
         KnowledgeBaseScope(DEFAULT_KNOWLEDGE_BASE_ID, settings.upload_path).migrate_legacy_uploads()
         get_knowledge_bases()
@@ -527,9 +528,7 @@ def create_app() -> FastAPI:
         if name.strip():
             needle = name.strip().casefold()
             records = [item for item in records if needle in item.name.casefold()]
-        responses = [
-            await _knowledge_base_response(item, service, current.user) for item in records
-        ]
+        responses = [await _knowledge_base_response(item, service, current.user) for item in records]
         if status:
             responses = [item for item in responses if item.index_status == status]
         responses.sort(key=lambda item: item.updated_at, reverse=sort == "updated_desc")
@@ -643,9 +642,7 @@ def create_app() -> FastAPI:
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
     ) -> list[CategoryResponse]:
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         if categories is None:
             raise AppError("POSTGRES_REQUIRED", "分类治理需要 PostgreSQL 运行时。", 503)
         rows = await run_in_threadpool(categories.list, knowledge_base_id)
@@ -668,8 +665,11 @@ def create_app() -> FastAPI:
             raise AppError("POSTGRES_REQUIRED", "分类治理需要 PostgreSQL 运行时。", 503)
         try:
             row = await run_in_threadpool(
-                categories.create, knowledge_base_id, payload.name,
-                payload.description, payload.sort_order,
+                categories.create,
+                knowledge_base_id,
+                payload.name,
+                payload.description,
+                payload.sort_order,
             )
         except ValueError as exc:
             raise AppError("CATEGORY_NAME_CONFLICT", "分类名称已存在。", 409) from exc
@@ -693,8 +693,13 @@ def create_app() -> FastAPI:
             raise AppError("POSTGRES_REQUIRED", "分类治理需要 PostgreSQL 运行时。", 503)
         try:
             row = await run_in_threadpool(
-                categories.update, knowledge_base_id, category_id, payload.name,
-                payload.description, payload.sort_order, payload.active,
+                categories.update,
+                knowledge_base_id,
+                category_id,
+                payload.name,
+                payload.description,
+                payload.sort_order,
+                payload.active,
             )
         except PermissionError as exc:
             raise AppError("SYSTEM_CATEGORY_PROTECTED", "系统分类不可重命名或停用。", 409) from exc
@@ -705,9 +710,7 @@ def create_app() -> FastAPI:
         await _record_audit(audit, "category.update", current.user, "category", category_id)
         return CategoryResponse(**row)
 
-    @app.delete(
-        "/api/knowledge-bases/{knowledge_base_id}/categories/{category_id}", status_code=204
-    )
+    @app.delete("/api/knowledge-bases/{knowledge_base_id}/categories/{category_id}", status_code=204)
     async def delete_category(
         knowledge_base_id: str,
         category_id: str,
@@ -724,7 +727,9 @@ def create_app() -> FastAPI:
             raise AppError("SYSTEM_CATEGORY_PROTECTED", "系统分类不可删除。", 409) from exc
         except ValueError as exc:
             raise AppError(
-                "CATEGORY_IN_USE", "分类仍被资料引用，请先批量迁移资料。", 409,
+                "CATEGORY_IN_USE",
+                "分类仍被资料引用，请先批量迁移资料。",
+                409,
                 {"document_count": int(str(exc))},
             ) from exc
         if not deleted:
@@ -751,8 +756,12 @@ def create_app() -> FastAPI:
         if updated is None:
             raise AppError("CATEGORY_NOT_FOUND", "分类不存在或已停用。", 404)
         await _record_audit(
-            audit, "document.category.batch_update", current.user, "knowledge_base",
-            knowledge_base_id, metadata={"updated": updated},
+            audit,
+            "document.category.batch_update",
+            current.user,
+            "knowledge_base",
+            knowledge_base_id,
+            metadata={"updated": updated},
         )
         return {"updated": updated}
 
@@ -778,9 +787,7 @@ def create_app() -> FastAPI:
             raise AppError("CATEGORY_NOT_FOUND", "分类不存在或已停用。", 404)
         if updated == 0:
             raise AppError("DOCUMENT_NOT_FOUND", "未找到该文档。", 404)
-        await _record_audit(
-            audit, "document.classification.confirm", current.user, "document", document_id
-        )
+        await _record_audit(audit, "document.classification.confirm", current.user, "document", document_id)
         return {"updated": updated}
 
     @app.get(
@@ -976,9 +983,7 @@ def create_app() -> FastAPI:
         audit: AuditRepositoryDependency,
     ) -> DocumentInfo:
         _require_admin(current.user)
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         updated = await run_in_threadpool(
             service.update_document_metadata,
             document_id,
@@ -1013,9 +1018,7 @@ def create_app() -> FastAPI:
         audit: AuditRepositoryDependency,
     ) -> AclPolicyResponse:
         _require_admin(current.user)
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         version = await run_in_threadpool(
             service.update_document_acl,
             document_id,
@@ -1084,13 +1087,83 @@ def create_app() -> FastAPI:
         offset: PageOffset = 0,
         limit: PageLimit = 100,
     ) -> list[DocumentVersionResponse]:
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         if sources is None:
             return []
         rows = await run_in_threadpool(sources.list_document_versions, knowledge_base_id)
         return [DocumentVersionResponse(**row) for row in _page(rows, offset, limit)]
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/document-versions/{document_version_id}/parsing",
+        response_model=ParsingPreviewResponse,
+    )
+    async def get_document_parsing_preview(
+        knowledge_base_id: str,
+        document_version_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> ParsingPreviewResponse:
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "解析与切片预览需要 PostgreSQL 运行时。", 503)
+        row = await run_in_threadpool(
+            sources.get_parsing_preview,
+            knowledge_base_id,
+            document_version_id,
+            current.user.user_id,
+        )
+        if row is None:
+            raise AppError(
+                "PARSING_PREVIEW_NOT_FOUND",
+                "未找到解析结果，或当前用户没有查看权限。",
+                404,
+            )
+        return ParsingPreviewResponse(**row)
+
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/document-versions/{document_version_id}/reprocess",
+        response_model=dict[str, str],
+        status_code=202,
+    )
+    async def reprocess_document_version(
+        knowledge_base_id: str,
+        document_version_id: str,
+        payload: ReprocessDocumentVersionRequest,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> dict[str, str]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "重新处理需要 PostgreSQL 运行时。", 503)
+        try:
+            batch_id = await run_in_threadpool(
+                sources.reprocess_version,
+                knowledge_base_id,
+                document_version_id,
+                chunking_version(payload.chunk_size, payload.chunk_overlap),
+                settings.index_job_max_attempts,
+            )
+        except Exception as exc:
+            if "index_jobs_one_active_version_idx" in str(exc):
+                raise AppError("INDEX_JOB_ACTIVE", "该版本正在处理。", 409) from exc
+            raise
+        if batch_id is None:
+            raise AppError("DOCUMENT_VERSION_NOT_FOUND", "未找到该文档版本。", 404)
+        await _record_audit(
+            audit,
+            "document.version.reprocess",
+            current.user,
+            "document_version",
+            document_version_id,
+            metadata={"knowledge_base_id": knowledge_base_id, "batch_id": batch_id},
+        )
+        return {"batch_id": batch_id}
 
     @app.get("/api/evaluations", response_model=list[EvaluationReportSummary])
     async def list_evaluations(
@@ -1264,9 +1337,7 @@ def create_app() -> FastAPI:
         offset: PageOffset = 0,
         limit: PageLimit = 50,
     ) -> list[BadCaseResponse]:
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         if created_from and created_to and created_from > created_to:
             raise AppError("INVALID_TIME_RANGE", "created_from 不能晚于 created_to。")
         items = await run_in_threadpool(
@@ -1444,9 +1515,11 @@ async def _knowledge_base_response(
         record.knowledge_base_id,
         get_settings().upload_path,
     ).upload_path
-    source_file_bytes = sum(
-        item.stat().st_size for item in upload_path.iterdir() if item.is_file()
-    ) if upload_path.exists() else 0
+    source_file_bytes = (
+        sum(item.stat().st_size for item in upload_path.iterdir() if item.is_file())
+        if upload_path.exists()
+        else 0
+    )
     allowed_actions = ["detail"]
     if user.role == "admin":
         allowed_actions.append("edit")
@@ -1653,12 +1726,8 @@ async def _execute_recorded_query(
         model_metadata=result.model_metadata,
         prompt_version=result.prompt_version,
         prompt_hash=result.prompt_hash,
-        query_metadata=(
-            result.query_metadata.model_dump(mode="json") if result.query_metadata else None
-        ),
-        bad_case_category=(
-            f"answer_{result.answer_status}" if record_status == "failed" else None
-        ),
+        query_metadata=(result.query_metadata.model_dump(mode="json") if result.query_metadata else None),
+        bad_case_category=(f"answer_{result.answer_status}" if record_status == "failed" else None),
         error_code=result.error_code,
         error_message=result.error_message,
     )

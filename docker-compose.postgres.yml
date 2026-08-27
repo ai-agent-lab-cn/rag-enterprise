@@ -30,7 +30,7 @@ services:
   backend:
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rag_enterprise}"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "8"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "9"
       OMP_NUM_THREADS: "${OMP_NUM_THREADS:-1}"
       MKL_NUM_THREADS: "${MKL_NUM_THREADS:-1}"
       OPENBLAS_NUM_THREADS: "${OPENBLAS_NUM_THREADS:-1}"
@@ -47,7 +47,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rag_enterprise}"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "8"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "9"
       EMBEDDING_MODEL: "${EMBEDDING_MODEL:-shibing624/text2vec-base-chinese}"
       INDEX_WORKER_ID: "${INDEX_WORKER_ID:-worker-compose}"
       OMP_NUM_THREADS: "${OMP_NUM_THREADS:-1}"

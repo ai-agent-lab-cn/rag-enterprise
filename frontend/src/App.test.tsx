@@ -60,6 +60,15 @@ const category = {
   description: "安全资料", sort_order: 100, active: true, is_system: false,
   document_count: 1, created_at: "2026-08-12T00:00:00Z", updated_at: "2026-08-12T00:00:00Z",
 };
+const documentVersion = {
+  document_version_id: "ver_1", document_id: "doc_1", filename: "profile.md",
+  version_number: 1, content_sha256: "a".repeat(64), source_file_bytes: 2048,
+  source_type: "file", status: "ready", failure_reason: null,
+  created_at: "2026-08-12T00:00:00Z", indexed_at: "2026-08-12T00:01:00Z", is_current: true,
+  parser_name: "text", parser_version: "2.0", chunking_version: "v1-700-100",
+  processing_options: { chunk_size: 700, chunk_overlap: 100 }, parse_status: "ready",
+  parse_failure_code: null, node_count: 1, parsed_chunk_count: 1,
+};
 const answerSummary = {
   report_id: "answer-official",
   dataset_id: "answers",
@@ -189,7 +198,8 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
     return Promise.resolve(json({ ...document, status: "pending" }, 201));
   if (url === "/api/knowledge-bases/kb_default/documents") return Promise.resolve(json([document]));
   if (url === "/api/knowledge-bases/kb_default/categories") return Promise.resolve(json([category]));
-  if (url === "/api/knowledge-bases/kb_default/document-versions?offset=0&limit=100") return Promise.resolve(json([]));
+  if (url === "/api/knowledge-bases/kb_default/document-versions?offset=0&limit=100") return Promise.resolve(json([documentVersion]));
+  if (url === "/api/knowledge-bases/kb_default/document-versions/ver_1/parsing") return Promise.resolve(json({ ...documentVersion, tree: [{ node_id: "node_00000", node_type: "heading", text: "安全规范", level: 1, location: { heading_path: ["安全规范"], paragraph_index: 0 }, children: [] }], chunks: [{ chunk_id: "chunk_1", chunk_index: 0, content: "ACL 必须在召回前过滤。", metadata: { node_id: "node_00000", heading_path: ["安全规范"], paragraph: 0 } }] }));
   if (url === "/api/knowledge-bases/kb_default/conversations") return Promise.resolve(json([]));
   if (url === "/api/evaluations/answers/reports") return Promise.resolve(json([answerSummary]));
   if (url === "/api/knowledge-bases/kb_default/query" && init?.method === "POST")
@@ -329,6 +339,9 @@ test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
   await userEvent.click(screen.getByRole("tab", { name: /版本治理/ }));
   expect(screen.getByRole("tab", { name: /版本治理/ })).toHaveAttribute("aria-selected", "true");
   expect(screen.queryByRole("heading", { name: "文档与版本" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("tab", { name: /解析与切片/ }));
+  expect(await screen.findByRole("heading", { name: "文档结构" })).toBeInTheDocument();
+  expect(screen.getAllByText("ACL 必须在召回前过滤。").length).toBeGreaterThan(0);
   await userEvent.click(screen.getByRole("tab", { name: /权限边界/ }));
   expect(screen.getByRole("tab", { name: /权限边界/ })).toHaveAttribute("aria-selected", "true");
   expect(screen.queryByRole("heading", { name: "权限边界" })).not.toBeInTheDocument();

@@ -163,7 +163,12 @@ class PostgresDataSourceRepository:
                 """SELECT v.document_version_id, v.document_id, d.filename,
                           v.version_number, v.content_sha256, v.source_file_bytes,
                           s.source_type, v.status, v.failure_reason, v.created_at,
-                          v.indexed_at,
+                          v.indexed_at, v.parser_name, v.parser_version,
+                          v.chunking_version, v.processing_options, v.parse_status,
+                          v.parse_failure_code,
+                          jsonb_array_length(v.parsed_tree) AS node_count,
+                          (SELECT count(*) FROM chunks c
+                           WHERE c.document_version_id=v.document_version_id) AS parsed_chunk_count,
                           COALESCE(d.current_version_id = v.document_version_id, false) AS is_current
                    FROM document_versions v
                    JOIN documents d USING (knowledge_base_id, document_id)
@@ -173,6 +178,87 @@ class PostgresDataSourceRepository:
                 (knowledge_base_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_parsing_preview(
+        self, knowledge_base_id: str, document_version_id: str, user_id: str
+    ) -> dict[str, object] | None:
+        validate_knowledge_base_id(knowledge_base_id)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            version = connection.execute(
+                """SELECT v.document_version_id, v.document_id, d.filename,
+                          v.version_number, v.status, v.parse_status, v.parse_failure_code,
+                          v.failure_reason, v.parser_name, v.parser_version,
+                          v.chunking_version, v.processing_options, v.parsed_tree,
+                          COALESCE(d.current_version_id=v.document_version_id, false) AS is_current
+                   FROM document_versions v
+                   JOIN documents d USING (knowledge_base_id, document_id)
+                   JOIN data_sources s USING (data_source_id)
+                   WHERE v.knowledge_base_id=%s AND v.document_version_id=%s
+                     AND NOT (COALESCE(d.metadata->'deny_user_ids', '[]'::jsonb) ? %s)
+                     AND (jsonb_array_length(COALESCE(d.metadata->'allow_user_ids', '[]'::jsonb))=0
+                          OR COALESCE(d.metadata->'allow_user_ids', '[]'::jsonb) ? %s)
+                     AND NOT (COALESCE(s.acl->'deny_user_ids', '[]'::jsonb) ? %s)
+                     AND (jsonb_array_length(COALESCE(s.acl->'allow_user_ids', '[]'::jsonb))=0
+                          OR COALESCE(s.acl->'allow_user_ids', '[]'::jsonb) ? %s)""",
+                (knowledge_base_id, document_version_id, user_id, user_id, user_id, user_id),
+            ).fetchone()
+            if version is None:
+                return None
+            chunks = connection.execute(
+                """SELECT chunk_id, chunk_index, content, metadata
+                   FROM chunks WHERE knowledge_base_id=%s AND document_version_id=%s
+                   ORDER BY chunk_index""",
+                (knowledge_base_id, document_version_id),
+            ).fetchall()
+        return {
+            **dict(version),
+            "tree": list(version["parsed_tree"] or []),
+            "chunks": [dict(row) for row in chunks],
+        }
+
+    def reprocess_version(
+        self,
+        knowledge_base_id: str,
+        document_version_id: str,
+        target_chunking_version: str,
+        max_attempts: int,
+    ) -> str | None:
+        validate_knowledge_base_id(knowledge_base_id)
+        batch_id = f"rbd_{uuid4().hex[:16]}"
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            with connection.transaction():
+                version = connection.execute(
+                    """SELECT d.data_source_id FROM document_versions v
+                       JOIN documents d USING (knowledge_base_id, document_id)
+                       WHERE v.knowledge_base_id=%s AND v.document_version_id=%s""",
+                    (knowledge_base_id, document_version_id),
+                ).fetchone()
+                if version is None:
+                    return None
+                connection.execute(
+                    """INSERT INTO index_jobs
+                       (index_job_id, knowledge_base_id, data_source_id, document_version_id,
+                        idempotency_key, status, max_attempts, job_type,
+                        rebuild_batch_id, target_chunking_version)
+                       VALUES (%s, %s, %s, %s, %s, 'queued', %s, 'rebuild', %s, %s)""",
+                    (
+                        f"job_{uuid4().hex[:20]}",
+                        knowledge_base_id,
+                        version["data_source_id"],
+                        document_version_id,
+                        f"reprocess:{document_version_id}:{batch_id}",
+                        max_attempts,
+                        batch_id,
+                        target_chunking_version,
+                    ),
+                )
+                connection.execute(
+                    """UPDATE document_versions SET parse_status='pending',
+                              parse_failure_code=NULL
+                       WHERE document_version_id=%s""",
+                    (document_version_id,),
+                )
+        return batch_id
 
     def set_enabled(self, data_source_id: str, enabled: bool) -> bool:
         with psycopg.connect(self.database_url) as connection:
@@ -222,13 +308,12 @@ class PostgresDataSourceRepository:
                 raise ValueError("data source has documents")
             active = connection.execute(
                 """SELECT EXISTS (SELECT 1 FROM index_jobs WHERE data_source_id=%s
-                   AND status IN ('queued','running'))""", (data_source_id,)
+                   AND status IN ('queued','running'))""",
+                (data_source_id,),
             ).fetchone()[0]
             if active:
                 raise ValueError("data source has active jobs")
-            result = connection.execute(
-                "DELETE FROM data_sources WHERE data_source_id=%s", (data_source_id,)
-            )
+            result = connection.execute("DELETE FROM data_sources WHERE data_source_id=%s", (data_source_id,))
         return result.rowcount > 0
 
 
@@ -263,8 +348,12 @@ class PostgresCategoryRepository:
                         description, sort_order)
                        VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
                     (
-                        f"cat_{uuid4().hex[:16]}", knowledge_base_id, name,
-                        name.casefold(), description, sort_order,
+                        f"cat_{uuid4().hex[:16]}",
+                        knowledge_base_id,
+                        name,
+                        name.casefold(),
+                        description,
+                        sort_order,
                     ),
                 ).fetchone()
         except errors.UniqueViolation as exc:
@@ -272,8 +361,13 @@ class PostgresCategoryRepository:
         return {**dict(row), "document_count": 0}
 
     def update(
-        self, knowledge_base_id: str, category_id: str, name: str,
-        description: str, sort_order: int, active: bool,
+        self,
+        knowledge_base_id: str,
+        category_id: str,
+        name: str,
+        description: str,
+        sort_order: int,
+        active: bool,
     ) -> dict[str, object] | None:
         validate_knowledge_base_id(knowledge_base_id)
         try:
@@ -294,8 +388,15 @@ class PostgresCategoryRepository:
                         """UPDATE document_categories SET name=%s, normalized_name=%s,
                                   description=%s, sort_order=%s, active=%s, updated_at=now()
                            WHERE knowledge_base_id=%s AND category_id=%s RETURNING *""",
-                        (name, name.casefold(), description, sort_order, active,
-                         knowledge_base_id, category_id),
+                        (
+                            name,
+                            name.casefold(),
+                            description,
+                            sort_order,
+                            active,
+                            knowledge_base_id,
+                            category_id,
+                        ),
                     ).fetchone()
                     if name != current["name"]:
                         patch = Jsonb({"category": name})
@@ -337,14 +438,10 @@ class PostgresCategoryRepository:
             ).fetchone()[0]
             if count:
                 raise ValueError(str(count))
-            connection.execute(
-                "DELETE FROM document_categories WHERE category_id=%s", (category_id,)
-            )
+            connection.execute("DELETE FROM document_categories WHERE category_id=%s", (category_id,))
         return True
 
-    def assign(
-        self, knowledge_base_id: str, document_ids: list[str], category_id: str
-    ) -> int | None:
+    def assign(self, knowledge_base_id: str, document_ids: list[str], category_id: str) -> int | None:
         validate_knowledge_base_id(knowledge_base_id)
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             with connection.transaction():
@@ -377,6 +474,7 @@ class PostgresCategoryRepository:
                     (Jsonb(patch), knowledge_base_id, document_ids),
                 )
         return updated
+
 
 class PostgresAuthRepository:
     def __init__(self, database_url: str, session_ttl_hours: int = 12):

@@ -99,9 +99,9 @@ class DocumentInfo(BaseModel):
     acl_version: int = 1
     allow_user_ids: list[str] = Field(default_factory=list)
     deny_user_ids: list[str] = Field(default_factory=list)
-    classification_status: Literal[
-        "pending", "auto_assigned", "review_required", "manual", "failed"
-    ] = "pending"
+    classification_status: Literal["pending", "auto_assigned", "review_required", "manual", "failed"] = (
+        "pending"
+    )
     classification_confidence: float | None = Field(default=None, ge=0, le=1)
     suggested_category_id: str | None = None
     classification_model: str | None = None
@@ -252,6 +252,44 @@ class DocumentVersionResponse(BaseModel):
     created_at: datetime
     indexed_at: datetime | None
     is_current: bool
+    parser_name: str | None = None
+    parser_version: str | None = None
+    chunking_version: str | None = None
+    processing_options: dict[str, object] = Field(default_factory=dict)
+    parse_status: Literal["pending", "parsing", "chunking", "ready", "failed"] = "pending"
+    parse_failure_code: str | None = None
+    node_count: int = 0
+    parsed_chunk_count: int = 0
+
+
+class ParsingPreviewResponse(BaseModel):
+    document_version_id: str
+    document_id: str
+    filename: str
+    version_number: int
+    status: Literal["pending", "indexing", "ready", "failed", "superseded"]
+    parse_status: Literal["pending", "parsing", "chunking", "ready", "failed"]
+    parse_failure_code: str | None
+    failure_reason: str | None
+    parser_name: str | None
+    parser_version: str | None
+    chunking_version: str | None
+    processing_options: dict[str, object]
+    is_current: bool
+    tree: list[dict[str, object]]
+    chunks: list[dict[str, object]]
+
+
+class ReprocessDocumentVersionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    chunk_size: int = Field(default=700, ge=100, le=4000)
+    chunk_overlap: int = Field(default=100, ge=0, le=1000)
+
+    @model_validator(mode="after")
+    def validate_overlap(self) -> "ReprocessDocumentVersionRequest":
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap 必须小于 chunk_size")
+        return self
 
 
 class KnowledgeBaseCreate(BaseModel):

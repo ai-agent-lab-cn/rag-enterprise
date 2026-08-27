@@ -27,9 +27,7 @@ def parse_chunking_version(value: str) -> tuple[str, int, int]:
         raise ValueError(f"chunking version is invalid: {value}")
     algorithm, chunk_size, chunk_overlap = match.group(1), int(match.group(2)), int(match.group(3))
     if algorithm != CHUNKING_ALGORITHM_VERSION:
-        raise ValueError(
-            f"chunking algorithm {algorithm} is not supported by {CHUNKING_ALGORITHM_VERSION}"
-        )
+        raise ValueError(f"chunking algorithm {algorithm} is not supported by {CHUNKING_ALGORITHM_VERSION}")
     if chunk_overlap >= chunk_size:
         raise ValueError(f"chunking version is invalid: {value}")
     return algorithm, chunk_size, chunk_overlap
@@ -49,6 +47,12 @@ class Chunk:
     char_count: int
     summary: str
     governance_metadata: dict[str, Any] = field(default_factory=dict)
+    node_id: str = ""
+    node_type: str = "paragraph"
+    heading_path: tuple[str, ...] = ()
+    sheet_name: str | None = None
+    row_start: int | None = None
+    row_end: int | None = None
 
     def metadata(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -59,9 +63,17 @@ class Chunk:
             "chunk_index": self.chunk_index,
             "char_count": self.char_count,
             "summary": self.summary,
+            "node_id": self.node_id,
+            "node_type": self.node_type,
+            "heading_path": list(self.heading_path),
         }
         if self.page is not None:
             data["page"] = self.page
+        if self.sheet_name is not None:
+            data["sheet_name"] = self.sheet_name
+        if self.row_start is not None:
+            data["row_start"] = self.row_start
+            data["row_end"] = self.row_end
         return {**data, **self.governance_metadata}
 
 
@@ -111,6 +123,12 @@ def split_sections(
                         char_count=len(text),
                         summary=text[:80].replace("\n", " "),
                         governance_metadata=dict(governance_metadata or {}),
+                        node_id=section.node_id,
+                        node_type=section.node_type,
+                        heading_path=section.heading_path,
+                        sheet_name=section.sheet_name,
+                        row_start=section.row_start,
+                        row_end=section.row_end,
                     )
                 )
             if start + chunk_size >= len(section.text):
