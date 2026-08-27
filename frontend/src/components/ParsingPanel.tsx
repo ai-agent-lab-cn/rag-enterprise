@@ -44,6 +44,6 @@ export function ParsingPanel({ knowledgeBaseId, versions, canManage, onRefresh }
       <div className="structure-tree"><h3>文档结构</h3>{preview.tree.map((node) => <button type="button" className={selectedNode === node.node_id ? "is-active" : ""} style={{ paddingLeft: `${10 + node.level * 10}px` }} key={node.node_id} onClick={() => { setSelectedNode(node.node_id); const first = preview.chunks.find((item) => item.metadata.node_id === node.node_id); setSelectedChunk(first?.chunk_id || ""); }}><span>{node.node_type}</span><strong>{node.text}</strong></button>)}</div>
       <div className="source-preview"><h3>原文预览</h3>{activeChunk ? <><small>{locationLabel(activeChunk)}</small><p>{activeChunk.content}</p></> : <p className="empty-copy">该结构节点没有独立 Chunk。</p>}</div>
       <div className="chunk-preview"><h3>Chunk <span>{visibleChunks.length}</span></h3>{visibleChunks.map((chunk) => <button type="button" className={activeChunk?.chunk_id === chunk.chunk_id ? "is-active" : ""} key={chunk.chunk_id} onClick={() => setSelectedChunk(chunk.chunk_id)}><strong>#{chunk.chunk_index + 1}</strong><small>{locationLabel(chunk)}</small><span>{chunk.content}</span></button>)}</div>
-    </div> : preview?.parse_status === "ready" ? null : !loading && preview ? <p className="empty-copy">解析完成后可查看结构树、原文和 Chunk。</p> : null}
+    </div> : !loading && preview ? <p className="empty-copy">解析完成后可查看结构树、原文和 Chunk。</p> : null}
   </section>;
 }
