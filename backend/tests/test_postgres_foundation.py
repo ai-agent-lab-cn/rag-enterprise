@@ -115,7 +115,7 @@ def test_schema_two_with_existing_data_upgrades_to_schema_three(tmp_path: Path) 
         )
 
     assert apply_migrations(database_url) == 9
-    check_schema_version(database_url, 8)
+    check_schema_version(database_url, 9)
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
             "SELECT status, chunking_version FROM document_versions WHERE document_version_id = 'ver_legacy'"
@@ -166,7 +166,7 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
     assert apply_migrations(database_url) == 9
-    check_schema_version(database_url, 8)
+    check_schema_version(database_url, 9)
 
     now = "2026-08-22T00:00:00+00:00"
     auth = tmp_path / "auth/store.json"
