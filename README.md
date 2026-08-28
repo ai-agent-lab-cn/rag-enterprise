@@ -44,7 +44,12 @@ MD / TXT / PDF
 
 ## 快速开始
 
-环境要求：Python 3.12+、[uv](https://docs.astral.sh/uv/)、Node.js 20+。
+环境要求：Python 3.12+、[uv](https://docs.astral.sh/uv/)、Node.js `^20.19.0` 或 `>=22.12.0`。
+
+Node 版本下限由 `rolldown` 的 `engines` 决定。低于该下限时 npm 会**静默跳过**它的平台
+原生 binding（optional dependency），`npm test` 与 `npm run build` 随即报
+`Cannot find native binding`，且退出码仍是 0。删除 `package-lock.json` 重装无效——
+锁文件里 15 个平台 binding 条目一直都在，被跳过的原因只是 engine 不匹配。
 
 ```bash
 git clone https://github.com/rongrongzang/rag_d.git
@@ -134,6 +139,7 @@ docker compose down
 | `GET/POST` | `/api/knowledge-bases/{id}/documents` | 列出或上传指定知识库的文档 |
 | `DELETE` | `/api/knowledge-bases/{id}/documents/{document_id}` | 删除指定知识库的文档 |
 | `POST` | `/api/knowledge-bases/{id}/query` | 只检索指定知识库并生成答案 |
+| `GET` | `/api/knowledge-bases/{id}/index-versions` | 管理员查看索引版本、状态与放行报告；切换只提供 CLI 入口 |
 | `GET` | `/api/knowledge-bases/{id}/conversations` | 获取指定知识库的会话历史 |
 | `GET` | `/api/knowledge-bases/{id}/conversations/{conversation_id}` | 获取会话及回答记录 |
 | `DELETE` | `/api/knowledge-bases/{id}/conversations/{conversation_id}` | 删除会话及其回答记录 |
@@ -224,6 +230,27 @@ Recall@5 `0.70`、向量 MRR `0.55`、精排 MRR `0.65`，不按实测结果倒�
 被测代码和冻结语料。未通过门槛的报告会保留为 `official: false`，不会进入只读评测 API。
 1.0.0 数据集与其正式报告保持不变，继续守护融合排序策略的回归。
 
+Schema V10（commit `a588a39`）下的实测结果，145 个标注问题，两份报告分别对应默认切分
+与更细切分，运行上下文见 `backend/evaluation/reports/corpus_v2_baseline.json` 与
+`corpus_v2_optimized.json`：
+
+| 指标 | 700/100（默认） | 160/20 | 冻结阈值 |
+| --- | ---: | ---: | ---: |
+| Recall@5（召回阶段） | 0.6862 ❌ | **0.7276** ✅ | 0.70 |
+| 向量 MRR | 0.5505 ✅ | 0.5733 ✅ | 0.55 |
+| 精排 MRR | 0.7695 ✅ | 0.7721 ✅ | 0.65 |
+| 精排后 Recall@5（用户实际看到的来源） | 0.8069 ✅ | 0.8241 ✅ | 0.70 |
+| 分块数 | 232 | 286 | — |
+
+**默认切分配置过不了自己的质量门，更细的切分能过。** 700/100 的召回阶段 0.6862 差
+`0.0138` 达标，报告保留为 `official: false`；把 chunk_size 降到 160、overlap 降到 20 后
+召回升到 0.7276（`+0.0414`），四项全部达标，`official: true`。四项指标同向改善，不是
+以某一项换另一项。阈值不按实测结果倒推，不下调。
+
+这与「解析切分的实测收益」一节的结论一致：段落划分决定检索上限，而那节用的是改写集，
+这里用原始集在**绝对阈值**上复现了同一方向。默认配置未随之调整——`chunk_size` 的默认值
+影响所有既有部署，属于需要单独评估的变更。
+
 `--chunk-size` 与 `--chunk-overlap` 可覆盖切分配置，用于对比不同切分策略的实际收益。
 schema 版本以 `REQUIRED_DATABASE_SCHEMA_VERSION` 为准。
 
@@ -289,6 +316,76 @@ uv run python -m backend.evaluation.diagnose_retrieval \
 **失败的尝试**：给每个段落注入所属小节标题，实测有害（召回 Recall@5 从 `0.5345`
 跌到 `0.4586`）——同一小节下的段落因共享标题前缀而向量趋同，区分度被破坏。原因
 记录在 `parsers.py` 的注释里，避免重复试错。
+
+### 索引版本切换与回滚
+
+换切分参数会改变检索质量，但改差了必须能退回去。索引版本让新旧两套分块在库中并存：
+重建写入一个未放行的 `building` 版本，用户检索完全看不到；验收通过后原子切换读指针，
+回滚就是把指针切回上一个版本。
+
+完整流程：
+
+```bash
+# 1. 发起重建，得到 index_version_id 与 batch_id
+uv run python -m scripts.rebuild_index start \
+  --knowledge-base kb_default --chunk-size 160 --chunk-overlap 20
+
+# 2. 跑 Worker 处理重建任务，再查状态（status 会把跑完的批次推进到 ready）
+uv run python -m scripts.index_worker
+uv run python -m scripts.switch_index status --batch "$BATCH_ID"
+
+# 3. 在隔离评测库上用同一套配置生成放行报告，并以当前 active 版本的报告作基线
+uv run python -m backend.evaluation.run_corpus_baseline \
+  --dataset backend/evaluation/datasets/corpus_v2.json \
+  --database-url "$TEST_DATABASE_URL" --commit "$(git rev-parse HEAD)" \
+  --chunk-size 160 --chunk-overlap 20 \
+  --baseline-report backend/evaluation/reports/corpus_v2_baseline.json \
+  --output /tmp/candidate.json
+
+# 4. 切换（校验不通过就拒绝），必要时回滚
+uv run python -m scripts.switch_index switch \
+  --index-version "$INDEX_VERSION_ID" --report /tmp/candidate.json
+uv run python -m scripts.switch_index rollback --knowledge-base kb_default
+
+# 5. 确认不再需要旧版本后显式清理
+uv run python -m scripts.switch_index retire --index-version "$OLD_INDEX_VERSION_ID"
+```
+
+切换的三道校验，任一不通过即拒绝：目标版本状态为 `ready`、三项指标**未相对基线回退**、
+**报告的配置指纹与索引版本逐位相同**。
+
+质量门是**相对比较**，不要求达到冻结的绝对阈值。两者回答不同问题：绝对阈值（Recall@5
+`0.70` 等）回答"这套系统能否上线"，切换要回答的是"这次换配置是变好还是变坏"。回退判定
+沿用 `assess_metric` 既有的 `baseline` 与 `max_regression`（默认 0.02）语义，不另造规则——
+生成报告时用 `--baseline-report` 指向当前 active 版本的报告即可。绝对阈值结论仍会如实
+返回在 `meets_frozen_thresholds` 字段里，切到未达标的索引时操作者看得到。
+
+配置指纹是这里真正的牙齿：报告里的任何布尔字段都可以被伪造，指纹不行——它必须由被测
+配置本身算出来，因此能挡住"用 A 配置跑出的合格报告去放行 B 配置的索引"。
+
+不再检查 `official`：它在 `run_corpus_baseline` 里就等于 `passed`，检查它等于又查一遍
+绝对阈值。
+
+**质量门的口径边界**：它验证的是"该配置在冻结语料上不回退"，不代表验证了生产数据的
+检索质量——生产语料没有段落标注，算不出 Recall。评测入口本身要求隔离空库，本就不能
+在生产库上运行。
+
+已知限制：
+
+- 配置指纹不含各格式的 parser 版本，只含全局 `PARSER_SCHEMA_VERSION`。per-format 版本
+  由文档格式决定（Markdown 与 PDF 是 `2.0`，DOCX 与 CSV 是 `1.0`），评测语料的格式组合
+  与生产知识库必然不同，纳入会让指纹永远匹配不上。
+- 不支持跨维度 embedding 模型的并存回滚。`chunks.embedding` 固定维度才能建 pgvector
+  索引（无维度列会报 `column does not have dimensions`），固定后装不下两种维度。
+- `previous` 版本不会自动过期，一直保留到显式 `retire`；`retired` 状态只表示"可以删除"，
+  不代表数据已删。
+- **回滚只有一次机会**。回滚会把原 active 降为 `ready` 而不是 `previous`，因此回滚后不再
+  存在可回滚目标；要再切回去必须重新走一次质量门（该版本的 `ready` 状态仍在，重新提供
+  合格报告即可 `switch`）。这样设计是为了不出现两个 `previous` 而破坏唯一约束。
+- `retire` 的删分块与删部分索引不在同一事务（DDL 需要 autocommit）。进程在两步之间中断
+  会留下一个 0 行的部分索引，重跑 `retire` 即可清掉。
+- Schema V10 迁移在单事务内对存量分块建 HNSW 索引，会锁表，不能用 `CONCURRENTLY`。
+- 切换与回滚只有 CLI 入口，只读列表有 API；前端不提供切换按钮。
 
 ### V3 回答质量工具链
 

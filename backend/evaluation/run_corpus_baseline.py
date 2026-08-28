@@ -16,8 +16,10 @@ from uuid import uuid4
 
 import psycopg
 
+from backend.app.chunking import chunking_version
 from backend.app.config import get_settings
 from backend.app.database import check_schema_version
+from backend.app.index_versions import config_fingerprint
 from backend.app.models import get_embedding_model, get_reranker
 from backend.app.postgres_documents import IndexWorker, PostgresAsyncRAGService
 from backend.app.ranking import VECTOR_SCORE_WEIGHT, rank_candidates
@@ -72,6 +74,14 @@ def run_corpus_baseline(
     _require_empty_evaluation_database(database_url)
     embedder = embedder or get_embedding_model()
     reranker = reranker or get_reranker()
+    # 口径必须与 IndexWorker 写入索引版本的那份逐字一致（postgres_documents.py 中
+    # active_or_bootstrap_version 的调用处），否则切换放行时的指纹比对永远不成立。
+    fingerprint = config_fingerprint(
+        chunking_version(chunk_size, chunk_overlap),
+        embedder.model_name,
+        len(embedder.encode(["维度探测"])[0]),
+        {"chunk_size": chunk_size, "chunk_overlap": chunk_overlap},
+    )
     knowledge_base_id = f"kb_eval_{uuid4().hex[:20]}"
 
     with TemporaryDirectory(prefix="rag-enterprise-corpus-") as directory:
@@ -183,6 +193,7 @@ def run_corpus_baseline(
             if baseline and baseline.rerank_recall_at_5
             else None,
         ),
+        config_fingerprint=fingerprint,
     )
     return report.model_copy(update={"official": report.passed})
 

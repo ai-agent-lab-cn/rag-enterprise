@@ -289,10 +289,17 @@ class PostgresDataSourceRepository:
                     "UPDATE data_sources SET acl=%s, updated_at=now() WHERE data_source_id=%s",
                     (Jsonb(policy), data_source_id),
                 )
+                # ACL 收紧必须覆盖所有非 retired 索引版本：只刷 active 的话，回滚到
+                # previous 之后旧分块仍带着收紧前的宽松 ACL，检索会返回本应被拒的内容；
+                # building 版本同样要同步，否则它被切为 active 的瞬间 ACL 就是过期的。
+                # retired 与 failed 只等清理，写入无意义。
                 connection.execute(
-                    """UPDATE chunks c SET metadata=c.metadata || %s FROM documents d
+                    """UPDATE chunks c SET metadata=c.metadata || %s
+                       FROM documents d, index_versions iv
                        WHERE d.data_source_id=%s AND c.knowledge_base_id=d.knowledge_base_id
-                         AND c.document_version_id=d.current_version_id""",
+                         AND c.document_version_id=d.current_version_id
+                         AND iv.index_version_id=c.index_version_id
+                         AND iv.status IN ('active', 'previous', 'building')""",
                     (Jsonb({"data_source_acl": policy}), data_source_id),
                 )
         return {"knowledge_base_id": source["knowledge_base_id"], **policy}
@@ -466,11 +473,16 @@ class PostgresCategoryRepository:
                        WHERE knowledge_base_id=%s AND document_id=ANY(%s)""",
                     (Jsonb(patch), knowledge_base_id, document_ids),
                 ).rowcount
+                # 与 ACL 扩散同一条规则：覆盖所有非 retired 索引版本，回滚或切换后分类
+                # 元数据不会退回旧值；retired 与 failed 只等清理，写入无意义。
                 connection.execute(
                     """UPDATE chunks c SET metadata=c.metadata || %s
-                       FROM documents d WHERE d.knowledge_base_id=%s
+                       FROM documents d, index_versions iv
+                       WHERE d.knowledge_base_id=%s
                         AND d.document_id=ANY(%s) AND c.knowledge_base_id=d.knowledge_base_id
-                        AND c.document_version_id=d.current_version_id""",
+                        AND c.document_version_id=d.current_version_id
+                        AND iv.index_version_id=c.index_version_id
+                        AND iv.status IN ('active', 'previous', 'building')""",
                     (Jsonb(patch), knowledge_base_id, document_ids),
                 )
         return updated

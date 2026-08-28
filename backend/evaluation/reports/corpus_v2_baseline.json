@@ -1,0 +1,56 @@
+{
+  "report_id": "corpus-20260827T113429Z",
+  "dataset_id": "rag-enterprise-corpus",
+  "dataset_version": "2.0.0",
+  "commit": "a588a39d255d82458c52fb2ecd83dd118d31e593",
+  "run_at": "2026-08-27T11:34:29.682843Z",
+  "official": false,
+  "models": {
+    "embedding": "shibing624/text2vec-base-chinese@183bb99aa7af74355fb58d16edf8c13ae7c5433e",
+    "reranker": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1@1427fd652930e4ba29e8149678df786c240d8825"
+  },
+  "parameters": {
+    "retrieve_k": 10,
+    "rerank_k": 5,
+    "distance": "cosine",
+    "normalize_embeddings": true,
+    "ranking_strategy": "minmax_weighted_fusion",
+    "vector_score_weight": 0.15,
+    "retrieval_mode": "vector",
+    "chunk_size": 700,
+    "chunk_overlap": 100,
+    "chunk_count": 232,
+    "metric_granularity": "paragraph"
+  },
+  "query_count": 145,
+  "recall_at_5": {
+    "value": 0.6862068965517242,
+    "threshold": 0.7,
+    "baseline": null,
+    "passed": false,
+    "regressed": false
+  },
+  "vector_mrr": {
+    "value": 0.5504652435686919,
+    "threshold": 0.55,
+    "baseline": null,
+    "passed": true,
+    "regressed": false
+  },
+  "rerank_mrr": {
+    "value": 0.7695402298850574,
+    "threshold": 0.65,
+    "baseline": null,
+    "passed": true,
+    "regressed": false
+  },
+  "rerank_recall_at_5": {
+    "value": 0.8068965517241379,
+    "threshold": 0.7,
+    "baseline": null,
+    "passed": true,
+    "regressed": false
+  },
+  "hybrid_mrr": null,
+  "config_fingerprint": "5313dbfbed5cb451419f7cb6dc5892964ef1bbab59d86bfe9df05b3c23a1a6d9"
+}

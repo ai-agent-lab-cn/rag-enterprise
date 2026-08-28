@@ -374,3 +374,10 @@ def test_knowledge_base_with_orphan_original_file_cannot_be_deleted(client) -> N
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "KNOWLEDGE_BASE_NOT_EMPTY"
+
+
+def test_index_versions_are_admin_only_and_readable(client) -> None:
+    response = client.get("/api/knowledge-bases/kb_default/index-versions")
+
+    assert response.status_code == 200
+    assert response.json() == []

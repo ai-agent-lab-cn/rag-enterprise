@@ -183,6 +183,35 @@ def migrate(data_root: Path, database_url: str, collection_name: str) -> dict[st
                     (item["user_id"], item["knowledge_base_id"]),
                 )
 
+            # 每个知识库的历史分块必须归入一条 active 索引版本：读路径按 active 版本过滤，
+            # 不建版本会让迁移后的知识库检索不到任何内容。原始配置已不可知，统一记为 legacy。
+            index_version_ids: dict[str, str] = {}
+            for (knowledge_base_id, _), document_chunks in grouped.items():
+                if knowledge_base_id in index_version_ids:
+                    continue
+                index_version_id = stable_id("iv", knowledge_base_id, "legacy")
+                index_version_ids[knowledge_base_id] = index_version_id
+                connection.execute(
+                    """INSERT INTO index_versions
+                    (index_version_id, knowledge_base_id, status, chunking_version, parser_version,
+                     embedding_model, embedding_dimension, processing_options, config_fingerprint,
+                     evaluation_report_id, activated_at)
+                    VALUES (%s, %s, 'active', 'legacy', 'legacy', 'legacy', %s,
+                            '{"legacy": true}'::jsonb, %s, 'legacy-migration', %s)""",
+                    (
+                        index_version_id,
+                        knowledge_base_id,
+                        len(document_chunks[0]["embedding"]),
+                        hashlib.sha256(f"legacy-migration:{knowledge_base_id}".encode()).hexdigest(),
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """UPDATE knowledge_bases SET active_index_version_id = %s
+                    WHERE knowledge_base_id = %s""",
+                    (index_version_id, knowledge_base_id),
+                )
+
             for (knowledge_base_id, document_id), document_chunks in grouped.items():
                 metadata = document_chunks[0]["metadata"]
                 filename = str(metadata["filename"])
@@ -250,12 +279,13 @@ def migrate(data_root: Path, database_url: str, collection_name: str) -> dict[st
                     chunk_index = int(metadata.get("chunk_index", position))
                     connection.execute(
                         """INSERT INTO chunks
-                        (chunk_id, document_version_id, knowledge_base_id, chunk_index, content,
-                         metadata, embedding, created_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (chunk_id, document_version_id, index_version_id, knowledge_base_id,
+                         chunk_index, content, metadata, embedding, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                         (
                             chunk["chunk_id"],
                             version_id,
+                            index_version_ids[knowledge_base_id],
                             knowledge_base_id,
                             chunk_index,
                             chunk["content"],

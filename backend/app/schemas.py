@@ -543,6 +543,24 @@ class MetricsResponse(BaseModel):
     indexing: dict[str, int | float]
 
 
+class IndexVersionResponse(BaseModel):
+    """索引版本的只读视图。配置指纹一并返回，便于操作者核对放行报告是否对应同一配置。"""
+
+    index_version_id: str
+    status: Literal["building", "ready", "active", "previous", "retired", "failed"]
+    chunking_version: str
+    parser_version: str
+    embedding_model: str
+    embedding_dimension: int
+    processing_options: dict[str, object]
+    config_fingerprint: str
+    evaluation_report_id: str | None
+    rebuild_batch_id: str | None
+    created_at: datetime
+    activated_at: datetime | None
+    retired_at: datetime | None
+
+
 class AuditEventResponse(BaseModel):
     event_id: str
     occurred_at: datetime

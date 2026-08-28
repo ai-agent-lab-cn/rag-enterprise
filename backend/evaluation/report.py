@@ -53,6 +53,9 @@ class RetrievalEvaluationReport(BaseModel):
     # 1.0.0 的历史报告没有这一项，保持可选以免旧报告失效。
     rerank_recall_at_5: EvaluationMetric | None = None
     hybrid_mrr: EvaluationMetric | None = None
+    # 同上，1.0.0 的历史报告没有这一项；但缺该字段的报告不能用于放行索引切换，
+    # 因为无法证明报告跑的是目标索引版本那套配置。
+    config_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
     def validate_models(self) -> "RetrievalEvaluationReport":

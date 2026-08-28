@@ -8,14 +8,16 @@ import psycopg
 import pytest
 from pydantic import ValidationError
 
-from backend.app.chunking import split_sections, stable_document_id
+from backend.app.chunking import chunking_version, split_sections, stable_document_id
 from backend.app.database import apply_migrations
+from backend.app.index_versions import config_fingerprint
 from backend.app.parsers import parse_document
 from backend.evaluation import (
     CorpusEvaluationDataset,
     load_corpus_dataset,
     paragraph_key,
 )
+from backend.evaluation.report import RetrievalEvaluationReport
 from backend.evaluation.run_corpus_baseline import (
     RECALL_AT_5_THRESHOLD,
     RERANK_MRR_THRESHOLD,
@@ -36,6 +38,45 @@ class _FakeEmbedder:
 class _FakeReranker:
     def score(self, query: str, passages: list[str]) -> list[float]:
         return [float(query[:1] in passage) for passage in passages]
+
+
+def _minimal_report_payload() -> dict:
+    """1.0.0 报告的最小字段集，用于验证旧报告不因新增字段而失效。"""
+
+    metric = {"value": 0.8, "threshold": 0.7, "passed": True}
+    return {
+        "report_id": "corpus-20260101T000000Z",
+        "dataset_id": "rag-enterprise-corpus",
+        "dataset_version": "2.0.0",
+        "commit": "a" * 40,
+        "run_at": "2026-01-01T00:00:00Z",
+        "official": False,
+        "models": {"embedding": "test/embedding", "reranker": "test/reranker"},
+        "parameters": {"chunk_size": 700, "chunk_overlap": 100},
+        "query_count": 100,
+        "recall_at_5": metric,
+        "vector_mrr": metric,
+        "rerank_mrr": metric,
+    }
+
+
+def test_report_accepts_optional_config_fingerprint() -> None:
+    payload = {**_minimal_report_payload(), "config_fingerprint": "a" * 64}
+
+    assert RetrievalEvaluationReport(**payload).config_fingerprint == "a" * 64
+
+
+def test_report_rejects_malformed_config_fingerprint() -> None:
+    payload = {**_minimal_report_payload(), "config_fingerprint": "not-a-sha256"}
+
+    with pytest.raises(ValidationError):
+        RetrievalEvaluationReport(**payload)
+
+
+def test_legacy_report_without_fingerprint_still_loads() -> None:
+    """缺该字段的历史报告仍要能反序列化，但不能用于放行索引切换。"""
+
+    assert RetrievalEvaluationReport(**_minimal_report_payload()).config_fingerprint is None
 
 
 def _reset_postgres(database_url: str) -> None:
@@ -102,6 +143,38 @@ def test_corpus_baseline_uses_postgres_pipeline_and_cleans_temporary_data(monkey
     with psycopg.connect(database_url) as connection:
         assert connection.execute("SELECT count(*) FROM knowledge_bases").fetchone()[0] == 0
         assert connection.execute("SELECT count(*) FROM chunks").fetchone()[0] == 0
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_corpus_baseline_records_the_indexed_config_fingerprint(monkeypatch) -> None:
+    """报告指纹必须与索引 Worker 写入索引版本的那份配置逐位相同，否则切换永不放行。"""
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset_postgres(database_url)
+    dataset, contents = load_corpus_dataset(DATASET_PATH)
+    # resolved_model 只影响报告的 models 字段；指纹用的是 embedder.model_name。
+    monkeypatch.setattr(
+        "backend.evaluation.run_corpus_baseline.resolved_model", lambda model: f"{model}@test"
+    )
+    embedder = _FakeEmbedder()
+
+    report = run_corpus_baseline(
+        dataset,
+        contents,
+        "a" * 40,
+        700,
+        100,
+        database_url=database_url,
+        embedder=embedder,
+        reranker=_FakeReranker(),
+    )
+
+    assert report.config_fingerprint == config_fingerprint(
+        chunking_version(700, 100),
+        embedder.model_name,
+        len(embedder.encode(["维度探测"])[0]),
+        {"chunk_size": 700, "chunk_overlap": 100},
+    )
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")

@@ -15,6 +15,13 @@ from .chunking import chunking_version, parse_chunking_version, split_sections
 from .config import Settings
 from .document_classifier import DocumentClassifier
 from .errors import AppError
+from .index_versions import (
+    active_index_version_id,
+    active_or_bootstrap_version,
+    create_building_version,
+    finalize_building_version,
+    list_versions,
+)
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID, validate_knowledge_base_id
 from .lexical import LexicalIndexCache
 from .models import EmbeddingModel, GeminiGenerator, Reranker, get_generator
@@ -36,6 +43,15 @@ class PostgresVectorStore:
         self.database_url = database_url
         self.upload_root = upload_root
 
+    def _active_index_version(self, knowledge_base_id: str) -> str | None:
+        """当前生效的索引版本；读路径全部以它为界，未放行的版本对用户不存在。
+
+        返回 None 而不是抛错：尚未索引过的知识库本就没有可检索内容，让 SQL 的
+        ``= NULL`` 自然匹配不到，空知识库、处理中、无权限等状态仍由 service 层区分。
+        """
+
+        return active_index_version_id(self.database_url, knowledge_base_id)
+
     def query(
         self,
         embedding: list[float],
@@ -46,8 +62,8 @@ class PostgresVectorStore:
         access: RetrievalAccessContext | None = None,
     ) -> list[RetrievedChunk]:
         validate_knowledge_base_id(knowledge_base_id)
-        clauses = ["c.knowledge_base_id = %s"]
-        parameters: list[Any] = [knowledge_base_id]
+        clauses = ["c.knowledge_base_id = %s", "c.index_version_id = %s"]
+        parameters: list[Any] = [knowledge_base_id, self._active_index_version(knowledge_base_id)]
         if filters:
             if filters.category_ids:
                 clauses.append("c.metadata->>'category_id' = ANY(%s)")
@@ -129,7 +145,7 @@ class PostgresVectorStore:
         validate_knowledge_base_id(knowledge_base_id)
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             access_sql = ""
-            parameters: list[Any] = [knowledge_base_id]
+            parameters: list[Any] = [knowledge_base_id, self._active_index_version(knowledge_base_id)]
             if access:
                 access_sql = """AND NOT (COALESCE(c.metadata->'deny_user_ids', '[]'::jsonb) ? %s)
                     AND (jsonb_array_length(COALESCE(c.metadata->'allow_user_ids', '[]'::jsonb)) = 0
@@ -147,6 +163,7 @@ class PostgresVectorStore:
                     AND d.current_version_id = c.document_version_id
                    JOIN data_sources s ON s.data_source_id = d.data_source_id
                    WHERE c.knowledge_base_id = %s
+                     AND c.index_version_id = %s
                      AND COALESCE(c.metadata->>'retrieval_status', 'searchable') = 'searchable'
                      AND (c.metadata->>'valid_from' IS NULL
                           OR (c.metadata->>'valid_from')::timestamptz <= now())
@@ -169,9 +186,12 @@ class PostgresVectorStore:
         """当前版本分块集合的廉价指纹，用于跨进程判断词法索引是否已经过期。
 
         新增与删除会改变计数，索引重建会改变最新写入时间；ACL 版本变化也会立即失效缓存。
+        active 索引版本必须计入：切换索引版本时分块集合本身不变，只有指针动了，
+        指纹若不含它，API 进程会继续用旧版本的倒排，混合检索会命中已被切走的分块。
         """
 
         validate_knowledge_base_id(knowledge_base_id)
+        active = self._active_index_version(knowledge_base_id)
         with psycopg.connect(self.database_url) as connection:
             row = connection.execute(
                 """SELECT count(*), COALESCE(max(c.created_at), to_timestamp(0)),
@@ -183,10 +203,10 @@ class PostgresVectorStore:
                      ON d.knowledge_base_id = c.knowledge_base_id
                     AND d.document_id = (c.metadata->>'document_id')
                     AND d.current_version_id = c.document_version_id
-                   WHERE c.knowledge_base_id = %s""",
-                (knowledge_base_id,),
+                   WHERE c.knowledge_base_id = %s AND c.index_version_id = %s""",
+                (knowledge_base_id, active),
             ).fetchone()
-        return f"{int(row[0])}:{row[1].isoformat()}:{int(row[2])}:{int(row[3])}:{row[4]}"
+        return f"{active}:{int(row[0])}:{row[1].isoformat()}:{int(row[2])}:{int(row[3])}:{row[4]}"
 
     def score_by_ids(
         self,
@@ -208,8 +228,9 @@ class PostgresVectorStore:
             rows = connection.execute(
                 """SELECT chunk_id, 1 - (embedding <=> %s::vector)
                    FROM chunks
-                   WHERE knowledge_base_id = %s AND chunk_id = ANY(%s)""",
-                (embedding, knowledge_base_id, chunk_ids),
+                   WHERE knowledge_base_id = %s AND index_version_id = %s
+                     AND chunk_id = ANY(%s)""",
+                (embedding, knowledge_base_id, self._active_index_version(knowledge_base_id), chunk_ids),
             ).fetchall()
         return {str(row[0]): round(float(row[1]), 6) for row in rows}
 
@@ -226,7 +247,9 @@ class PostgresVectorStore:
                    JOIN data_sources s ON s.data_source_id = d.data_source_id
                    LEFT JOIN document_versions current_version
                      ON current_version.document_version_id = d.current_version_id
+                   -- 只数 active 索引版本的分块：重建期间两个版本并存，不过滤会让分块数翻倍。
                    LEFT JOIN chunks c ON c.document_version_id = d.current_version_id
+                                     AND c.index_version_id = %s
                    LEFT JOIN LATERAL (
                        SELECT dv.status FROM document_versions dv
                        WHERE dv.knowledge_base_id = d.knowledge_base_id
@@ -238,7 +261,7 @@ class PostgresVectorStore:
                    GROUP BY d.document_id, d.filename, d.current_version_id, d.metadata,
                             d.created_at, s.source_type, current_version.status, pending.status
                    ORDER BY lower(d.filename)""",
-                (knowledge_base_id,),
+                (self._active_index_version(knowledge_base_id), knowledge_base_id),
             ).fetchall()
         return [
             {
@@ -436,6 +459,13 @@ class PostgresAsyncRAGService(RAGService):
             ),
         )
 
+    def list_index_versions(
+        self,
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> list[dict[str, object]]:
+        validate_knowledge_base_id(knowledge_base_id)
+        return list_versions(self.database_url, knowledge_base_id)
+
     def index_document(
         self,
         filename: str,
@@ -593,40 +623,147 @@ def check_embedding_model(database_url: str, model_name: str) -> None:
         raise RuntimeError(f"索引使用 {row[0]}，当前配置为 {model_name}；请先执行全量重建或恢复原模型配置")
 
 
+def _building_version_for_rebuild(
+    database_url: str,
+    knowledge_base_id: str,
+    target_chunking_version: str,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> tuple[str, str] | None:
+    """取得或创建本次重建使用的 building 索引版本，返回 (索引版本 id, 批次 id)。
+
+    没有任何可重建文档时返回 None，调用方据此直接结束：此时不该留下索引版本记录。
+
+    并发发起时由 building 唯一约束裁决：抢输的一方重新读取，若目标配置相同就跟着
+    补齐同一个版本，不同则明确报错，而不是悄悄产生两套配置混合的索引。
+    """
+
+    def _existing(connection: Any) -> dict[str, Any] | None:
+        return connection.execute(
+            """SELECT index_version_id, chunking_version, rebuild_batch_id
+               FROM index_versions
+               WHERE knowledge_base_id = %s AND status = 'building'""",
+            (knowledge_base_id,),
+        ).fetchone()
+
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        if not connection.execute(
+            "SELECT 1 FROM knowledge_bases WHERE knowledge_base_id = %s",
+            (knowledge_base_id,),
+        ).fetchone():
+            raise AppError("KNOWLEDGE_BASE_NOT_FOUND", "未找到该知识库。", 404)
+        settings_row = connection.execute(
+            "SELECT embedding_model, embedding_dimension FROM index_settings WHERE singleton"
+        ).fetchone()
+        current = _existing(connection)
+        # 解析器版本按实际涵盖的全部格式聚合：知识库混用 Markdown 与 DOCX 时，
+        # 单取一个值会掩盖另一种解析器的版本。
+        parser_row = connection.execute(
+            """SELECT string_agg(DISTINCT v.parser_version, ',') AS parser_version,
+                      count(*) AS candidate_count
+               FROM documents d
+               JOIN document_versions v ON v.document_version_id = d.current_version_id
+               WHERE d.knowledge_base_id = %s
+                 AND NOT EXISTS (
+                     SELECT 1 FROM index_jobs j
+                     WHERE j.document_version_id = v.document_version_id
+                       AND j.status IN ('queued', 'running'))""",
+            (knowledge_base_id,),
+        ).fetchone()
+    if current is None and int(parser_row["candidate_count"]) == 0:
+        return None
+    if current is not None:
+        if str(current["chunking_version"]) != target_chunking_version:
+            raise AppError(
+                "REBUILD_IN_PROGRESS",
+                f"已有目标配置为 {current['chunking_version']} 的重建进行中，"
+                "请先完成或清理该批次。",
+                409,
+            )
+        return str(current["index_version_id"]), str(current["rebuild_batch_id"])
+    if settings_row is None:
+        raise AppError(
+            "INDEX_NOT_INITIALIZED", "索引尚未登记向量模型，请先完成一次索引。", 409
+        )
+    batch_id = f"rbd_{uuid4().hex[:16]}"
+    try:
+        index_version_id = create_building_version(
+            database_url,
+            knowledge_base_id,
+            chunking_version=target_chunking_version,
+            parser_version=str(parser_row["parser_version"] or "legacy"),
+            embedding_model=str(settings_row["embedding_model"]),
+            embedding_dimension=int(settings_row["embedding_dimension"]),
+            processing_options={"chunk_size": chunk_size, "chunk_overlap": chunk_overlap},
+            rebuild_batch_id=batch_id,
+        )
+    except psycopg.errors.UniqueViolation:
+        with psycopg.connect(database_url, row_factory=dict_row) as connection:
+            current = _existing(connection)
+        if current is None:
+            raise
+        if str(current["chunking_version"]) != target_chunking_version:
+            raise AppError(
+                "REBUILD_IN_PROGRESS",
+                f"已有目标配置为 {current['chunking_version']} 的重建进行中，"
+                "请先完成或清理该批次。",
+                409,
+            ) from None
+        return str(current["index_version_id"]), str(current["rebuild_batch_id"])
+    return index_version_id, batch_id
+
+
 def enqueue_rebuild(
     database_url: str,
     knowledge_base_id: str,
     target_chunking_version: str,
     max_attempts: int = 3,
 ) -> dict[str, object]:
-    """把知识库中尚未使用目标切分配置的当前版本批量排队重建。
+    """为知识库建立一个 building 索引版本，并把当前版本批量排队重建到该版本。
 
     只覆盖 ``current_version_id`` 指向的版本：历史版本不参与检索，重切它们没有收益。
-    已有排队或运行中任务的版本会被跳过，重复调用因此是安全的，中断后再次调用即可续跑。
+    与 V5-4 之前不同，不再按"切分配置是否已一致"跳过文档——全库级切换要求新索引版本
+    覆盖全量文档，漏一篇即新版本不完整、不能放行。续跑改由"该版本是否已覆盖该文档"
+    判定：已有分块或有活动任务的文档会被跳过，重复调用因此仍然安全。
+
+    同一知识库同时只允许一个 building 版本（数据库 partial unique index 保证）。
+    重复调用同一目标配置会复用它继续补齐；目标配置不同则拒绝，避免半成品索引混入
+    两套配置的分块。
     """
 
     validate_knowledge_base_id(knowledge_base_id)
-    parse_chunking_version(target_chunking_version)
-    batch_id = f"rbd_{uuid4().hex[:16]}"
+    _, chunk_size, chunk_overlap = parse_chunking_version(target_chunking_version)
+    prepared = _building_version_for_rebuild(
+        database_url, knowledge_base_id, target_chunking_version, chunk_size, chunk_overlap
+    )
+    if prepared is None:
+        # 没有可重建的文档就不建索引版本：空知识库或首次索引尚未完成时，
+        # 建出来的版本会是一个永远无法覆盖全量的空壳。
+        return {
+            "batch_id": None,
+            "index_version_id": None,
+            "knowledge_base_id": knowledge_base_id,
+            "target_chunking_version": target_chunking_version,
+            "queued": 0,
+        }
+    index_version_id, batch_id = prepared
     with psycopg.connect(database_url, row_factory=dict_row) as connection:
         with connection.transaction():
-            if not connection.execute(
-                "SELECT 1 FROM knowledge_bases WHERE knowledge_base_id = %s",
-                (knowledge_base_id,),
-            ).fetchone():
-                raise AppError("KNOWLEDGE_BASE_NOT_FOUND", "未找到该知识库。", 404)
             candidates = connection.execute(
                 """SELECT v.document_version_id, d.data_source_id
                    FROM documents d
                    JOIN document_versions v ON v.document_version_id = d.current_version_id
                    WHERE d.knowledge_base_id = %s
-                     AND v.chunking_version IS DISTINCT FROM %s
+                     AND NOT EXISTS (
+                         SELECT 1 FROM chunks c
+                         WHERE c.document_version_id = v.document_version_id
+                           AND c.index_version_id = %s)
                      AND NOT EXISTS (
                          SELECT 1 FROM index_jobs j
                          WHERE j.document_version_id = v.document_version_id
                            AND j.status IN ('queued', 'running'))
                    ORDER BY d.document_id""",
-                (knowledge_base_id, target_chunking_version),
+                (knowledge_base_id, index_version_id),
             ).fetchall()
             queued = 0
             for candidate in candidates:
@@ -654,6 +791,7 @@ def enqueue_rebuild(
                 queued += result.rowcount
     return {
         "batch_id": batch_id,
+        "index_version_id": index_version_id,
         "knowledge_base_id": knowledge_base_id,
         "target_chunking_version": target_chunking_version,
         "queued": queued,
@@ -661,8 +799,21 @@ def enqueue_rebuild(
 
 
 def rebuild_status(database_url: str, batch_id: str) -> dict[str, object]:
-    """汇总一个重建批次的任务状态，用于判断是否已经跑完或需要续跑。"""
+    """汇总一个重建批次的任务状态，并顺带推进索引版本状态机。
 
+    状态查询是操作者唯一会反复执行的命令，把 building → ready / failed 的判定挂在
+    这里，避免"任务都跑完了但版本还停在 building、无法切换"这种需要额外命令的中间态。
+    """
+
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        version_row = connection.execute(
+            "SELECT index_version_id FROM index_versions WHERE rebuild_batch_id = %s",
+            (batch_id,),
+        ).fetchone()
+    index_version_id = str(version_row["index_version_id"]) if version_row else None
+    index_version_status = (
+        finalize_building_version(database_url, index_version_id) if index_version_id else None
+    )
     with psycopg.connect(database_url, row_factory=dict_row) as connection:
         rows = connection.execute(
             """SELECT status, count(*) AS total FROM index_jobs
@@ -678,6 +829,8 @@ def rebuild_status(database_url: str, batch_id: str) -> dict[str, object]:
     counts = {str(row["status"]): int(row["total"]) for row in rows}
     return {
         "batch_id": batch_id,
+        "index_version_id": index_version_id,
+        "index_version_status": index_version_status,
         "counts": counts,
         "pending": counts.get("queued", 0) + counts.get("running", 0),
         "failures": [dict(row) for row in failures],
@@ -685,17 +838,23 @@ def rebuild_status(database_url: str, batch_id: str) -> dict[str, object]:
 
 
 def chunking_inventory(database_url: str, knowledge_base_id: str) -> dict[str, int]:
-    """按切分配置统计知识库当前版本的分布，用于验证重建是否真正收敛。"""
+    """按切分配置统计各索引版本覆盖的文档数，用于验证重建是否真正收敛。
+
+    统计源从 ``document_versions.chunking_version`` 换成了索引版本：重建不再回写
+    文档版本的切分配置，因为新分块此时还在未放行的 building 版本里，回写会让
+    文档版本谎称自己已是新配置。已清理的版本不计入。
+    """
 
     validate_knowledge_base_id(knowledge_base_id)
     with psycopg.connect(database_url) as connection:
         rows = connection.execute(
-            """SELECT COALESCE(v.chunking_version, ''), count(*)
-               FROM documents d
-               JOIN document_versions v ON v.document_version_id = d.current_version_id
-               WHERE d.knowledge_base_id = %s
-               GROUP BY 1
-               ORDER BY 1""",
+            """SELECT iv.chunking_version, count(DISTINCT c.document_version_id)
+               FROM index_versions iv
+               LEFT JOIN chunks c ON c.index_version_id = iv.index_version_id
+               WHERE iv.knowledge_base_id = %s
+                 AND iv.status IN ('active', 'building', 'ready', 'previous')
+               GROUP BY iv.chunking_version
+               ORDER BY iv.chunking_version""",
             (knowledge_base_id,),
         ).fetchall()
     return {str(row[0]): int(row[1]) for row in rows}
@@ -756,6 +915,22 @@ class IndexWorker:
                     (self.settings.index_worker_id, job["index_job_id"]),
                 )
         return dict(job)
+
+    def _rebuild_index_version(self, rebuild_batch_id: str) -> str:
+        """重建任务的分块归属入队时创建的 building 索引版本。
+
+        用批次反查而不是读当前 building 版本：批次已被放行或清理后，残留任务必须
+        明确失败，而不是把分块写进另一个正在构建的版本。
+        """
+
+        with psycopg.connect(self.database_url) as connection:
+            row = connection.execute(
+                "SELECT index_version_id FROM index_versions WHERE rebuild_batch_id = %s",
+                (rebuild_batch_id,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError(f"rebuild batch has no index version: {rebuild_batch_id}")
+        return str(row[0])
 
     def _process(self, job: dict[str, Any]) -> None:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
@@ -863,23 +1038,44 @@ class IndexWorker:
         if embeddings:
             # 在写入分块之前登记/校验，避免污染后才在检索时发现维度冲突。
             register_embedding_model(self.database_url, self.embedder.model_name, len(embeddings[0]))
+        # 分块必须归属一个索引版本：读路径按 active 版本过滤，无归属等同于检索不到。
+        # 重建任务写入入队时冻结的 building 版本，因此重建期间用户完全看不到这批分块；
+        # 普通索引任务写入 active 版本，首次索引时引导创建第一个版本。
+        if str(job.get("job_type", "index")) == "rebuild":
+            index_version_id = self._rebuild_index_version(str(job["rebuild_batch_id"]))
+        else:
+            index_version_id = active_or_bootstrap_version(
+                self.database_url,
+                str(version["knowledge_base_id"]),
+                chunking_version=target_version,
+                parser_version=parsed.parser_version,
+                embedding_model=self.embedder.model_name,
+                embedding_dimension=len(embeddings[0]) if embeddings else 1,
+                processing_options={"chunk_size": chunk_size, "chunk_overlap": chunk_overlap},
+            )
         now = datetime.now(UTC)
         with psycopg.connect(self.database_url) as connection:
             register_vector(connection)
             with connection.transaction():
+                # 只删本索引版本自己的分块（供任务重试幂等），其他版本必须原样保留，
+                # 否则回滚无从谈起。V5-4 之前这里是无条件删除同文档版本的全部分块。
                 connection.execute(
-                    "DELETE FROM chunks WHERE document_version_id = %s",
-                    (version["document_version_id"],),
+                    """DELETE FROM chunks
+                       WHERE document_version_id = %s AND index_version_id = %s""",
+                    (version["document_version_id"], index_version_id),
                 )
                 for chunk, embedding in zip(chunks, embeddings, strict=True):
                     connection.execute(
                         """INSERT INTO chunks
-                           (chunk_id, document_version_id, knowledge_base_id, chunk_index,
-                            content, metadata, embedding, created_at)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                           (chunk_id, document_version_id, index_version_id, knowledge_base_id,
+                            chunk_index, content, metadata, embedding, created_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                         (
-                            f"{version['document_version_id']}:{hashlib.sha256(target_version.encode()).hexdigest()[:8]}:{chunk.chunk_index:05d}",
+                            # 用索引版本而非切分配置做前缀：只改解析器不改切分时，
+                            # 两个版本的分块会撞主键。
+                            f"{version['document_version_id']}:{index_version_id[3:11]}:{chunk.chunk_index:05d}",
                             version["document_version_id"],
+                            index_version_id,
                             version["knowledge_base_id"],
                             chunk.chunk_index,
                             chunk.text,
@@ -889,18 +1085,17 @@ class IndexWorker:
                         ),
                     )
                 if str(job.get("job_type", "index")) == "rebuild":
-                    # 重建只替换同一版本的 chunks，不参与版本状态机，也不移动当前版本指针。
+                    # 重建不参与版本状态机，也不移动当前版本指针。切分与向量配置现在归
+                    # 索引版本记录，这里不再回写 chunking_version：回写会让 document_versions
+                    # 宣称已是新配置，而新分块其实还在未放行的 building 版本里。
                     connection.execute(
-                        """UPDATE document_versions SET chunking_version=%s, parser_name=%s,
-                                  parser_version=%s, processing_options=%s,
+                        """UPDATE document_versions SET parser_name=%s, parser_version=%s,
                                   parsed_content_hash=%s, parse_status='ready',
                                   parse_failure_code=NULL, parsed_tree=%s
                            WHERE document_version_id=%s""",
                         (
-                            target_version,
                             parsed.parser_name,
                             parsed.parser_version,
-                            Jsonb({"chunk_size": chunk_size, "chunk_overlap": chunk_overlap}),
                             hashlib.sha256(content).hexdigest(),
                             Jsonb(parsed.tree_payload()),
                             version["document_version_id"],

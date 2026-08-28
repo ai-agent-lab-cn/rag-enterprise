@@ -47,6 +47,7 @@ def test_migration_files_are_contiguous() -> None:
         "0007_backfill_chunk_governance.sql",
         "0008_document_categories.sql",
         "0009_structured_parsing.sql",
+        "0010_index_versions.sql",
     ]
 
 
@@ -114,8 +115,8 @@ def test_schema_two_with_existing_data_upgrades_to_schema_three(tmp_path: Path) 
             (now, now),
         )
 
-    assert apply_migrations(database_url) == 9
-    check_schema_version(database_url, 9)
+    assert apply_migrations(database_url) == 10
+    check_schema_version(database_url, 10)
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
             "SELECT status, chunking_version FROM document_versions WHERE document_version_id = 'ver_legacy'"
@@ -165,8 +166,8 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 9
-    check_schema_version(database_url, 9)
+    assert apply_migrations(database_url) == 10
+    check_schema_version(database_url, 10)
 
     now = "2026-08-22T00:00:00+00:00"
     auth = tmp_path / "auth/store.json"
@@ -379,3 +380,148 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
             assert connection.execute("SELECT count(*) FROM users").fetchone()[0] == source_user_count
             assert connection.execute("SELECT count(*) FROM chunks").fetchone()[0] == source_chunk_count
         assert (restored_uploads / "kb_default/guide.md").read_text() == "changed"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_schema_nine_with_existing_chunks_upgrades_to_schema_ten(tmp_path: Path) -> None:
+    """升级必须把已有分块归入一条 active 索引版本，并固定向量列维度。
+
+    回填不完整会让升级后的知识库检索不到任何内容：读路径按 active 索引版本过滤，
+    分块的 index_version_id 为空即等同于全部消失。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    old_migrations = tmp_path / "migrations"
+    old_migrations.mkdir()
+    for file in migration_files():
+        if int(file.name.split("_", maxsplit=1)[0]) <= 9:
+            shutil.copy(file, old_migrations / file.name)
+    assert apply_migrations(database_url, old_migrations) == 9
+
+    now = datetime.now(UTC)
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO knowledge_bases
+               (knowledge_base_id, name, name_normalized, is_default, created_at, updated_at)
+               VALUES ('kb_default', '默认知识库', '默认知识库', true, %s, %s)""",
+            (now, now),
+        )
+        connection.execute(
+            """INSERT INTO data_sources
+               (data_source_id, knowledge_base_id, source_type, name, created_at, updated_at)
+               VALUES ('src_legacy', 'kb_default', 'file', 'legacy.md', %s, %s)""",
+            (now, now),
+        )
+        connection.execute(
+            """INSERT INTO documents
+               (document_id, knowledge_base_id, data_source_id, filename, created_at, updated_at)
+               VALUES ('doc_legacy', 'kb_default', 'src_legacy', 'legacy.md', %s, %s)""",
+            (now, now),
+        )
+        connection.execute(
+            """INSERT INTO document_versions
+               (document_version_id, knowledge_base_id, document_id, version_number,
+                content_sha256, source_file_bytes, source_path, status, created_at, indexed_at,
+                chunking_version, parser_version)
+               VALUES ('ver_legacy', 'kb_default', 'doc_legacy', 1, %s, 6, 'legacy.md',
+                       'ready', %s, %s, 'v1-700-100', 'structured-1')""",
+            ("a" * 64, now, now),
+        )
+        connection.execute(
+            "UPDATE documents SET current_version_id = 'ver_legacy' WHERE document_id = 'doc_legacy'"
+        )
+        connection.execute(
+            """INSERT INTO index_settings (embedding_model, embedding_dimension)
+               VALUES ('test/embedding', 3)"""
+        )
+        connection.execute(
+            """INSERT INTO chunks
+               (chunk_id, document_version_id, knowledge_base_id, chunk_index, content,
+                metadata, embedding, created_at)
+               VALUES ('ver_legacy:00000', 'ver_legacy', 'kb_default', 0, '历史分块',
+                       %s, '[0.1,0.2,0.3]', %s)""",
+            (json.dumps({"document_id": "doc_legacy"}), now),
+        )
+
+    assert apply_migrations(database_url) == 10
+    check_schema_version(database_url, 10)
+
+    with psycopg.connect(database_url) as connection:
+        version = connection.execute(
+            """SELECT status, chunking_version, parser_version, embedding_model,
+                      embedding_dimension, evaluation_report_id
+               FROM index_versions WHERE knowledge_base_id = 'kb_default'"""
+        ).fetchone()
+        assert version == ("active", "v1-700-100", "structured-1", "test/embedding", 3, "legacy-backfill")
+        index_version_id = connection.execute(
+            "SELECT active_index_version_id FROM knowledge_bases WHERE knowledge_base_id = 'kb_default'"
+        ).fetchone()[0]
+        assert index_version_id.startswith("iv_")
+        # 历史分块必须归入该版本，否则升级后检索为空
+        assert connection.execute(
+            "SELECT index_version_id FROM chunks WHERE chunk_id = 'ver_legacy:00000'"
+        ).fetchone()[0] == index_version_id
+        # 维度固定后才能建 HNSW 索引；无维度列会报 column does not have dimensions
+        assert connection.execute(
+            """SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+               WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'"""
+        ).fetchone()[0] == "vector(3)"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_schema_ten_on_empty_database_keeps_embedding_unconstrained(tmp_path: Path) -> None:
+    """空库没有登记过向量模型，维度留待首次索引时固定，迁移本身不猜维度。"""
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    assert apply_migrations(database_url) == 10
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute(
+            """SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+               WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'"""
+        ).fetchone()[0] == "vector"
+        assert connection.execute("SELECT count(*) FROM index_versions").fetchone()[0] == 0
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_empty_knowledge_base_stays_deletable_after_indexing(tmp_path: Path) -> None:
+    """索引过又清空的知识库必须仍然可删。
+
+    索引版本记录在分块删除后依然存在，若对知识库用 RESTRICT，删除会被外键永久挡住。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    apply_migrations(database_url)
+    now = datetime.now(UTC)
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO knowledge_bases
+               (knowledge_base_id, name, name_normalized, is_default, created_at, updated_at)
+               VALUES ('kb_temp', '临时知识库', '临时知识库', false, %s, %s)""",
+            (now, now),
+        )
+        connection.execute(
+            """INSERT INTO index_versions
+               (index_version_id, knowledge_base_id, status, chunking_version, parser_version,
+                embedding_model, embedding_dimension, config_fingerprint, evaluation_report_id,
+                activated_at)
+               VALUES ('iv_temp', 'kb_temp', 'active', 'v1-700-100', 'structured-1',
+                       'test/embedding', 3, %s, 'initial-index', %s)""",
+            ("b" * 64, now),
+        )
+        connection.execute(
+            "UPDATE knowledge_bases SET active_index_version_id='iv_temp' WHERE knowledge_base_id='kb_temp'"
+        )
+
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute("DELETE FROM knowledge_bases WHERE knowledge_base_id='kb_temp'")
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT count(*) FROM index_versions").fetchone()[0] == 0

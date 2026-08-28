@@ -99,6 +99,9 @@ class RAGServiceProtocol(Protocol):
         filters: QueryMetadataFilter | None = None,
         access: RetrievalAccessContext | None = None,
     ) -> QueryResponse: ...
+    def list_index_versions(
+        self, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
+    ) -> list[dict[str, object]]: ...
 
 
 class RAGService:
@@ -186,6 +189,14 @@ class RAGService:
         return self.store.update_document_acl(
             document_id, allow_user_ids, deny_user_ids, knowledge_base_id
         )
+
+    def list_index_versions(
+        self,
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> list[dict[str, object]]:
+        """Chroma 运行时没有索引版本概念，返回空列表而不是伪造记录。"""
+
+        return []
 
     def retrieve_candidates(
         self,

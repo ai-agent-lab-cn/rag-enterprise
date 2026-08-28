@@ -60,6 +60,7 @@ from .schemas import (
     EvaluationReportResponse,
     EvaluationReportSummary,
     HealthResponse,
+    IndexVersionResponse,
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
     KnowledgeBaseUpdate,
@@ -950,6 +951,26 @@ def create_app() -> FastAPI:
             current.user,
             DocumentMetadata(category=category, tags=tags or []).model_dump(mode="json"),
         )
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions",
+        response_model=list[IndexVersionResponse],
+    )
+    async def list_scoped_index_versions(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        offset: PageOffset = 0,
+        limit: PageLimit = 50,
+    ) -> list[IndexVersionResponse]:
+        """索引版本只读视图。切换与回滚是高风险操作，只提供 CLI 入口，不开放写接口。"""
+
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        versions = await run_in_threadpool(service.list_index_versions, knowledge_base_id)
+        return _page([IndexVersionResponse(**item) for item in versions], offset, limit)
 
     @app.get(
         "/api/knowledge-bases/{knowledge_base_id}/documents",

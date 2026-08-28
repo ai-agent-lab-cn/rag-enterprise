@@ -86,6 +86,12 @@ class FakeService:
         )
         return version
 
+    def list_index_versions(
+        self,
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    ) -> list[dict[str, object]]:
+        return []
+
     def query(
         self,
         question: str,
