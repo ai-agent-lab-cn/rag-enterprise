@@ -336,13 +336,16 @@ class KnowledgeBaseResponse(BaseModel):
 class DataSourceResponse(BaseModel):
     data_source_id: str
     name: str
-    source_type: Literal["file", "object_storage", "web", "connector"]
+    source_type: Literal["file", "local_directory", "object_storage", "web", "connector"]
     knowledge_base_id: str
     knowledge_base_name: str
     enabled: bool
+    configuration: dict[str, object] = Field(default_factory=dict)
+    default_category_id: str | None = None
+    metadata_defaults: dict[str, object] = Field(default_factory=dict)
     upload_status: Literal["idle", "succeeded"]
     index_status: Literal["idle", "queued", "running", "succeeded", "failed"]
-    sync_status: Literal["idle", "queued", "running", "succeeded", "failed"]
+    sync_status: Literal["idle", "queued", "running", "succeeded", "failed", "aborted"]
     document_count: int
     source_file_bytes: int
     last_indexed_at: datetime | None
@@ -352,7 +355,62 @@ class DataSourceResponse(BaseModel):
     acl_version: int = Field(default=1, ge=1)
     allow_user_ids: list[str] = Field(default_factory=list)
     deny_user_ids: list[str] = Field(default_factory=list)
-    allowed_actions: list[Literal["detail", "edit", "disable", "enable", "update_file", "delete"]]
+    allowed_actions: list[
+        Literal["detail", "edit", "disable", "enable", "update_file", "delete", "test", "sync"]
+    ]
+
+
+class DataSourceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    source_type: Literal["local_directory", "object_storage"]
+    configuration: dict[str, object]
+    default_category_id: str | None = None
+    metadata_defaults: dict[str, object] = Field(default_factory=dict)
+
+
+class DataSourceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    configuration: dict[str, object]
+    default_category_id: str | None = None
+    metadata_defaults: dict[str, object] = Field(default_factory=dict)
+
+
+class DataSourceConnectionTestResponse(BaseModel):
+    ok: bool
+    discovered_count: int = Field(ge=0)
+    message: str
+
+
+class SyncEnqueueResponse(BaseModel):
+    index_job_id: str
+    sync_run_id: str
+    data_source_id: str
+
+
+class SyncRunResponse(BaseModel):
+    sync_run_id: str
+    data_source_id: str
+    status: Literal[
+        "queued", "discovering", "syncing", "indexing", "succeeded",
+        "partial_failed", "aborted", "failed",
+    ]
+    stage: str
+    added_count: int
+    updated_count: int
+    deleted_count: int
+    skipped_count: int
+    failed_count: int
+    retry_count: int
+    error_code: str | None
+    failure_reason: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class QueryMetadataFilter(BaseModel):

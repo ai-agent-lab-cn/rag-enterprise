@@ -3,7 +3,73 @@ from types import SimpleNamespace
 
 from backend.app.config import get_settings
 from backend.app.errors import AppError
-from backend.app.main import _data_source_response, get_service
+from backend.app.main import _data_source_response, get_data_sources, get_service
+
+
+class _DataSourcesStub:
+    def __init__(self):
+        self.created = False
+        self.database_url = "postgresql://unused"
+
+    def create(self, *_args):
+        self.created = True
+        return "ds_external"
+
+    def get(self, data_source_id: str):
+        if data_source_id != "ds_external":
+            return None
+        return {
+            "data_source_id": data_source_id,
+            "knowledge_base_id": "kb_default",
+            "source_type": "object_storage",
+            "configuration": {
+                "endpoint": "127.0.0.1:9000", "bucket": "docs", "secure": False,
+                "credential_env": "DOCS", "metadata_defaults": {},
+            },
+        }
+
+    def list_sync_runs(self, data_source_id: str, limit: int = 50):
+        return [{
+            "sync_run_id": "run_1", "data_source_id": data_source_id,
+            "status": "succeeded", "stage": "complete", "added_count": 2,
+            "updated_count": 0, "deleted_count": 0, "skipped_count": 0,
+            "failed_count": 0, "retry_count": 0, "error_code": None,
+            "failure_reason": None, "started_at": None, "finished_at": None,
+            "created_at": datetime.now(UTC), "updated_at": datetime.now(UTC),
+        }]
+
+
+def test_admin_can_create_external_source_and_read_sync_runs(client, monkeypatch) -> None:
+    repository = _DataSourcesStub()
+    client.app.dependency_overrides[get_data_sources] = lambda: repository
+    monkeypatch.setattr(
+        "backend.app.main.enqueue_sync",
+        lambda _url, source_id: {
+            "index_job_id": "job_1", "sync_run_id": "run_1", "data_source_id": source_id,
+        },
+    )
+
+    created = client.post(
+        "/api/knowledge-bases/kb_default/data-sources",
+        json={
+            "name": "产品资料桶", "source_type": "object_storage",
+            "configuration": {
+                "endpoint": "127.0.0.1:9000", "bucket": "docs", "secure": False,
+                "credential_env": "DOCS",
+            },
+            "metadata_defaults": {"department": "产品"},
+        },
+    )
+    assert created.status_code == 201
+    assert created.json() == {"data_source_id": "ds_external"}
+
+    queued = client.post("/api/data-sources/ds_external/sync")
+    assert queued.status_code == 202
+    assert queued.json()["sync_run_id"] == "run_1"
+
+    runs = client.get("/api/data-sources/ds_external/sync-runs")
+    assert runs.status_code == 200
+    assert runs.json()[0]["added_count"] == 2
 
 
 def test_data_source_response_normalizes_repository_sync_status() -> None:

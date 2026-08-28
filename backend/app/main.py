@@ -13,6 +13,7 @@ from .audit import AuditRepository
 from .auth import AuthenticatedSession, AuthRepository, UserRecord
 from .chunking import chunking_version
 from .config import get_settings
+from .data_source_sync import build_connector, enqueue_sync
 from .database import check_schema_version
 from .demo import seed_demo_document
 from .errors import AppError, install_error_handlers
@@ -53,7 +54,10 @@ from .schemas import (
     ClassificationUpdate,
     ConversationDetailResponse,
     ConversationSummaryResponse,
+    DataSourceConnectionTestResponse,
+    DataSourceCreate,
     DataSourceResponse,
+    DataSourceUpdate,
     DocumentInfo,
     DocumentMetadata,
     DocumentVersionResponse,
@@ -73,6 +77,8 @@ from .schemas import (
     QueryResponse,
     ReadinessResponse,
     ReprocessDocumentVersionRequest,
+    SyncEnqueueResponse,
+    SyncRunResponse,
     UserResponse,
 )
 from .security import AbuseProtection, SecurityBoundaryMiddleware, validate_upload
@@ -547,6 +553,135 @@ def create_app() -> FastAPI:
         accessible_ids = await run_in_threadpool(auth.accessible_knowledge_base_ids, current.user)
         rows = await run_in_threadpool(sources.list, accessible_ids)
         return [_data_source_response(row, current.user) for row in _page(rows, offset, limit)]
+
+    @app.post("/api/knowledge-bases/{knowledge_base_id}/data-sources", status_code=201)
+    async def create_data_source(
+        knowledge_base_id: str,
+        payload: DataSourceCreate,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> dict[str, str]:
+        _require_admin(current.user)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "数据源管理需要 PostgreSQL 运行时。", 503)
+        try:
+            data_source_id = await run_in_threadpool(
+                sources.create,
+                knowledge_base_id,
+                payload.name.strip(),
+                payload.source_type,
+                payload.configuration,
+                payload.default_category_id,
+                payload.metadata_defaults,
+            )
+        except ValueError as exc:
+            raise AppError("DATA_SOURCE_CONFIGURATION_INVALID", "知识库或默认分类无效。", 400) from exc
+        await _record_audit(
+            audit, "data_source.create", current.user, "data_source", data_source_id,
+            metadata={"knowledge_base_id": knowledge_base_id, "source_type": payload.source_type},
+        )
+        return {"data_source_id": data_source_id}
+
+    @app.put("/api/data-sources/{data_source_id}", status_code=204)
+    async def update_data_source(
+        data_source_id: str,
+        payload: DataSourceUpdate,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> None:
+        _require_admin(current.user)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "数据源管理需要 PostgreSQL 运行时。", 503)
+        try:
+            updated = await run_in_threadpool(
+                sources.update,
+                data_source_id,
+                payload.name.strip(),
+                payload.configuration,
+                payload.default_category_id,
+                payload.metadata_defaults,
+            )
+        except ValueError as exc:
+            raise AppError("DATA_SOURCE_CONFIGURATION_INVALID", "默认分类无效。", 400) from exc
+        if not updated:
+            raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
+        await _record_audit(audit, "data_source.update", current.user, "data_source", data_source_id)
+
+    @app.post(
+        "/api/data-sources/{data_source_id}/test",
+        response_model=DataSourceConnectionTestResponse,
+    )
+    async def test_data_source_connection(
+        data_source_id: str,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+    ) -> DataSourceConnectionTestResponse:
+        _require_admin(current.user)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "数据源管理需要 PostgreSQL 运行时。", 503)
+        source = await run_in_threadpool(sources.get, data_source_id)
+        if source is None:
+            raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
+        configuration = dict(source.get("configuration") or {})
+        connector = await run_in_threadpool(
+            build_connector,
+            configuration,
+            str(source["source_type"]),
+            settings.max_upload_mb * 1024 * 1024,
+        )
+        discovered = await run_in_threadpool(lambda: sum(1 for _ in connector.list_objects()))
+        return DataSourceConnectionTestResponse(
+            ok=True, discovered_count=discovered, message=f"连接成功，发现 {discovered} 个可处理对象。"
+        )
+
+    @app.post(
+        "/api/data-sources/{data_source_id}/sync",
+        response_model=SyncEnqueueResponse,
+        status_code=202,
+    )
+    async def trigger_data_source_sync(
+        data_source_id: str,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> SyncEnqueueResponse:
+        _require_admin(current.user)
+        if sources is None or await run_in_threadpool(sources.get, data_source_id) is None:
+            raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
+        result = await run_in_threadpool(enqueue_sync, sources.database_url, data_source_id)
+        await _record_audit(audit, "data_source.sync", current.user, "data_source", data_source_id)
+        return SyncEnqueueResponse(**result)
+
+    @app.get(
+        "/api/data-sources/{data_source_id}/sync-runs",
+        response_model=list[SyncRunResponse],
+    )
+    async def list_data_source_sync_runs(
+        data_source_id: str,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> list[SyncRunResponse]:
+        _require_admin(current.user)
+        if sources is None or await run_in_threadpool(sources.get, data_source_id) is None:
+            raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
+        rows = await run_in_threadpool(sources.list_sync_runs, data_source_id, limit)
+        return [SyncRunResponse(**row) for row in rows]
+
+    @app.post(
+        "/api/data-sources/{data_source_id}/retry",
+        response_model=SyncEnqueueResponse,
+        status_code=202,
+    )
+    async def retry_data_source_sync(
+        data_source_id: str,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> SyncEnqueueResponse:
+        return await trigger_data_source_sync(data_source_id, sources, current, audit)
 
     @app.put("/api/data-sources/{data_source_id}/enabled", status_code=204)
     async def set_data_source_enabled(
@@ -1561,16 +1696,32 @@ def _data_source_response(row: dict[str, object], user: UserRecord) -> DataSourc
     index_status = raw_status if raw_status in {"queued", "running", "succeeded", "failed"} else "idle"
     upload_status = "succeeded" if row.get("upload_status") == "succeeded" else "idle"
     acl = dict(row.get("acl") or {})
-    actions = ["detail", "update_file"]
+    actions = ["detail"]
+    source_type = str(row.get("source_type") or "file")
+    if source_type == "file":
+        actions.append("update_file")
     if user.role == "admin":
         actions.extend(["edit", "disable" if row["enabled"] else "enable"])
+        if source_type in {"local_directory", "object_storage"} and row["enabled"]:
+            actions.extend(["test", "sync"])
         if not row["document_count"] and index_status not in {"queued", "running"}:
             actions.append("delete")
+    configuration = dict(row.get("configuration") or {})
     normalized = {
         **row,
+        "configuration": {
+            key: value for key, value in configuration.items()
+            if key not in {"default_category_id", "metadata_defaults"}
+        },
+        "default_category_id": configuration.get("default_category_id"),
+        "metadata_defaults": dict(configuration.get("metadata_defaults") or {}),
         "upload_status": upload_status,
         "index_status": index_status,
-        "sync_status": index_status,
+        "sync_status": (
+            raw_status
+            if raw_status in {"idle", "queued", "running", "succeeded", "failed", "aborted"}
+            else "idle"
+        ),
         "last_indexed_at": row.get("last_indexed_at") or row.get("last_synced_at"),
         "acl_version": int(acl.get("version", 1)),
         "allow_user_ids": list(acl.get("allow_user_ids", [])),

@@ -27,7 +27,7 @@ services:
     image: "${RELEASE_BACKEND_IMAGE:?RELEASE_BACKEND_IMAGE is required}"
     environment:
       DATABASE_URL: "postgresql://rag:${POSTGRES_PASSWORD}@postgres:5432/rag_enterprise"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "11"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "12"
       GEMINI_API_KEY: ""
       EMBEDDING_MODEL: "${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}"
       RERANKER_MODEL: "${RERANKER_MODEL:-demo/lexical-overlap-v1}"
@@ -53,7 +53,7 @@ services:
     command: ["python", "-m", "scripts.index_worker"]
     environment:
       DATABASE_URL: "postgresql://rag:${POSTGRES_PASSWORD}@postgres:5432/rag_enterprise"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "11"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "12"
       EMBEDDING_MODEL: "${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}"
       INDEX_WORKER_ID: release-rollback-worker
       OMP_NUM_THREADS: "1"

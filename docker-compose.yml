@@ -33,7 +33,7 @@ services:
       dockerfile: backend/Dockerfile
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rag_enterprise}"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "11"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "12"
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       EMBEDDING_MODEL: "${EMBEDDING_MODEL:-shibing624/text2vec-base-chinese}"
       RERANKER_MODEL: "${RERANKER_MODEL:-cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}"
@@ -74,7 +74,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rag_enterprise}"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "11"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "12"
       EMBEDDING_MODEL: "${EMBEDDING_MODEL:-shibing624/text2vec-base-chinese}"
       INDEX_WORKER_ID: "${INDEX_WORKER_ID:-worker-compose}"
       OMP_NUM_THREADS: "${OMP_NUM_THREADS:-1}"

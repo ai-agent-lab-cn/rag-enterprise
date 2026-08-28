@@ -19,6 +19,7 @@ import type {
   SystemMetrics,
   AuditEvent,
   DataSource,
+  SyncRun,
 } from "./types";
 
 let accessToken: string | null = null;
@@ -125,6 +126,14 @@ export const api = {
     }),
   deleteKnowledgeBase: (id: string) => request<void>(`/api/knowledge-bases/${id}`, { method: "DELETE" }),
   listDataSources: (offset = 0, limit = 20) => request<DataSource[]>(`/api/data-sources?offset=${offset}&limit=${limit}`),
+  createDataSource: (knowledgeBaseId: string, payload: { name: string; source_type: "local_directory" | "object_storage"; configuration: Record<string, unknown>; default_category_id?: string | null; metadata_defaults?: Record<string, unknown> }) =>
+    request<{ data_source_id: string }>(`/api/knowledge-bases/${knowledgeBaseId}/data-sources`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
+  updateDataSource: (id: string, payload: { name: string; configuration: Record<string, unknown>; default_category_id?: string | null; metadata_defaults?: Record<string, unknown> }) =>
+    request<void>(`/api/data-sources/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
+  testDataSource: (id: string) => request<{ ok: boolean; discovered_count: number; message: string }>(`/api/data-sources/${id}/test`, { method: "POST" }),
+  syncDataSource: (id: string) => request<{ index_job_id: string; sync_run_id: string; data_source_id: string }>(`/api/data-sources/${id}/sync`, { method: "POST" }),
+  retryDataSource: (id: string) => request<{ index_job_id: string; sync_run_id: string; data_source_id: string }>(`/api/data-sources/${id}/retry`, { method: "POST" }),
+  listDataSourceSyncRuns: (id: string) => request<SyncRun[]>(`/api/data-sources/${id}/sync-runs?limit=50`),
   setDataSourceEnabled: (id: string, enabled: boolean) => request<void>(`/api/data-sources/${id}/enabled?enabled=${enabled}`, { method: "PUT" }),
   deleteDataSource: (id: string) => request<void>(`/api/data-sources/${id}`, { method: "DELETE" }),
   listKnowledgeBaseDocuments: (id: string) => request<DocumentInfo[]>(`/api/knowledge-bases/${id}/documents`),

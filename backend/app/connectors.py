@@ -14,15 +14,24 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple, Protocol
 
+from minio import Minio
+from minio.error import S3Error
+
 from .errors import AppError
 
 
 class SourceObject(NamedTuple):
     """数据源里的一个对象。
 
-    ``version`` 的契约是「内容变了才变，内容没变就不变」。不同连接器用不同东西满足它：
-    本地目录用内容 SHA-256，S3 用服务端给的 ETag。``modified_at`` 只进展示层，
-    不参与任何判定——同内容重新落盘会刷新时间戳，内容改动也可能不改变 size。
+    ``version`` 的契约是「**内容变了，version 一定变**」。反向不保证——version 变了
+    内容未必变，取决于连接器：本地目录用内容 SHA-256，满足双向；S3 用服务端 ETag，
+    而 ETag 在分段上传时是分段配置的函数，同一份内容换个 part_size 重传就会变（实测）。
+
+    接受这个方向的误判是因为它安全：多做一次索引只浪费算力，结果正确；而致命的那一半
+    ——内容变了却没被发现，导致检索到过期内容——不会发生。
+
+    ``modified_at`` 只进展示层，不参与任何判定：同内容重新落盘会刷新时间戳，
+    内容改动也可能不改变 size。
     """
 
     key: str
@@ -60,11 +69,22 @@ class LocalDirectoryConnector:
     特性泄进抽象。同步框架每次同步只调用它一次，这个成本可以接受。
     """
 
-    def __init__(self, root: Path, include_suffixes: tuple[str, ...]):
+    def __init__(
+        self,
+        root: Path,
+        include_suffixes: tuple[str, ...],
+        max_bytes: int | None = None,
+    ):
         self.root = Path(root)
         self.include_suffixes = tuple(suffix.lower() for suffix in include_suffixes)
+        self.max_bytes = max_bytes
+        # 本轮列举中因超限被跳过的对象，供同步框架汇报。跳过不是失败：它们不入队、
+        # 不软删、不影响熔断分母。
+        self.skipped: list[tuple[str, int]] = []
 
     def list_objects(self) -> Iterator[SourceObject]:
+        # 同一实例可能被多次列举，跳过清单不能累积。
+        self.skipped = []
         if not self.root.is_dir():
             # 不能静默返回空清单：空清单会被差异计算判定为「全部删除」，
             # 那是把配置错误伪装成数据变更。
@@ -79,12 +99,18 @@ class LocalDirectoryConnector:
                 continue
             if path.suffix.lower() not in self.include_suffixes:
                 continue
+            stat = path.stat()
+            key = path.relative_to(self.root).as_posix()
+            if self.max_bytes is not None and stat.st_size > self.max_bytes:
+                # 必须在 read_bytes 之前判定：否则大文件已经进内存了，再跳过也来不及。
+                self.skipped.append((key, stat.st_size))
+                continue
             content = path.read_bytes()
             yield SourceObject(
-                key=validate_object_key(path.relative_to(self.root).as_posix()),
+                key=validate_object_key(key),
                 version=hashlib.sha256(content).hexdigest(),
-                size=len(content),
-                modified_at=datetime.fromtimestamp(path.stat().st_mtime, tz=UTC),
+                size=stat.st_size,
+                modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
             )
 
     def fetch(self, key: str) -> bytes:
@@ -95,3 +121,103 @@ class LocalDirectoryConnector:
             # 列举与拉取之间对象可能已被删除，这是可预期状态而非崩溃。
             raise AppError("SOURCE_OBJECT_MISSING", f"对象已不存在：{key}", 409)
         return resolved.read_bytes()
+
+
+_S3_ERROR_CODES: dict[str, tuple[str, str, int]] = {
+    "NoSuchBucket": ("SOURCE_ROOT_UNAVAILABLE", "数据源存储桶不存在或不可访问。", 409),
+    "InvalidAccessKeyId": ("SOURCE_CREDENTIALS_INVALID", "数据源访问凭据无效。", 409),
+    "SignatureDoesNotMatch": ("SOURCE_CREDENTIALS_INVALID", "数据源访问凭据无效。", 409),
+    "AccessDenied": ("SOURCE_CREDENTIALS_INVALID", "数据源访问被拒绝。", 409),
+    "NoSuchKey": ("SOURCE_OBJECT_MISSING", "对象已不存在。", 409),
+}
+
+
+def _map_s3_error(error: S3Error) -> AppError:
+    """把 S3 错误映射为项目的稳定错误码。
+
+    ``NoSuchBucket`` 复用 ``SOURCE_ROOT_UNAVAILABLE`` 是有意的：它与本地目录的根目录
+    不存在同义，同步框架已经据此拒绝「把不可达当成全部删除」，S3 侧不该另造一套语义。
+    未知错误统一为 ``SOURCE_UNAVAILABLE`` 并保留原始 code，便于运行手册按码处置。
+    """
+
+    code, message, status = _S3_ERROR_CODES.get(
+        str(error.code), ("SOURCE_UNAVAILABLE", f"数据源不可访问：{error.code}", 502)
+    )
+    return AppError(code, message, status)
+
+
+def _strip_prefix(object_name: str, prefix: str) -> str:
+    return object_name[len(prefix):] if prefix and object_name.startswith(prefix) else object_name
+
+
+class S3Connector:
+    """把一个 S3 兼容存储桶的某个前缀当作数据源。
+
+    ``version`` 用服务端返回的 ETag。minio SDK 已经剥离了引号（实测返回
+    ``40820467919c684a8c89388304bcd584-3``），不需要自己处理。带 ``-N`` 后缀的是分段
+    上传的复合校验值而非内容 MD5——``SourceObject`` 的契约收紧为单向保证正因为它。
+
+    与本地目录的成本差异很大：这里一次列举 API 调用就带回全部 ETag 与 size，不需要读
+    对象内容；本地目录要读完每个文件才能算出哈希。协议不为此增加「便宜的预检」方法，
+    因为调用方每轮同步只列举一次。
+    """
+
+    def __init__(
+        self,
+        endpoint: str,
+        bucket: str,
+        prefix: str,
+        access_key: str,
+        secret_key: str,
+        *,
+        region: str | None = None,
+        secure: bool = True,
+        max_bytes: int | None = None,
+    ):
+        self.bucket = bucket
+        self.prefix = prefix or ""
+        self.max_bytes = max_bytes
+        self.skipped: list[tuple[str, int]] = []
+        self._client = Minio(
+            endpoint,
+            access_key=access_key,
+            secret_key=secret_key,
+            region=region,
+            secure=secure,
+        )
+
+    def list_objects(self) -> Iterator[SourceObject]:
+        self.skipped = []
+        try:
+            for item in self._client.list_objects(
+                self.bucket, prefix=self.prefix or None, recursive=True
+            ):
+                if item.is_dir:
+                    continue
+                key = validate_object_key(_strip_prefix(str(item.object_name), self.prefix))
+                size = int(item.size or 0)
+                if self.max_bytes is not None and size > self.max_bytes:
+                    # 列举响应已带回 size，超限对象根本不需要下载。
+                    self.skipped.append((key, size))
+                    continue
+                yield SourceObject(
+                    key=key,
+                    version=str(item.etag),
+                    size=size,
+                    modified_at=item.last_modified,
+                )
+        except S3Error as error:
+            raise _map_s3_error(error) from error
+
+    def fetch(self, key: str) -> bytes:
+        object_name = f"{self.prefix}{validate_object_key(key)}"
+        try:
+            response = self._client.get_object(self.bucket, object_name)
+        except S3Error as error:
+            raise _map_s3_error(error) from error
+        try:
+            return response.read()
+        finally:
+            # get_object 返回的是 HTTP 响应而不是字节，不释放会泄漏连接池。
+            response.close()
+            response.release_conn()

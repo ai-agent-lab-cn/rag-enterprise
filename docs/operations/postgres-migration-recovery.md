@@ -92,19 +92,45 @@ DATABASE_URL='<目标库>' uv run python -m scripts.rebuild_index inventory --kn
 
 ## 数据源同步
 
-命令与语义见 [README 的本地目录增量同步](../../README.md#本地目录增量同步)。按错误码处置：
+命令与语义见 [README 的数据源增量同步](../../README.md#数据源增量同步)。按错误码处置：
 
 | 错误码 | 含义与处置 |
 | --- | --- |
-| `SOURCE_ROOT_UNAVAILABLE` | 根目录不存在或不可读。检查挂载点、权限与 `configuration.root`；期间没有任何数据被删除，修好后重新同步即可。 |
-| `SYNC_DELETE_CIRCUIT_BREAKER` | 待删除量同时超过绝对下限与比例阈值，同步已中止且**未写入任何变更**。先核对根目录配置是否正确、导出任务是否跑成功；确认删除属实后再放行——放行方式是临时调高 `SYNC_DELETE_THRESHOLD_PERCENT` 重跑，不要绕过熔断直接改库。 |
+| `SOURCE_ROOT_UNAVAILABLE` | 本地目录不存在／不可读，或存储桶不存在／不可访问。检查挂载点、权限与 `configuration.root`，对象存储则检查 `endpoint` 与 `bucket`；期间没有任何数据被删除，修好后重新同步即可。 |
+| `SOURCE_CREDENTIALS_MISSING` | 未设置 `{credential_env}_ACCESS_KEY` 或 `_SECRET_KEY`。密钥只走环境变量、绝不入库，所以要在 Worker 进程的环境里补齐并重启 Worker——改数据库没有用。同步直接失败而不回退匿名访问，期间没有任何删除。 |
+| `SOURCE_CREDENTIALS_INVALID` | 密钥存在但被对象存储拒绝（`InvalidAccessKeyId` / `SignatureDoesNotMatch` / `AccessDenied`）。与上一条区分：一个是没给，一个是给错了或权限不足。核对密钥是否轮换过、该密钥对桶与前缀是否有读权限。 |
+| `SOURCE_UNAVAILABLE` | 其余对象存储错误（网络、超时、限流等），原始 S3 错误码保留在失败原因里。按原始码处置后重新同步。 |
+| `SYNC_DELETE_CIRCUIT_BREAKER` | 待删除量同时超过绝对下限与比例阈值，同步已中止且**未写入任何变更**。先核对根目录或桶前缀配置是否正确、导出任务是否跑成功；确认删除属实后再放行——放行方式是临时调高 `SYNC_DELETE_THRESHOLD_PERCENT` 重跑，不要绕过熔断直接改库。 |
 | `SYNC_ALREADY_RUNNING` | 该数据源已有活动同步任务。等前一次跑完；若 Worker 已崩溃，租约超时恢复会把任务放回队列（`INDEX_JOB_STALE_SECONDS`）。 |
-| `SOURCE_TYPE_NOT_SUPPORTED` | 该 `source_type` 尚未实现同步。当前只有 `local_directory` 可同步。 |
-| `SOURCE_OBJECT_KEY_INVALID` | 对象键含上跳路径或为绝对路径。检查目录里是否有异常文件名。 |
+| `SOURCE_TYPE_NOT_SUPPORTED` | 该 `source_type` 尚未实现同步。当前可同步的是 `local_directory` 与 `object_storage`。 |
+| `SOURCE_OBJECT_KEY_INVALID` | 对象键含上跳路径或为绝对路径。检查目录或桶里是否有异常名称。 |
+| `SOURCE_OBJECT_MISSING` | 列举与拉取之间对象被删除——桶或目录在同步期间有写入活动时会真实发生。**整次同步以此失败**（不是只跳过该对象）：循环在此中断，此前已索引的对象保留、其后的不动，删除与软删阶段整段不执行。直接重新同步即可继续，已索引的部分不会重做。 |
 
-同步失败或中止都不改变已有的可检索内容：熔断在任何写入之前判定，根目录不可用时直接
-失败而不产出空清单。软删除只置 `retrieval_status`，文档记录与向量保留，误删可以通过
+同步失败或中止都不改变已有的可检索内容：熔断在任何写入之前判定，数据源不可达或凭据缺失
+时直接失败而不产出空清单。软删除只置 `retrieval_status`，文档记录与向量保留，误删可以通过
 把对象放回数据源再同步一次来恢复。
+
+`status` 输出的 `last_sync_at` 是**上次成功**同步的时间，失败不刷新它——所以看到
+`last_sync_status: failed` 配着一个旧的（或 `null` 的）`last_sync_at` 是正常的。失败发生的
+时间查 `index_jobs.updated_at`。`pending_jobs` 里会包含失败待重试的任务：同步任务失败后
+回到 `queued` 并累加 `attempt_count`，到 `max_attempts`（默认 3）才终止。
+
+**「同步成功了，但这份文档搜不到」先查跳过日志。** 超过 `MAX_UPLOAD_MB` 的对象在列举
+阶段就被跳过，不下载也不入队，任何一张表里都查不到它存在过——`data_source_objects` 里没有
+它，`documents` 里也没有。唯一的痕迹是 Worker 日志里的 `data_source.object_skipped`：
+
+```bash
+grep object_skipped <worker 日志> | jq -c '{object_key, size_bytes, max_bytes}'
+```
+
+确认属实后，要么整体调高 `MAX_UPLOAD_MB`（上传路径会一起放宽，这是有意的：处理成本对两条
+路径相同），要么把该文档拆小后重新放进数据源。
+
+**整桶被判成已更新时先别怀疑数据。** 对象存储用服务端 ETag 做版本标识，而分段上传的 ETag
+是分段配置的函数——运维换上传工具或调了 `part_size` 重传，整桶 ETag 全变，下次同步会重跑
+一轮解析与 embedding。不丢数据，只烧算力。确认是这种情况就让它跑完，别去改库里的
+`data_source_objects.version`：那会让「已索引」与实际内容脱钩。原因见
+`docs/design/v5-7-external-data-source.md` 第 2 节。
 
 ## 索引版本切换与回滚
 

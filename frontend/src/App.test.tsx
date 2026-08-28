@@ -358,6 +358,18 @@ test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
   expect(window.location.pathname).toBe("/knowledge-bases/kb_default");
 });
 
+test("知识库详情提供数据源同步治理 Tab", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default");
+  render(<App />);
+
+  await userEvent.click(await screen.findByRole("tab", { name: /数据源/ }));
+
+  expect(screen.getByRole("button", { name: "新建外部数据源" })).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "同步状态" })).toBeInTheDocument();
+  expect(screen.getByText("profile.md")).toBeInTheDocument();
+});
+
 test("资料库支持一次选择多个文件并逐个上传", async () => {
   const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
   window.history.replaceState({}, "", "/knowledge-bases/kb_default");

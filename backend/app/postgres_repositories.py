@@ -130,6 +130,7 @@ class PostgresDataSourceRepository:
             rows = connection.execute(
                 """SELECT s.data_source_id, s.name, s.source_type, s.knowledge_base_id,
                           k.name AS knowledge_base_name, s.enabled, s.updated_at, s.acl,
+                          s.configuration,
                           count(DISTINCT d.document_id) AS document_count,
                           COALESCE(sum(v.source_file_bytes), 0) AS source_file_bytes,
                           CASE WHEN EXISTS (
@@ -158,6 +159,93 @@ class PostgresDataSourceRepository:
             ).fetchall()
         if accessible_ids is not None:
             rows = [row for row in rows if row["knowledge_base_id"] in accessible_ids]
+        return [dict(row) for row in rows]
+
+    def get(self, data_source_id: str) -> dict[str, object] | None:
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            row = connection.execute(
+                "SELECT * FROM data_sources WHERE data_source_id=%s",
+                (data_source_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create(
+        self,
+        knowledge_base_id: str,
+        name: str,
+        source_type: str,
+        configuration: dict[str, object],
+        default_category_id: str | None,
+        metadata_defaults: dict[str, object],
+    ) -> str:
+        data_source_id = f"ds_{uuid4().hex[:16]}"
+        stored = {
+            **configuration,
+            "default_category_id": default_category_id,
+            "metadata_defaults": metadata_defaults,
+        }
+        with psycopg.connect(self.database_url) as connection, connection.transaction():
+            if not connection.execute(
+                "SELECT 1 FROM knowledge_bases WHERE knowledge_base_id=%s",
+                (knowledge_base_id,),
+            ).fetchone():
+                raise ValueError("knowledge base not found")
+            if default_category_id and not connection.execute(
+                """SELECT 1 FROM document_categories
+                   WHERE knowledge_base_id=%s AND category_id=%s AND active""",
+                (knowledge_base_id, default_category_id),
+            ).fetchone():
+                raise ValueError("category not found")
+            connection.execute(
+                """INSERT INTO data_sources
+                   (data_source_id, knowledge_base_id, source_type, name, configuration,
+                    created_at, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, now(), now())""",
+                (data_source_id, knowledge_base_id, source_type, name, Jsonb(stored)),
+            )
+        return data_source_id
+
+    def update(
+        self,
+        data_source_id: str,
+        name: str,
+        configuration: dict[str, object],
+        default_category_id: str | None,
+        metadata_defaults: dict[str, object],
+    ) -> bool:
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            with connection.transaction():
+                source = connection.execute(
+                    "SELECT knowledge_base_id FROM data_sources WHERE data_source_id=%s FOR UPDATE",
+                    (data_source_id,),
+                ).fetchone()
+                if source is None:
+                    return False
+                if default_category_id and not connection.execute(
+                    """SELECT 1 FROM document_categories
+                       WHERE knowledge_base_id=%s AND category_id=%s AND active""",
+                    (source["knowledge_base_id"], default_category_id),
+                ).fetchone():
+                    raise ValueError("category not found")
+                stored = {
+                    **configuration,
+                    "default_category_id": default_category_id,
+                    "metadata_defaults": metadata_defaults,
+                }
+                connection.execute(
+                    """UPDATE data_sources SET name=%s, configuration=%s, updated_at=now()
+                       WHERE data_source_id=%s""",
+                    (name, Jsonb(stored), data_source_id),
+                )
+        return True
+
+    def list_sync_runs(self, data_source_id: str, limit: int = 50) -> list[dict[str, object]]:
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                """SELECT * FROM sync_runs WHERE data_source_id=%s
+                   ORDER BY created_at DESC LIMIT %s""",
+                (data_source_id, limit),
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def list_document_versions(self, knowledge_base_id: str) -> list[dict[str, object]]:

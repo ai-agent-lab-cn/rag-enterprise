@@ -5,6 +5,7 @@ description = "An explainable personal-document RAG system with retrieval evalua
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "minio>=7.2.0",
     "fastapi>=0.116.0",
     "google-genai>=1.24.0",
     "pydantic-settings>=2.10.0",

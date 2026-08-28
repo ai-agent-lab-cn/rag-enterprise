@@ -226,16 +226,38 @@ export interface KnowledgeBase {
 }
 
 export interface DataSource {
-  data_source_id: string; name: string; source_type: "file" | "object_storage" | "web" | "connector";
+  data_source_id: string; name: string; source_type: "file" | "local_directory" | "object_storage" | "web" | "connector";
   knowledge_base_id: string; knowledge_base_name: string; enabled: boolean;
   upload_status: "idle" | "succeeded";
   index_status: "idle" | "queued" | "running" | "succeeded" | "failed";
   /** @deprecated 使用 index_status。 */
-  sync_status: "idle" | "queued" | "running" | "succeeded" | "failed";
+  sync_status: "idle" | "queued" | "running" | "succeeded" | "failed" | "aborted";
+  configuration?: Record<string, unknown>;
+  default_category_id?: string | null;
+  metadata_defaults?: Record<string, unknown>;
   document_count: number; source_file_bytes: number; last_indexed_at: string | null; last_synced_at: string | null;
   failure_reason: string | null; updated_at: string;
   acl_version: number; allow_user_ids: string[]; deny_user_ids: string[];
-  allowed_actions: Array<"detail" | "edit" | "disable" | "enable" | "update_file" | "delete">;
+  allowed_actions: Array<"detail" | "edit" | "disable" | "enable" | "update_file" | "delete" | "test" | "sync">;
+}
+
+export interface SyncRun {
+  sync_run_id: string;
+  data_source_id: string;
+  status: "queued" | "discovering" | "syncing" | "indexing" | "succeeded" | "partial_failed" | "aborted" | "failed";
+  stage: string;
+  added_count: number;
+  updated_count: number;
+  deleted_count: number;
+  skipped_count: number;
+  failed_count: number;
+  retry_count: number;
+  error_code: string | null;
+  failure_reason: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ConversationSummary {

@@ -4,13 +4,14 @@ import type { ConversationSummary, DataSource, DocumentCategory, DocumentInfo, D
 import { DocumentPanel } from "./DocumentPanel";
 import { Modal } from "./Modal";
 import { ParsingPanel } from "./ParsingPanel";
+import { KnowledgeBaseDataSourcesPanel } from "./KnowledgeBaseDataSourcesPanel";
 
 const STATUS = { empty: "空库", processing: "处理中", ready: "可用", failed: "失败" } as const;
 const VERSION_STATUS = { pending: "等待索引", indexing: "索引中", ready: "可用", failed: "失败", superseded: "历史版本" } as const;
 function formatBytes(value: number) { if (!value) return "0 KB"; const divisor = value >= 1024 ** 2 ? 1024 ** 2 : 1024; return `${(value / divisor).toFixed(1)} ${divisor === 1024 ? "KB" : "MB"}`; }
 
 export function KnowledgeBaseDetailPage({ id, onOpen }: { id: string; onOpen: (path: string) => void }) {
-  const [activeTab, setActiveTab] = useState<"documents" | "categories" | "parsing" | "versions" | "members" | "conversations">("documents");
+  const [activeTab, setActiveTab] = useState<"documents" | "data_sources" | "categories" | "parsing" | "versions" | "members" | "conversations">("documents");
   const [base, setBase] = useState<KnowledgeBase | null>(null); const [documents, setDocuments] = useState<DocumentInfo[]>([]);
   const [versions, setVersions] = useState<DocumentVersion[]>([]); const [members, setMembers] = useState<User[]>([]);
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
@@ -40,6 +41,7 @@ export function KnowledgeBaseDetailPage({ id, onOpen }: { id: string; onOpen: (p
     <section className="knowledge-detail-summary"><div><span>名称</span><strong>{base.name}</strong><em className="base-type-tag">{base.is_default ? "默认知识库" : "独立知识库"}</em></div><div><span>描述</span><strong>{base.description || "—"}</strong></div><div><span>文件占用</span><strong>{formatBytes(base.source_file_bytes)}</strong></div><div><span>索引状态</span><strong><i className={`status-tag status-${base.index_status}`}>{STATUS[base.index_status]}</i></strong></div><div><span>更新时间</span><strong>{new Date(base.updated_at).toLocaleString("zh-CN")}</strong></div></section>
     <div className="detail-tabs" role="tablist" aria-label="知识库详情">
       <button role="tab" aria-selected={activeTab === "documents"} onClick={() => setActiveTab("documents")}>资料 <span>{documents.length}</span></button>
+      <button role="tab" aria-selected={activeTab === "data_sources"} onClick={() => setActiveTab("data_sources")}>数据源 <span>{dataSources.length}</span></button>
       <button role="tab" aria-selected={activeTab === "categories"} onClick={() => setActiveTab("categories")}>分类管理 <span>{categories.length}</span></button>
       <button role="tab" aria-selected={activeTab === "parsing"} onClick={() => setActiveTab("parsing")}>解析与切片 <span>{versions.filter((item) => item.parse_status === "ready").length}</span></button>
       <button role="tab" aria-selected={activeTab === "versions"} onClick={() => setActiveTab("versions")}>版本治理 <span>{versions.length}</span></button>
@@ -48,6 +50,7 @@ export function KnowledgeBaseDetailPage({ id, onOpen }: { id: string; onOpen: (p
     </div>
     <div className="detail-tab-panel" role="tabpanel">
       {activeTab === "documents" ? <DocumentPanel documents={documents} categories={categories} loading={busy} uploadProgress={uploadProgress} onUpload={upload} onDelete={remove} onUpdateMetadata={updateMetadata} onBatchCategory={batchCategory}/> : null}
+      {activeTab === "data_sources" ? <KnowledgeBaseDataSourcesPanel knowledgeBaseId={id} items={dataSources} categories={categories} onRefresh={load}/> : null}
       {activeTab === "categories" ? <section className="category-governance"><div className="category-create"><input aria-label="新分类名称" value={categoryName} maxLength={64} placeholder="输入分类名称" onChange={(event) => setCategoryName(event.target.value)}/><button className="primary-action" type="button" disabled={busy || !categoryName.trim()} onClick={() => void createCategory()}>新建分类</button></div><div className="category-list">{categories.map((item) => <div key={item.category_id}><span><strong>{item.name}</strong><small>{item.document_count} 份资料 · 排序 {item.sort_order}{item.active ? "" : " · 已停用"}</small>{item.description ? <small>{item.description}</small> : null}</span><div><button type="button" disabled={busy} onClick={() => openCategoryEditor(item)}>编辑</button><button type="button" disabled={busy || item.is_system} onClick={() => void toggleCategory(item)}>{item.active ? "停用" : "启用"}</button><button className="table-danger-action" type="button" disabled={busy || item.is_system || item.document_count > 0} title={item.document_count > 0 ? "请先迁移资料" : ""} onClick={() => void deleteCategory(item)}>删除</button></div></div>)}</div></section> : null}
       {activeTab === "parsing" ? <ParsingPanel knowledgeBaseId={id} versions={versions} canManage={base.current_user_permission === "admin"} onRefresh={load}/> : null}
       {activeTab === "versions" ? <section className="surface-card">{versions.length ? <div className="version-list">{versions.map((item) => <article key={item.document_version_id}><div><b>{item.filename}</b><span>V{item.version_number}{item.is_current ? <em>当前版本</em> : null}</span></div><div><span>{formatBytes(item.source_file_bytes)} · {item.content_sha256.slice(0, 10)}</span><span>{item.parser_name || "旧版解析"} {item.parser_version || "legacy"} · {item.chunking_version || "旧版切片"} · {item.node_count} 节点 / {item.parsed_chunk_count} Chunk</span><span>{new Date(item.created_at).toLocaleString("zh-CN")}</span></div><strong className={`status-tag status-${item.parse_status === "failed" || item.status === "failed" ? "failed" : item.parse_status !== "ready" || item.status === "indexing" || item.status === "pending" ? "processing" : "ready"}`}>{item.parse_status === "failed" ? item.parse_failure_code || "解析失败" : item.parse_status !== "ready" ? `解析${item.parse_status}` : VERSION_STATUS[item.status]}</strong>{item.failure_reason ? <small title={item.failure_reason}>{item.failure_reason}</small> : null}</article>)}</div> : <p className="empty-copy">还没有文档版本。</p>}</section> : null}

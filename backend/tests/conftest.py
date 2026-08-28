@@ -1,3 +1,4 @@
+import os
 from collections.abc import Iterator
 
 import pytest
@@ -14,6 +15,15 @@ from backend.app.main import (
     get_service,
 )
 from backend.app.schemas import DocumentInfo, QueryResponse, Source
+
+# 依赖外部服务的测试在本地缺服务时跳过，在 CI 里缺服务必须直接失败。
+# 跳过在 workflow 日志里和通过长得一模一样：MinIO 起不来 → 对象存储测试全被跳过 →
+# 依然绿灯。这个项目已经四次发现「没有 CI 覆盖的东西会静默腐烂」，不再给第五次机会。
+if os.getenv("CI") and not os.getenv("MINIO_ENDPOINT"):
+    raise RuntimeError(
+        "CI 环境缺少 MINIO_ENDPOINT，对象存储测试会被静默跳过。"
+        "请确认 workflow 里的 MinIO 已启动。"
+    )
 
 
 class FakeService:

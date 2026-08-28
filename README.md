@@ -13,6 +13,7 @@
 - CrossEncoder 精排，同时展示粗召回与精排分数
 - Gemini 生成带 `[来源 N]` 标签的答案，未配置 Key 时仍可完成检索
 - FastAPI 类型化接口与 React/TypeScript 交互界面
+- 知识库级数据源治理：S3 连接测试、增量同步、进度、失败重试和同步记录
 - Recall@K、MRR 评测脚本，以及检索/精排/生成分阶段延迟
 - 上传文件、向量索引和密钥默认不进入 Git
 
@@ -40,6 +41,7 @@ MD / TXT / PDF
 | 检索 | text2vec 中文 Embedding、PostgreSQL 16 + pgvector |
 | 精排 | sentence-transformers CrossEncoder |
 | 生成 | Google Gemini（环境变量配置） |
+| 数据源 | 本地目录、S3 兼容对象存储（minio SDK） |
 | 质量 | pytest、Vitest、ESLint、Ruff |
 
 ## 快速开始
@@ -313,15 +315,23 @@ uv run python -m backend.evaluation.diagnose_retrieval \
 跌到 `0.4586`）——同一小节下的段落因共享标题前缀而向量趋同，区分度被破坏。原因
 记录在 `parsers.py` 的注释里，避免重复试错。
 
-### 本地目录增量同步
+### 数据源增量同步
 
-资料不必再逐个手工上传。把一个目录登记为数据源之后，同步会自己识别新增、内容更新与删除，
-只处理变化的那部分：
+资料不必再逐个手工上传。把一个本地目录或 S3 兼容存储桶登记为数据源之后，同步会自己识别
+新增、内容更新与删除，只处理变化的那部分：
 
 ```bash
-# 1. 登记数据源（一个数据源 = 一个根目录）
+# 1a. 登记本地目录数据源（一个数据源 = 一个根目录）
 uv run python -m scripts.sync_data_source create \
   --knowledge-base kb_default --name 手册目录 --root /mnt/enterprise-docs --suffixes .md,.pdf
+
+# 1b. 或登记 S3 兼容对象存储（一个数据源 = 一个桶 + 一个前缀）
+export ENTERPRISE_DOCS_ACCESS_KEY=...   # 密钥只走环境变量，见下
+export ENTERPRISE_DOCS_SECRET_KEY=...
+uv run python -m scripts.sync_data_source create \
+  --knowledge-base kb_default --name 手册桶 --type object_storage \
+  --endpoint s3.example.com --bucket enterprise-docs --prefix handbook/ \
+  --region cn-north-1 --credential-env ENTERPRISE_DOCS
 
 # 2. 发起同步；需要 Worker 在跑才会真正执行
 uv run python -m scripts.sync_data_source sync --data-source "$DATA_SOURCE_ID"
@@ -332,10 +342,39 @@ uv run python -m scripts.sync_data_source status --data-source "$DATA_SOURCE_ID"
 uv run python -m scripts.sync_data_source list --knowledge-base kb_default
 ```
 
-**变更判定基于内容 SHA-256，不看修改时间。** `touch` 全部文件后再同步会产生零个索引
-任务——mtime 会在同内容重新落盘时改变（rsync、网盘客户端重传、`cp` 都会），用它做判定
-会触发大量无谓的重新解析与重新 embedding。反过来，编辑后大小恰好不变的情况也真实存在，
-所以 size 同样不可靠。
+**访问密钥绝不进数据库。** 对象存储的密钥只从环境变量 `{--credential-env}_ACCESS_KEY`
+与 `_SECRET_KEY` 读取，CLI 刻意不提供任何接收密钥的参数。写进 `configuration` 会让数据库
+备份、审计 payload 和只读数据源接口同时变成密钥泄露面。副作用是轮换密钥只改环境变量，
+不动数据库。环境变量缺失时同步以 `SOURCE_CREDENTIALS_MISSING` 失败，**不回退匿名访问**
+——回退会让配置错误表现成「桶是空的」，而空清单会被判成全部删除。
+
+**变更判定不看修改时间，也不看大小。** mtime 会在同内容重新落盘时改变（rsync、网盘客户端
+重传、`cp` 都会），用它做判定会触发大量无谓的重新解析与重新 embedding；而编辑后大小恰好
+不变的情况也真实存在，所以 size 同样不可靠。两种数据源的判定依据不同：
+
+- **本地目录**用内容 SHA-256。`touch` 全部文件后再同步会产生零个索引任务。
+- **对象存储**用服务端 ETag。契约只保证单向——内容变了 ETag 一定变，反向不保证。
+
+**换分段大小重传会触发该对象重新索引。** 分段上传的 ETag 不是内容 MD5，而是各段 MD5
+拼接后再取 MD5 加 `-段数` 后缀，同一份内容换个 `part_size` 上传就得到不同 ETag。运维换上传
+工具或调了分段大小，整桶会被判成已更新并重跑一轮索引。这是接受 ETag 作为版本标识的已知
+代价：误判方向安全（多做一次索引，结果正确），而致命的那一半——内容变了却没被发现——
+不会发生。不选「下载内容自己算哈希」是因为那要求每次同步拉取整个桶，等于把对象存储退化成
+远程的本地目录。
+
+**超过 `MAX_UPLOAD_MB`（默认 15）的对象在列举阶段被跳过，不下载。** 它不入队、不软删、
+不计入熔断分母，文档列表里也不会出现——它从未被索引过。跳过对同步结果是「成功」，对提问
+的人却是「这份资料不在库里」，所以每个被跳过的对象都会在 Worker 日志里留一条
+`data_source.object_skipped`，带上 `object_key`、`size_bytes` 与 `max_bytes`：
+
+```bash
+uv run python -m scripts.index_worker 2>&1 | grep object_skipped | jq -c '{object_key, size_bytes}'
+```
+
+上限与
+上传路径共用一个配置项：真正的约束是解析与 embedding 的处理能力，而它对两条路径完全相同，
+「对象存储里文件更大」不构成放宽理由。要放宽就整体调高 `MAX_UPLOAD_MB`。不把它当作
+「失败」是因为失败会被自动重试，而超限对象每次必然失败，等于每轮都白下载一遍那个大文件。
 
 **删除是软删除。** 对象在数据源里消失后，它的分块不再进检索，但文档记录、版本记录与
 向量全部保留（`retrieval_status` 置 `deleted`）。物理删除仍只能由人显式执行。对象重新
@@ -352,17 +391,21 @@ version」——否则失败的文档会被永久跳过，而列表里一直显�
 挂载点掉了、导出任务没跑成功，都会让列举结果几乎为空。两个条件都要满足是因为纯比例
 在小知识库上过于敏感：3 份文档删 1 份就是 33%，而那是正常操作。
 
-根目录不可用时同步以 `SOURCE_ROOT_UNAVAILABLE` 失败，**不会**产出空清单——空清单会被
-差异计算判定为「全部删除」，那是把配置错误伪装成数据变更。
+根目录不存在或存储桶不可访问时，同步以 `SOURCE_ROOT_UNAVAILABLE` 失败，**不会**产出空
+清单——空清单会被差异计算判定为「全部删除」，那是把配置错误伪装成数据变更。两种数据源
+共用这个错误码是有意的：语义相同，不该各造一套。
 
 已实现范围与边界：
 
-- 只实现本地目录（`local_directory`）。`object_storage` / `web` / `connector` 三个
-  `source_type` 仍是 `0001` 里的预留值，**不对应任何实现**。
-- **外部数据源接入属于后续阶段**，本阶段不含 S3 兼容对象存储。
+- 实现本地目录（`local_directory`）与 S3 兼容对象存储（`object_storage`）。`web` /
+  `connector` 两个 `source_type` 仍是 `0001` 里的预留值，**不对应任何实现**。
 - 同步由操作者显式触发，没有定时同步与 webhook。
-- 一个数据源对应一个根目录，不支持多目录或通配匹配。
-- 跳过符号链接与隐藏文件。同一数据源同时只允许一个活动同步任务。
+- 一个本地目录数据源对应一个根目录，一个对象存储数据源对应一个桶加一个前缀；都不支持
+  多路径或通配匹配。
+- 不感知 S3 对象版本控制（versioning），桶开了也只同步当前版本。
+- **未做分批**：单次同步在超大桶上可能长时间占用 Worker（单 Worker 串行），并可能超过
+  `INDEX_JOB_STALE_SECONDS`（默认 900）导致租约被回收、滚动更新期间重复领取。
+- 本地目录跳过符号链接与隐藏文件。同一数据源同时只允许一个活动同步任务。
 
 ### 索引版本切换与回滚
 

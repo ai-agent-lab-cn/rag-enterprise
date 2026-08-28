@@ -48,7 +48,39 @@ def test_migration_files_are_contiguous() -> None:
         "0009_structured_parsing.sql",
         "0010_index_versions.sql",
         "0011_data_source_sync.sql",
+        "0012_sync_run_governance.sql",
     ]
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_schema_twelve_adds_sync_run_governance() -> None:
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    assert apply_migrations(database_url) == 12
+
+    with psycopg.connect(database_url) as connection:
+        columns = {
+            row[0]
+            for row in connection.execute(
+                """SELECT column_name FROM information_schema.columns
+                   WHERE table_name='sync_runs'"""
+            ).fetchall()
+        }
+        assert {
+            "sync_run_id", "data_source_id", "status", "stage", "added_count",
+            "updated_count", "deleted_count", "skipped_count", "failed_count",
+            "cursor", "next_cursor", "retry_count", "error_code", "failure_reason",
+        } <= columns
+        index_job_columns = {
+            row[0]
+            for row in connection.execute(
+                """SELECT column_name FROM information_schema.columns
+                   WHERE table_name='index_jobs'"""
+            ).fetchall()
+        }
+        assert "sync_run_id" in index_job_columns
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -105,8 +137,8 @@ def test_schema_two_with_existing_data_upgrades_to_schema_three(tmp_path: Path) 
             (now, now),
         )
 
-    assert apply_migrations(database_url) == 11
-    check_schema_version(database_url, 11)
+    assert apply_migrations(database_url) == 12
+    check_schema_version(database_url, 12)
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
             "SELECT status, chunking_version FROM document_versions WHERE document_version_id = 'ver_legacy'"
@@ -163,8 +195,8 @@ def test_postgres_runtime_covers_auth_indexing_and_backup(tmp_path: Path) -> Non
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 11
-    check_schema_version(database_url, 11)
+    assert apply_migrations(database_url) == 12
+    check_schema_version(database_url, 12)
 
     now = datetime.now(UTC)
     with psycopg.connect(database_url) as connection, connection.transaction():
@@ -363,8 +395,8 @@ def test_schema_nine_with_existing_chunks_upgrades_to_schema_ten(tmp_path: Path)
             (json.dumps({"document_id": "doc_legacy"}), now),
         )
 
-    assert apply_migrations(database_url) == 11
-    check_schema_version(database_url, 11)
+    assert apply_migrations(database_url) == 12
+    check_schema_version(database_url, 12)
 
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
@@ -396,7 +428,7 @@ def test_schema_ten_on_empty_database_keeps_embedding_unconstrained(tmp_path: Pa
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 11
+    assert apply_migrations(database_url) == 12
     with psycopg.connect(database_url) as connection:
         assert connection.execute(
             """SELECT format_type(atttypid, atttypmod) FROM pg_attribute
@@ -457,8 +489,8 @@ def test_schema_eleven_allows_sync_jobs_and_local_directory_sources(tmp_path: Pa
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 11
-    check_schema_version(database_url, 11)
+    assert apply_migrations(database_url) == 12
+    check_schema_version(database_url, 12)
 
     now = datetime.now(UTC)
     with psycopg.connect(database_url) as connection, connection.transaction():

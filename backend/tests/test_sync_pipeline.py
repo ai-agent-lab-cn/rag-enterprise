@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -347,6 +348,24 @@ def test_concurrent_sync_is_rejected(tmp_path: Path) -> None:
     assert error.value.code == "SYNC_ALREADY_RUNNING"
 
 
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_disabled_source_cannot_start_sync(tmp_path: Path) -> None:
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    root = tmp_path / "docs"
+    root.mkdir()
+    source_id = _create_directory_source(database_url, root)
+    with psycopg.connect(database_url) as connection:
+        connection.execute(
+            "UPDATE data_sources SET enabled=false WHERE data_source_id=%s", (source_id,)
+        )
+
+    with pytest.raises(AppError) as error:
+        enqueue_sync(database_url, source_id)
+
+    assert error.value.code == "DATA_SOURCE_DISABLED"
+
+
 class _FailOnKeyEmbedder(_FakeEmbedder):
     """只让指定关键字的文档索引失败，模拟单个文档解析或嵌入失败。"""
 
@@ -404,3 +423,126 @@ def test_sync_retries_objects_whose_indexing_failed(tmp_path: Path) -> None:
 
     assert _count(database_url, "SELECT count(*) FROM document_versions WHERE status='failed'") == 0
     assert _searchable_count(database_url) == 2
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_oversized_objects_never_enter_the_diff(tmp_path: Path) -> None:
+    """超限对象不入队、不软删、不进对象记录，同步整体仍然成功。
+
+    同步走 index_document，绕过了 API 上传路径的 validate_upload，所以大小限制必须
+    在同步侧自己做，否则桶里或目录里一个大文件就能打死 Worker。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "ok.md").write_text("# ok\n\n正文内容。" * 20, encoding="utf-8")
+    (root / "huge.md").write_bytes(b"x" * (3 * 1024 * 1024))
+    source_id = _create_directory_source(database_url, root)
+    settings = _settings(tmp_path, database_url).model_copy(update={"max_upload_mb": 1})
+
+    _run_full_sync(settings, database_url, source_id)
+
+    assert _document_count(database_url) == 1
+    assert _sync_state(database_url, source_id)[0] == "succeeded"
+    with psycopg.connect(database_url) as connection:
+        keys = [
+            row[0]
+            for row in connection.execute(
+                "SELECT object_key FROM data_source_objects ORDER BY object_key"
+            ).fetchall()
+        ]
+    assert keys == ["ok.md"], "超限对象不得进入对象记录"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_skipped_objects_are_reported_in_the_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """跳过必须留下可查的记录，否则运维无从知道那份文档为什么搜不到。
+
+    跳过对同步结果是"成功"，对提问的人是"这份资料不在库里"。这两者之间只有日志。
+    run_sync 的返回值里带着 skipped，但 IndexWorker 调用它时不接返回值——没有日志
+    就等于这个字段只存在于代码里。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "ok.md").write_text("# ok\n\n正文内容。" * 20, encoding="utf-8")
+    (root / "huge.md").write_bytes(b"x" * (3 * 1024 * 1024))
+    source_id = _create_directory_source(database_url, root)
+    settings = _settings(tmp_path, database_url).model_copy(update={"max_upload_mb": 1})
+
+    with caplog.at_level(logging.INFO):
+        _run_full_sync(settings, database_url, source_id)
+
+    skipped_events = [
+        record.message
+        for record in caplog.records
+        if "data_source.object_skipped" in record.message
+    ]
+    assert len(skipped_events) == 1, "每个被跳过的对象都要留一条记录"
+    assert "huge.md" in skipped_events[0], "记录里必须能看出是哪个对象"
+    assert "3145728" in skipped_events[0], "记录里必须能看出实际大小，才能判断该放宽还是该拆分"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_object_storage_source_requires_credential_env(tmp_path: Path) -> None:
+    """对象存储数据源必须配置 credential_env，凭据本身绝不进数据库。"""
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO data_sources
+               (data_source_id, knowledge_base_id, source_type, name, configuration,
+                created_at, updated_at)
+               VALUES ('ds_s3', %s, 'object_storage', '对象存储', %s, now(), now())""",
+            (KNOWLEDGE_BASE_ID, Jsonb({"endpoint": "127.0.0.1:9000", "bucket": "docs"})),
+        )
+    settings = _settings(tmp_path, database_url)
+
+    _run_full_sync(settings, database_url, "ds_s3")
+
+    status, reason = _sync_state(database_url, "ds_s3")
+    assert status == "failed"
+    assert reason is not None and "SOURCE_CONFIGURATION_INVALID" in reason
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_object_storage_source_fails_loudly_without_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缺凭据必须明确失败，不回退匿名访问。
+
+    回退会让配置错误表现成「桶是空的」，而空清单会被差异计算判成全部删除。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    monkeypatch.delenv("SYNC_PROBE_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("SYNC_PROBE_SECRET_KEY", raising=False)
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO data_sources
+               (data_source_id, knowledge_base_id, source_type, name, configuration,
+                created_at, updated_at)
+               VALUES ('ds_s3', %s, 'object_storage', '对象存储', %s, now(), now())""",
+            (
+                KNOWLEDGE_BASE_ID,
+                Jsonb({
+                    "endpoint": "127.0.0.1:9000", "bucket": "docs",
+                    "credential_env": "SYNC_PROBE",
+                }),
+            ),
+        )
+    settings = _settings(tmp_path, database_url)
+
+    _run_full_sync(settings, database_url, "ds_s3")
+
+    status, reason = _sync_state(database_url, "ds_s3")
+    assert status == "failed"
+    assert reason is not None and "SOURCE_CREDENTIALS_MISSING" in reason

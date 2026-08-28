@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -17,8 +19,12 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .config import Settings
-from .connectors import Connector, LocalDirectoryConnector, SourceObject
+from .connectors import Connector, LocalDirectoryConnector, S3Connector, SourceObject
 from .errors import AppError
+from .observability import structured_log
+
+# 已实现同步的数据源类型。web 与 connector 自 0001 起就是预留值，不对应任何实现。
+SYNCABLE_SOURCE_TYPES = frozenset({"local_directory", "object_storage"})
 
 
 @dataclass(frozen=True)
@@ -150,18 +156,73 @@ def mark_documents_searchable(
     return _set_retrieval_status(database_url, knowledge_base_id, document_ids, "searchable")
 
 
-def build_connector(configuration: dict[str, Any]) -> Connector:
-    """按数据源配置构造连接器。
+def _read_credentials(configuration: dict[str, Any]) -> tuple[str, str]:
+    """从环境变量读取对象存储的访问密钥。
 
-    只认已实现的类型。``object_storage`` / ``web`` / ``connector`` 三个 source_type
-    在 0001 里就是预留值，不对应任何实现——把它们当已实现会让同步静默什么都不做。
+    凭据绝不进数据库：写进 configuration 会让数据库备份、审计 payload 和只读数据源
+    接口同时变成密钥泄露面。缺失时明确失败而不回退匿名访问——回退会让一个配置错误
+    表现成「桶是空的」，而空清单会被差异计算判成全部删除。
     """
 
-    root = configuration.get("root")
-    if not root:
-        raise AppError("SOURCE_CONFIGURATION_INVALID", "本地目录数据源必须配置 root。", 400)
-    suffixes = tuple(configuration.get("include_suffixes") or (".md", ".txt", ".pdf"))
-    return LocalDirectoryConnector(Path(str(root)), suffixes)
+    name = str(configuration.get("credential_env") or "").strip()
+    if not name:
+        raise AppError(
+            "SOURCE_CONFIGURATION_INVALID", "对象存储数据源必须配置 credential_env。", 400
+        )
+    access_key = os.getenv(f"{name}_ACCESS_KEY")
+    secret_key = os.getenv(f"{name}_SECRET_KEY")
+    if not access_key or not secret_key:
+        raise AppError(
+            "SOURCE_CREDENTIALS_MISSING",
+            f"缺少环境变量 {name}_ACCESS_KEY 或 {name}_SECRET_KEY。",
+            409,
+        )
+    return access_key, secret_key
+
+
+def build_connector(
+    configuration: dict[str, Any], source_type: str, max_bytes: int | None = None
+) -> Connector:
+    """按数据源类型构造连接器。
+
+    只认已实现的类型。``web`` / ``connector`` 两个 source_type 自 0001 起就是预留值，
+    不对应任何实现——把它们当已实现会让同步静默什么都不做。
+
+    ``max_bytes`` 传给连接器让它在列举阶段跳过超限对象。同步走 index_document、
+    绕过了 API 上传的 validate_upload，不自己设限的话一个大文件就能打死 Worker。
+    """
+
+    if source_type == "local_directory":
+        root = configuration.get("root")
+        if not root:
+            raise AppError(
+                "SOURCE_CONFIGURATION_INVALID", "本地目录数据源必须配置 root。", 400
+            )
+        suffixes = tuple(configuration.get("include_suffixes") or (".md", ".txt", ".pdf"))
+        return LocalDirectoryConnector(Path(str(root)), suffixes, max_bytes=max_bytes)
+
+    if source_type == "object_storage":
+        endpoint = str(configuration.get("endpoint") or "").strip()
+        bucket = str(configuration.get("bucket") or "").strip()
+        if not endpoint or not bucket:
+            raise AppError(
+                "SOURCE_CONFIGURATION_INVALID", "对象存储数据源必须配置 endpoint 与 bucket。", 400
+            )
+        access_key, secret_key = _read_credentials(configuration)
+        return S3Connector(
+            endpoint,
+            bucket,
+            str(configuration.get("prefix") or ""),
+            access_key,
+            secret_key,
+            region=configuration.get("region") or None,
+            secure=bool(configuration.get("secure", True)),
+            max_bytes=max_bytes,
+        )
+
+    raise AppError(
+        "SOURCE_TYPE_NOT_SUPPORTED", f"数据源类型 {source_type} 尚未实现同步。", 409
+    )
 
 
 def enqueue_sync(
@@ -175,39 +236,56 @@ def enqueue_sync(
 
     with psycopg.connect(database_url, row_factory=dict_row) as connection:
         source = connection.execute(
-            """SELECT data_source_id, knowledge_base_id, source_type
+            """SELECT data_source_id, knowledge_base_id, source_type, enabled
                FROM data_sources WHERE data_source_id = %s""",
             (data_source_id,),
         ).fetchone()
         if source is None:
             raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
-        if str(source["source_type"]) != "local_directory":
+        if not bool(source["enabled"]):
+            raise AppError("DATA_SOURCE_DISABLED", "数据源已停用，不能启动同步。", 409)
+        if str(source["source_type"]) not in SYNCABLE_SOURCE_TYPES:
             raise AppError(
                 "SOURCE_TYPE_NOT_SUPPORTED",
                 f"数据源类型 {source['source_type']} 尚未实现同步。",
                 409,
             )
         index_job_id = f"job_{uuid4().hex[:20]}"
+        sync_run_id = f"run_{uuid4().hex[:20]}"
         try:
             with connection.transaction():
                 connection.execute(
+                    """INSERT INTO sync_runs
+                       (sync_run_id, data_source_id, knowledge_base_id, status, stage, cursor)
+                       VALUES (%s, %s, %s, 'queued', 'discover',
+                         (SELECT next_cursor FROM sync_runs
+                          WHERE data_source_id = %s AND status IN ('succeeded', 'partial_failed')
+                          ORDER BY created_at DESC LIMIT 1))""",
+                    (sync_run_id, data_source_id, source["knowledge_base_id"], data_source_id),
+                )
+                connection.execute(
                     """INSERT INTO index_jobs
                        (index_job_id, knowledge_base_id, data_source_id, idempotency_key,
-                        status, max_attempts, job_type)
-                       VALUES (%s, %s, %s, %s, 'queued', %s, 'sync')""",
+                        status, max_attempts, job_type, sync_run_id)
+                       VALUES (%s, %s, %s, %s, 'queued', %s, 'sync', %s)""",
                     (
                         index_job_id,
                         source["knowledge_base_id"],
                         data_source_id,
                         f"sync:{data_source_id}:{uuid4().hex[:12]}",
                         max_attempts,
+                        sync_run_id,
                     ),
                 )
         except psycopg.errors.UniqueViolation:
             raise AppError(
                 "SYNC_ALREADY_RUNNING", "该数据源已有同步任务在进行中。", 409
             ) from None
-    return {"index_job_id": index_job_id, "data_source_id": data_source_id}
+    return {
+        "index_job_id": index_job_id,
+        "sync_run_id": sync_run_id,
+        "data_source_id": data_source_id,
+    }
 
 
 def _known_objects(
@@ -256,6 +334,37 @@ def _set_sync_status(
         )
 
 
+def _update_sync_run(
+    database_url: str,
+    sync_run_id: str,
+    status: str,
+    stage: str,
+    **values: object,
+) -> None:
+    allowed = {
+        "added_count", "updated_count", "deleted_count", "skipped_count",
+        "failed_count", "retry_count", "cursor", "next_cursor", "error_code",
+        "failure_reason",
+    }
+    assignments = ["status = %s", "stage = %s", "updated_at = now()"]
+    parameters: list[object] = [status, stage]
+    if status not in {"queued"}:
+        assignments.append("started_at = COALESCE(started_at, now())")
+    if status in {"succeeded", "partial_failed", "aborted", "failed"}:
+        assignments.append("finished_at = now()")
+    for key, value in values.items():
+        if key not in allowed:
+            raise ValueError(f"unsupported sync run field: {key}")
+        assignments.append(f"{key} = %s")
+        parameters.append(value)
+    parameters.append(sync_run_id)
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            f"UPDATE sync_runs SET {', '.join(assignments)} WHERE sync_run_id = %s",
+            parameters,
+        )
+
+
 def run_sync(settings: Settings, embedder: Any, job: dict[str, Any]) -> dict[str, object]:
     """执行一次同步：列举、比对、熔断、索引变化对象、软删消失对象。
 
@@ -265,24 +374,40 @@ def run_sync(settings: Settings, embedder: Any, job: dict[str, Any]) -> dict[str
 
     database_url = str(settings.database_url)
     data_source_id = str(job["data_source_id"])
+    sync_run_id = str(job.get("sync_run_id") or "")
     _set_sync_status(database_url, data_source_id, "running")
+    if sync_run_id:
+        _update_sync_run(database_url, sync_run_id, "discovering", "discover")
     try:
         with psycopg.connect(database_url, row_factory=dict_row) as connection:
             source = connection.execute(
-                """SELECT knowledge_base_id, configuration FROM data_sources
+                """SELECT knowledge_base_id, configuration, source_type FROM data_sources
                    WHERE data_source_id = %s""",
                 (data_source_id,),
             ).fetchone()
         if source is None:
             raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
         knowledge_base_id = str(source["knowledge_base_id"])
-        connector = build_connector(dict(source["configuration"] or {}))
+        configuration = dict(source["configuration"] or {})
+        connector = build_connector(
+            configuration,
+            str(source["source_type"]),
+            max_bytes=settings.max_upload_mb * 1024 * 1024,
+        )
 
         # 只承认已 ready 的对象为"已同步"。
         indexed = _known_objects(database_url, data_source_id, only_indexed=True)
         # 熔断分母用全部记录：未 ready 的对象在远端依然存在，不该被算进"待删除"。
         known = _known_objects(database_url, data_source_id)
         remote = list(connector.list_objects())
+        next_cursor = sha256(
+            "\n".join(
+                f"{item.key}:{item.version}"
+                for item in sorted(remote, key=lambda value: value.key)
+            ).encode()
+        ).hexdigest()
+        if sync_run_id:
+            _update_sync_run(database_url, sync_run_id, "syncing", "diff")
         remote_keys = {item.key for item in remote}
 
         # 分四类而不是三类。多出来的 retry 是"有记录但当前版本没到 ready"——解析或嵌入
@@ -313,10 +438,35 @@ def run_sync(settings: Settings, embedder: Any, job: dict[str, Any]) -> dict[str
         service = PostgresAsyncRAGService(settings, embedder, None, None)
         processed = 0
         for item in diff.added + diff.updated:
+            metadata = dict(configuration.get("metadata_defaults") or {})
+            metadata.update(
+                {
+                    "source_system": str(source["source_type"]),
+                    "external_resource_id": item.key,
+                    "retrieval_status": "searchable",
+                }
+            )
+            category_id = configuration.get("default_category_id")
+            if category_id:
+                with psycopg.connect(database_url) as category_connection:
+                    category = category_connection.execute(
+                        """SELECT name FROM document_categories
+                           WHERE knowledge_base_id=%s AND category_id=%s AND active""",
+                        (knowledge_base_id, category_id),
+                    ).fetchone()
+                if category:
+                    metadata.update(
+                        {
+                            "category_id": str(category_id),
+                            "category": str(category[0]),
+                            "classification_status": "manual",
+                        }
+                    )
             document = service.index_document(
                 Path(item.key).name,
                 connector.fetch(item.key),
                 knowledge_base_id,
+                metadata=metadata,
                 data_source_id=data_source_id,
                 relative_path=item.key,
             )
@@ -344,6 +494,31 @@ def run_sync(settings: Settings, embedder: Any, job: dict[str, Any]) -> dict[str
         mark_documents_searchable(database_url, knowledge_base_id, present_ids)
 
         _set_sync_status(database_url, data_source_id, "succeeded")
+        # 跳过对同步结果是「成功」，对提问的人是「这份资料不在库里」。两者之间只有日志：
+        # 超限对象不入队、不软删、不进对象记录，任何一张表里都查不到它存在过。
+        # 逐条记录而非拼成一行，是因为 structured_log 会丢弃列表值并截断长字符串。
+        skipped = list(getattr(connector, "skipped", []))
+        for key, size in skipped:
+            structured_log(
+                "data_source.object_skipped",
+                data_source_id=data_source_id,
+                object_key=key,
+                size_bytes=size,
+                max_bytes=settings.max_upload_mb * 1024 * 1024,
+            )
+        if sync_run_id:
+            _update_sync_run(
+                database_url,
+                sync_run_id,
+                "succeeded",
+                "complete",
+                added_count=len(diff.added),
+                updated_count=len(diff.updated),
+                deleted_count=len(diff.deleted),
+                skipped_count=len(skipped),
+                retry_count=len(retry),
+                next_cursor=next_cursor,
+            )
         return {
             "data_source_id": data_source_id,
             "added": len(diff.added),
@@ -351,10 +526,34 @@ def run_sync(settings: Settings, embedder: Any, job: dict[str, Any]) -> dict[str
             "deleted": len(diff.deleted),
             "retried": len(retry),
             "processed": processed,
+            "skipped": [key for key, _ in skipped],
         }
     except AppError as error:
         status = "aborted" if error.code == "SYNC_DELETE_CIRCUIT_BREAKER" else "failed"
         _set_sync_status(database_url, data_source_id, status, f"{error.code}: {error.message}")
+        if sync_run_id:
+            _update_sync_run(
+                database_url,
+                sync_run_id,
+                status,
+                "failed",
+                error_code=error.code,
+                failure_reason=error.message,
+            )
+        raise
+    except Exception as error:
+        # SDK、网络或解析层的非业务异常也必须落稳定状态，避免任务永远显示“同步中”。
+        message = str(error)[:1000] or type(error).__name__
+        _set_sync_status(database_url, data_source_id, "failed", f"SYNC_INTERNAL_ERROR: {message}")
+        if sync_run_id:
+            _update_sync_run(
+                database_url,
+                sync_run_id,
+                "failed",
+                "failed",
+                error_code="SYNC_INTERNAL_ERROR",
+                failure_reason=message,
+            )
         raise
 
 
