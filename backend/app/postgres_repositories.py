@@ -139,8 +139,12 @@ class PostgresDataSourceRepository:
                             WHERE uploaded_document.data_source_id = s.data_source_id
                           ) THEN 'succeeded' ELSE 'idle' END AS upload_status,
                           j.finished_at AS last_indexed_at,
-                          j.finished_at AS last_synced_at, j.status AS sync_status,
-                          j.failure_reason
+                          -- 同步状态读真实列。派生自 index_jobs 的旧写法表达不了
+                          -- "同步成功但没有任何变化"：那种情况不产生 index job，
+                          -- 会显示成 idle，与"从未同步"无法区分。
+                          s.last_sync_at AS last_synced_at,
+                          s.last_sync_status AS sync_status,
+                          COALESCE(s.sync_failure_reason, j.failure_reason) AS failure_reason
                    FROM data_sources s JOIN knowledge_bases k USING (knowledge_base_id)
                    LEFT JOIN documents d ON d.data_source_id = s.data_source_id
                    LEFT JOIN document_versions v ON v.document_version_id = d.current_version_id
@@ -224,7 +228,11 @@ class PostgresDataSourceRepository:
         max_attempts: int,
     ) -> str | None:
         validate_knowledge_base_id(knowledge_base_id)
-        batch_id = f"rbd_{uuid4().hex[:16]}"
+        # 用 index 而不是 rebuild：V5-5 之后 rebuild 的语义是「写入某个 building 索引
+        # 版本」，任务必须能从 rebuild_batch_id 反查到那个版本。而重新处理是单文档操作，
+        # 不该产生索引版本，沿用 rebuild 会让任务必然以
+        # 「rebuild batch has no index version」失败。
+        job_id = f"job_{uuid4().hex[:20]}"
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             with connection.transaction():
                 version = connection.execute(
@@ -239,16 +247,15 @@ class PostgresDataSourceRepository:
                     """INSERT INTO index_jobs
                        (index_job_id, knowledge_base_id, data_source_id, document_version_id,
                         idempotency_key, status, max_attempts, job_type,
-                        rebuild_batch_id, target_chunking_version)
-                       VALUES (%s, %s, %s, %s, %s, 'queued', %s, 'rebuild', %s, %s)""",
+                        target_chunking_version)
+                       VALUES (%s, %s, %s, %s, %s, 'queued', %s, 'index', %s)""",
                     (
-                        f"job_{uuid4().hex[:20]}",
+                        job_id,
                         knowledge_base_id,
                         version["data_source_id"],
                         document_version_id,
-                        f"reprocess:{document_version_id}:{batch_id}",
+                        f"reprocess:{document_version_id}:{job_id}",
                         max_attempts,
-                        batch_id,
                         target_chunking_version,
                     ),
                 )
@@ -258,7 +265,7 @@ class PostgresDataSourceRepository:
                        WHERE document_version_id=%s""",
                     (document_version_id,),
                 )
-        return batch_id
+        return job_id
 
     def set_enabled(self, data_source_id: str, enabled: bool) -> bool:
         with psycopg.connect(self.database_url) as connection:

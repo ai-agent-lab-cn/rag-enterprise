@@ -1162,7 +1162,7 @@ def create_app() -> FastAPI:
         if sources is None:
             raise AppError("POSTGRES_REQUIRED", "重新处理需要 PostgreSQL 运行时。", 503)
         try:
-            batch_id = await run_in_threadpool(
+            index_job_id = await run_in_threadpool(
                 sources.reprocess_version,
                 knowledge_base_id,
                 document_version_id,
@@ -1173,7 +1173,7 @@ def create_app() -> FastAPI:
             if "index_jobs_one_active_version_idx" in str(exc):
                 raise AppError("INDEX_JOB_ACTIVE", "该版本正在处理。", 409) from exc
             raise
-        if batch_id is None:
+        if index_job_id is None:
             raise AppError("DOCUMENT_VERSION_NOT_FOUND", "未找到该文档版本。", 404)
         await _record_audit(
             audit,
@@ -1181,9 +1181,9 @@ def create_app() -> FastAPI:
             current.user,
             "document_version",
             document_version_id,
-            metadata={"knowledge_base_id": knowledge_base_id, "batch_id": batch_id},
+            metadata={"knowledge_base_id": knowledge_base_id},
         )
-        return {"batch_id": batch_id}
+        return {"index_job_id": index_job_id}
 
     @app.get("/api/evaluations", response_model=list[EvaluationReportSummary])
     async def list_evaluations(

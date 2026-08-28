@@ -20,10 +20,14 @@ class Settings(BaseSettings):
     auth_path: Path = Path("data/auth/store.json")
     audit_path: Path = Path("data/audit/events.json")
     database_url: str | None = None
-    required_database_schema_version: int = Field(default=10, ge=1)
+    required_database_schema_version: int = Field(default=11, ge=1)
     index_worker_id: str = "worker-local"
     index_job_max_attempts: int = Field(default=3, ge=1, le=10)
     index_job_stale_seconds: int = Field(default=900, ge=60, le=86400)
+    # 单次同步的删除比例超过该阈值即熔断中止，防止根目录配错被当成"全部删除"。
+    sync_delete_threshold_percent: int = Field(default=30, ge=1, le=100)
+    # 删除量不超过该绝对下限时不熔断：纯比例阈值在小知识库上会把日常删除全拦下。
+    sync_delete_minimum: int = Field(default=3, ge=0, le=1000)
     evaluation_reports_path: Path = Path("backend/evaluation/reports")
     demo_seed_path: Path | None = None
     chunk_size: int = Field(default=700, ge=100, le=4000)

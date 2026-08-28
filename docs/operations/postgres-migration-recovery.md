@@ -90,6 +90,22 @@ DATABASE_URL='<目标库>' uv run python -m scripts.rebuild_index inventory --kn
   索引版本转为 `failed`，active 指针不动。
 - `inventory` 输出各索引版本的切分配置与覆盖文档数，并存期间会同时列出新旧两套。
 
+## 数据源同步
+
+命令与语义见 [README 的本地目录增量同步](../../README.md#本地目录增量同步)。按错误码处置：
+
+| 错误码 | 含义与处置 |
+| --- | --- |
+| `SOURCE_ROOT_UNAVAILABLE` | 根目录不存在或不可读。检查挂载点、权限与 `configuration.root`；期间没有任何数据被删除，修好后重新同步即可。 |
+| `SYNC_DELETE_CIRCUIT_BREAKER` | 待删除量同时超过绝对下限与比例阈值，同步已中止且**未写入任何变更**。先核对根目录配置是否正确、导出任务是否跑成功；确认删除属实后再放行——放行方式是临时调高 `SYNC_DELETE_THRESHOLD_PERCENT` 重跑，不要绕过熔断直接改库。 |
+| `SYNC_ALREADY_RUNNING` | 该数据源已有活动同步任务。等前一次跑完；若 Worker 已崩溃，租约超时恢复会把任务放回队列（`INDEX_JOB_STALE_SECONDS`）。 |
+| `SOURCE_TYPE_NOT_SUPPORTED` | 该 `source_type` 尚未实现同步。当前只有 `local_directory` 可同步。 |
+| `SOURCE_OBJECT_KEY_INVALID` | 对象键含上跳路径或为绝对路径。检查目录里是否有异常文件名。 |
+
+同步失败或中止都不改变已有的可检索内容：熔断在任何写入之前判定，根目录不可用时直接
+失败而不产出空清单。软删除只置 `retrieval_status`，文档记录与向量保留，误删可以通过
+把对象放回数据源再同步一次来恢复。
+
 ## 索引版本切换与回滚
 
 重建完成后需要显式切换才会生效，命令与四道校验见

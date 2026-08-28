@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 
 from .chunking import chunking_version, parse_chunking_version, split_sections
 from .config import Settings
+from .connectors import validate_object_key
 from .document_classifier import DocumentClassifier
 from .errors import AppError
 from .index_versions import (
@@ -471,12 +472,28 @@ class PostgresAsyncRAGService(RAGService):
         content: bytes,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
         metadata: dict[str, object] | None = None,
+        data_source_id: str | None = None,
+        relative_path: str | None = None,
     ) -> DocumentInfo:
+        """索引一份文档。
+
+        ``data_source_id`` 与 ``relative_path`` 供数据源同步使用，都不传时行为与
+        API 上传路径完全一致：
+
+        - ``relative_path`` 保留目录结构。只取 ``Path(filename).name`` 会让同步来的
+          ``a/x.md`` 与 ``b/x.md`` 算出同一个 document_id 互相覆盖。
+        - ``data_source_id`` 指定归属。不传时按文件名自建一个数据源，那是上传场景的
+          语义；同步场景下所有对象都属于同一个数据源，不能各自新建。
+        """
+
         validate_knowledge_base_id(knowledge_base_id)
-        safe_name = Path(filename).name
+        if relative_path is None:
+            safe_name = Path(filename).name
+        else:
+            safe_name = validate_object_key(relative_path)
         content_hash = hashlib.sha256(content).hexdigest()
         document_id = _stable_id("doc", knowledge_base_id, safe_name.casefold())
-        source_id = _stable_id("src", knowledge_base_id, safe_name.casefold())
+        source_id = data_source_id or _stable_id("src", knowledge_base_id, safe_name.casefold())
         now = datetime.now(UTC)
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             with connection.transaction():
@@ -485,7 +502,9 @@ class PostgresAsyncRAGService(RAGService):
                     (knowledge_base_id,),
                 ).fetchone():
                     raise AppError("KNOWLEDGE_BASE_NOT_FOUND", "未找到该知识库。", 404)
-                migrated_identity = connection.execute(
+                # 按数据源名匹配是 V2→V3 的迁移兼容逻辑。同步场景已显式给定归属，
+                # 再按名字去猜会匹配到别的数据源。
+                migrated_identity = None if data_source_id else connection.execute(
                     """SELECT s.data_source_id, d.document_id
                        FROM data_sources s
                        LEFT JOIN documents d ON d.data_source_id = s.data_source_id
@@ -513,14 +532,18 @@ class PostgresAsyncRAGService(RAGService):
                         chunk_count=int(existing["chunks"]),
                         status=str(existing["status"]),
                     )
-                connection.execute(
-                    """INSERT INTO data_sources
-                       (data_source_id, knowledge_base_id, source_type, name, configuration,
-                        created_at, updated_at)
-                       VALUES (%s, %s, 'file', %s, '{}'::jsonb, %s, %s)
-                       ON CONFLICT (data_source_id) DO UPDATE SET updated_at = EXCLUDED.updated_at""",
-                    (source_id, knowledge_base_id, safe_name, now, now),
-                )
+                if data_source_id is None:
+                    # 上传场景按文件名自建数据源；同步场景的数据源由同步流程预先创建，
+                    # 再插一条会把 local_directory 覆盖成 file。
+                    connection.execute(
+                        """INSERT INTO data_sources
+                           (data_source_id, knowledge_base_id, source_type, name, configuration,
+                            created_at, updated_at)
+                           VALUES (%s, %s, 'file', %s, '{}'::jsonb, %s, %s)
+                           ON CONFLICT (data_source_id)
+                           DO UPDATE SET updated_at = EXCLUDED.updated_at""",
+                        (source_id, knowledge_base_id, safe_name, now, now),
+                    )
                 connection.execute(
                     """INSERT INTO documents
                        (document_id, knowledge_base_id, data_source_id, filename,
@@ -932,6 +955,16 @@ class IndexWorker:
         return str(row[0])
 
     def _process(self, job: dict[str, Any]) -> None:
+        if str(job.get("job_type", "index")) == "sync":
+            # 同步任务针对整个数据源，没有 document_version_id，不能走下面的版本查询。
+            from .data_source_sync import run_sync
+
+            run_sync(self.settings, self.embedder, job)
+            # 必须显式收尾：index 路径是在写入分块的同一事务里置 succeeded 的，
+            # 同步走不到那里，不置状态的话任务永远停在 running，
+            # index_jobs_one_active_sync_idx 会把后续同步全部挡住。
+            self._succeed(str(job["index_job_id"]))
+            return
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             version = connection.execute(
                 """SELECT v.*, d.filename, d.metadata AS document_metadata,
@@ -1140,6 +1173,15 @@ class IndexWorker:
                        WHERE index_job_id = %s""",
                     (now, now, job["index_job_id"]),
                 )
+
+    def _succeed(self, job_id: str) -> None:
+        with psycopg.connect(self.database_url) as connection, connection.transaction():
+            connection.execute(
+                """UPDATE index_jobs SET status = 'succeeded', finished_at = now(),
+                          locked_at = NULL, locked_by = NULL, updated_at = now()
+                   WHERE index_job_id = %s""",
+                (job_id,),
+            )
 
     def _fail(self, job_id: str, reason: str) -> None:
         with psycopg.connect(self.database_url) as connection, connection.transaction():

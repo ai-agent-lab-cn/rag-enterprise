@@ -7,6 +7,10 @@ import psycopg
 import pytest
 
 from backend.app.config import Settings
+from backend.app.data_source_sync import (
+    mark_documents_deleted,
+    mark_documents_searchable,
+)
 from backend.app.database import apply_migrations
 from backend.app.postgres_documents import IndexWorker, PostgresAsyncRAGService
 from backend.app.postgres_repositories import PostgresDataSourceRepository
@@ -128,6 +132,11 @@ def _clone_index_version(database_url: str, template_id: str, status: str) -> st
     return index_version_id
 
 
+def _chunk_total(database_url: str) -> int:
+    with psycopg.connect(database_url) as connection:
+        return int(connection.execute("SELECT count(*) FROM chunks").fetchone()[0])
+
+
 def _statuses_with_chunks(database_url: str) -> set[str]:
     with psycopg.connect(database_url) as connection:
         rows = connection.execute(
@@ -239,3 +248,59 @@ def test_acl_tightening_covers_every_non_retired_index_version(tmp_path: Path) -
         "备份根目录", [0.1, 0.2, 0.3], 5, KNOWLEDGE_BASE_ID,
         access=RetrievalAccessContext(OTHER),
     )
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_soft_delete_removes_from_retrieval_but_keeps_chunks(tmp_path: Path) -> None:
+    """软删除只让分块不可检索，文档、版本与向量全部保留。
+
+    ``retrieval_status`` 的 ``deleted`` 取值 V5-3 就预留在 schemas.py 的 Literal 里，
+    检索侧 retrieval_access.py 已经在挡非 searchable 的分块，这里不新增过滤逻辑。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    settings = _settings(tmp_path, database_url)
+    service = PostgresAsyncRAGService(settings, _FakeEmbedder(), None, None)
+    indexed = service.index_document("guide.md", DOCUMENT_TEXT.encode(), KNOWLEDGE_BASE_ID)
+    IndexWorker(settings, _FakeEmbedder()).run_once()
+    assert service.retrieve_candidates("备份根目录", [0.1, 0.2, 0.3], 5, KNOWLEDGE_BASE_ID)
+    chunks_before = _chunk_total(database_url)
+
+    marked = mark_documents_deleted(database_url, KNOWLEDGE_BASE_ID, [indexed.document_id])
+
+    assert marked == 1
+    assert service.retrieve_candidates("备份根目录", [0.1, 0.2, 0.3], 5, KNOWLEDGE_BASE_ID) == []
+    assert _chunk_total(database_url) == chunks_before, "软删除不得删除分块"
+
+    restored = mark_documents_searchable(database_url, KNOWLEDGE_BASE_ID, [indexed.document_id])
+
+    assert restored == 1
+    assert service.retrieve_candidates("备份根目录", [0.1, 0.2, 0.3], 5, KNOWLEDGE_BASE_ID)
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_soft_delete_survives_index_version_rollback(tmp_path: Path) -> None:
+    """软删除后回滚索引版本，被删文档必须仍然检索不到。
+
+    这条正是「只刷 active 版本」那个错误实现会漏掉的场景：previous 版本的分块没被
+    标记，切回去之后被删除的内容重新可检索。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    settings = _settings(tmp_path, database_url)
+    service = PostgresAsyncRAGService(settings, _FakeEmbedder(), None, None)
+    indexed = service.index_document("guide.md", DOCUMENT_TEXT.encode(), KNOWLEDGE_BASE_ID)
+    IndexWorker(settings, _FakeEmbedder()).run_once()
+    with psycopg.connect(database_url) as connection:
+        active_version_id = connection.execute(
+            "SELECT active_index_version_id FROM knowledge_bases WHERE knowledge_base_id=%s",
+            (KNOWLEDGE_BASE_ID,),
+        ).fetchone()[0]
+    previous_version_id = _clone_index_version(database_url, active_version_id, "previous")
+
+    mark_documents_deleted(database_url, KNOWLEDGE_BASE_ID, [indexed.document_id])
+    _simulate_rollback(database_url, previous_version_id, active_version_id)
+
+    assert service.retrieve_candidates("备份根目录", [0.1, 0.2, 0.3], 5, KNOWLEDGE_BASE_ID) == []

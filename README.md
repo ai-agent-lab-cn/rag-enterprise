@@ -313,6 +313,57 @@ uv run python -m backend.evaluation.diagnose_retrieval \
 跌到 `0.4586`）——同一小节下的段落因共享标题前缀而向量趋同，区分度被破坏。原因
 记录在 `parsers.py` 的注释里，避免重复试错。
 
+### 本地目录增量同步
+
+资料不必再逐个手工上传。把一个目录登记为数据源之后，同步会自己识别新增、内容更新与删除，
+只处理变化的那部分：
+
+```bash
+# 1. 登记数据源（一个数据源 = 一个根目录）
+uv run python -m scripts.sync_data_source create \
+  --knowledge-base kb_default --name 手册目录 --root /mnt/enterprise-docs --suffixes .md,.pdf
+
+# 2. 发起同步；需要 Worker 在跑才会真正执行
+uv run python -m scripts.sync_data_source sync --data-source "$DATA_SOURCE_ID"
+uv run python -m scripts.index_worker
+
+# 3. 查看状态与最近一次失败原因
+uv run python -m scripts.sync_data_source status --data-source "$DATA_SOURCE_ID"
+uv run python -m scripts.sync_data_source list --knowledge-base kb_default
+```
+
+**变更判定基于内容 SHA-256，不看修改时间。** `touch` 全部文件后再同步会产生零个索引
+任务——mtime 会在同内容重新落盘时改变（rsync、网盘客户端重传、`cp` 都会），用它做判定
+会触发大量无谓的重新解析与重新 embedding。反过来，编辑后大小恰好不变的情况也真实存在，
+所以 size 同样不可靠。
+
+**删除是软删除。** 对象在数据源里消失后，它的分块不再进检索，但文档记录、版本记录与
+向量全部保留（`retrieval_status` 置 `deleted`）。物理删除仍只能由人显式执行。对象重新
+出现时自动恢复可检索——代价是会重新解析索引一次，即使内容没变，原因见
+`docs/design/v5-6-sync-pipeline.md` 第 7 节。
+
+**索引失败会自动重试。** 某份文档解析或嵌入失败后，后续同步会重新处理它，故障恢复后
+自动补齐，不需要人工干预。判定依据是「当前版本是否已 ready」而不是「是否见过这个
+version」——否则失败的文档会被永久跳过，而列表里一直显示失败。
+
+**删除熔断**：单次同步的删除量**同时**超过绝对下限（`SYNC_DELETE_MINIMUM`，默认 3）与
+比例阈值（`SYNC_DELETE_THRESHOLD_PERCENT`，默认 30）时中止，不执行任何删除也不执行
+任何新增，并把待删清单写进失败原因。它挡的是配置错误而非真实删除——根目录被误改、
+挂载点掉了、导出任务没跑成功，都会让列举结果几乎为空。两个条件都要满足是因为纯比例
+在小知识库上过于敏感：3 份文档删 1 份就是 33%，而那是正常操作。
+
+根目录不可用时同步以 `SOURCE_ROOT_UNAVAILABLE` 失败，**不会**产出空清单——空清单会被
+差异计算判定为「全部删除」，那是把配置错误伪装成数据变更。
+
+已实现范围与边界：
+
+- 只实现本地目录（`local_directory`）。`object_storage` / `web` / `connector` 三个
+  `source_type` 仍是 `0001` 里的预留值，**不对应任何实现**。
+- **外部数据源接入属于后续阶段**，本阶段不含 S3 兼容对象存储。
+- 同步由操作者显式触发，没有定时同步与 webhook。
+- 一个数据源对应一个根目录，不支持多目录或通配匹配。
+- 跳过符号链接与隐藏文件。同一数据源同时只允许一个活动同步任务。
+
 ### 索引版本切换与回滚
 
 换切分参数会改变检索质量，但改差了必须能退回去。索引版本让新旧两套分块在库中并存：

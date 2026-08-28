@@ -139,7 +139,7 @@ export const api = {
     request<{ updated: number }>(`/api/knowledge-bases/${id}/documents/categories`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ document_ids: documentIds, category_id: categoryId }) }),
   listKnowledgeBaseDocumentVersions: (id: string) => request<DocumentVersion[]>(`/api/knowledge-bases/${id}/document-versions?offset=0&limit=100`),
   getDocumentParsingPreview: (id: string, versionId: string) => request<ParsingPreview>(`/api/knowledge-bases/${id}/document-versions/${versionId}/parsing`),
-  reprocessDocumentVersion: (id: string, versionId: string, chunkSize: number, chunkOverlap: number) => request<{ batch_id: string }>(`/api/knowledge-bases/${id}/document-versions/${versionId}/reprocess`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chunk_size: chunkSize, chunk_overlap: chunkOverlap }) }),
+  reprocessDocumentVersion: (id: string, versionId: string, chunkSize: number, chunkOverlap: number) => request<{ index_job_id: string }>(`/api/knowledge-bases/${id}/document-versions/${versionId}/reprocess`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chunk_size: chunkSize, chunk_overlap: chunkOverlap }) }),
   uploadKnowledgeBaseDocument: (id: string, file: File) => {
     const body = new FormData();
     body.append("file", file);

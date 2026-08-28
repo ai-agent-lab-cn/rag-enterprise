@@ -333,3 +333,124 @@ def test_documents_and_results_stay_in_the_requested_knowledge_base(
     assert all(
         source.document_id != default_document.document_id for source in team_response.sources
     )
+
+
+def _create_directory_source(database_url: str, name: str = "手册目录") -> str:
+    """插入一条 local_directory 数据源，模拟同步流程已创建好的数据源。"""
+
+    data_source_id = "ds_directory_fixture"
+    now = datetime.now(UTC)
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO data_sources
+               (data_source_id, knowledge_base_id, source_type, name, configuration,
+                created_at, updated_at)
+               VALUES (%s, %s, 'local_directory', %s,
+                       '{"root": "/mnt/docs", "include_suffixes": [".md"]}', %s, %s)""",
+            (data_source_id, KNOWLEDGE_BASE_ID, name, now, now),
+        )
+    return data_source_id
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_index_document_keeps_same_named_files_in_different_directories_apart(
+    tmp_path: Path,
+) -> None:
+    """目录树里不同子目录下的同名文件必须是两个文档。
+
+    改造前 ``safe_name = Path(filename).name`` 会把 a/x.md 与 b/x.md 算成同一个
+    document_id，后者覆盖前者；而且每个文件会自建一个 data_source，同步来的对象
+    不会归属那个目录数据源。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url, KNOWLEDGE_BASE_ID)
+    settings = _settings(tmp_path, database_url)
+    service = _service(settings)
+    source_id = _create_directory_source(database_url)
+
+    first = service.index_document(
+        "x.md", "来自 a 目录的内容".encode(), KNOWLEDGE_BASE_ID,
+        data_source_id=source_id, relative_path="a/x.md",
+    )
+    second = service.index_document(
+        "x.md", "来自 b 目录的内容".encode(), KNOWLEDGE_BASE_ID,
+        data_source_id=source_id, relative_path="b/x.md",
+    )
+
+    assert first.document_id != second.document_id
+    with psycopg.connect(database_url) as connection:
+        rows = connection.execute(
+            "SELECT filename, data_source_id FROM documents ORDER BY filename"
+        ).fetchall()
+    assert [row[0] for row in rows] == ["a/x.md", "b/x.md"]
+    # 归属传入的数据源，而不是每个文件自建一个
+    assert {row[1] for row in rows} == {source_id}
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT count(*) FROM data_sources").fetchone()[0] == 1
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_index_document_rejects_traversal_in_relative_path(tmp_path: Path) -> None:
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url, KNOWLEDGE_BASE_ID)
+    service = _service(_settings(tmp_path, database_url))
+    source_id = _create_directory_source(database_url)
+
+    with pytest.raises(AppError) as error:
+        service.index_document(
+            "x.md", b"content", KNOWLEDGE_BASE_ID,
+            data_source_id=source_id, relative_path="../escape.md",
+        )
+
+    assert error.value.code == "SOURCE_OBJECT_KEY_INVALID"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_reprocess_version_actually_reindexes_the_document(tmp_path: Path) -> None:
+    """重新处理必须真的跑完，而不是入队一个注定失败的任务。
+
+    这个入口此前零测试覆盖。V5-5 把 worker 的 rebuild 分支改成「从 rebuild_batch_id
+    反查索引版本」之后，reprocess_version 自己生成的 batch id 没有对应的索引版本，
+    任务必然以「rebuild batch has no index version」失败——而它被
+    POST /api/knowledge-bases/{id}/document-versions/{version}/reprocess 用着。
+    """
+
+    from backend.app.chunking import chunking_version
+    from backend.app.postgres_repositories import PostgresDataSourceRepository
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url, KNOWLEDGE_BASE_ID)
+    settings = _settings(tmp_path, database_url)
+    service = _service(settings)
+    service.index_document("guide.md", EVIDENCE_DOCUMENT, KNOWLEDGE_BASE_ID)
+    _drain(settings)
+    with psycopg.connect(database_url) as connection:
+        version_id = connection.execute(
+            "SELECT current_version_id FROM documents WHERE knowledge_base_id=%s",
+            (KNOWLEDGE_BASE_ID,),
+        ).fetchone()[0]
+
+    job_id = PostgresDataSourceRepository(database_url).reprocess_version(
+        KNOWLEDGE_BASE_ID, version_id, chunking_version(120, 0), 1
+    )
+    assert job_id is not None
+    assert _drain(settings) == 1
+
+    with psycopg.connect(database_url) as connection:
+        job = connection.execute(
+            """SELECT status, failure_reason FROM index_jobs
+               WHERE document_version_id=%s ORDER BY created_at DESC LIMIT 1""",
+            (version_id,),
+        ).fetchone()
+        current = connection.execute(
+            """SELECT v.status FROM documents d
+               JOIN document_versions v ON v.document_version_id = d.current_version_id
+               WHERE d.knowledge_base_id=%s""",
+            (KNOWLEDGE_BASE_ID,),
+        ).fetchone()[0]
+    assert job[0] == "succeeded", f"重新处理失败：{job[1]}"
+    assert current == "ready"
+    # 重新处理不得产生新的索引版本：它是单文档操作，不是全库重建。
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT count(*) FROM index_versions").fetchone()[0] == 1

@@ -47,6 +47,7 @@ def test_migration_files_are_contiguous() -> None:
         "0008_document_categories.sql",
         "0009_structured_parsing.sql",
         "0010_index_versions.sql",
+        "0011_data_source_sync.sql",
     ]
 
 
@@ -104,8 +105,8 @@ def test_schema_two_with_existing_data_upgrades_to_schema_three(tmp_path: Path) 
             (now, now),
         )
 
-    assert apply_migrations(database_url) == 10
-    check_schema_version(database_url, 10)
+    assert apply_migrations(database_url) == 11
+    check_schema_version(database_url, 11)
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
             "SELECT status, chunking_version FROM document_versions WHERE document_version_id = 'ver_legacy'"
@@ -162,8 +163,8 @@ def test_postgres_runtime_covers_auth_indexing_and_backup(tmp_path: Path) -> Non
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 10
-    check_schema_version(database_url, 10)
+    assert apply_migrations(database_url) == 11
+    check_schema_version(database_url, 11)
 
     now = datetime.now(UTC)
     with psycopg.connect(database_url) as connection, connection.transaction():
@@ -222,8 +223,12 @@ def test_postgres_runtime_covers_auth_indexing_and_backup(tmp_path: Path) -> Non
     source = next(item for item in data_sources.list() if item["name"] == "guide.md")
     assert source["document_count"] == 1
     assert source["upload_status"] == "succeeded"
-    assert source["sync_status"] == "succeeded"
-    assert source["last_indexed_at"] == source["last_synced_at"]
+    # 上传型数据源没有「同步」概念：sync 状态自 V11 起读 data_sources 的真实列，
+    # 从未同步过就是 idle。旧实现把它派生自最近一次 index job，等于把「索引」
+    # 和「同步」混为一谈，也表达不了「同步成功但没有任何变化」。
+    assert source["sync_status"] == "idle"
+    assert source["last_synced_at"] is None
+    assert source["last_indexed_at"] is not None
     assert source["source_file_bytes"] == len(b"updated production guide")
     versions = data_sources.list_document_versions("kb_default")
     assert versions[0]["filename"] == "guide.md"
@@ -358,8 +363,8 @@ def test_schema_nine_with_existing_chunks_upgrades_to_schema_ten(tmp_path: Path)
             (json.dumps({"document_id": "doc_legacy"}), now),
         )
 
-    assert apply_migrations(database_url) == 10
-    check_schema_version(database_url, 10)
+    assert apply_migrations(database_url) == 11
+    check_schema_version(database_url, 11)
 
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
@@ -391,7 +396,7 @@ def test_schema_ten_on_empty_database_keeps_embedding_unconstrained(tmp_path: Pa
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 10
+    assert apply_migrations(database_url) == 11
     with psycopg.connect(database_url) as connection:
         assert connection.execute(
             """SELECT format_type(atttypid, atttypmod) FROM pg_attribute
@@ -437,3 +442,59 @@ def test_empty_knowledge_base_stays_deletable_after_indexing(tmp_path: Path) -> 
         connection.execute("DELETE FROM knowledge_bases WHERE knowledge_base_id='kb_temp'")
     with psycopg.connect(database_url) as connection:
         assert connection.execute("SELECT count(*) FROM index_versions").fetchone()[0] == 0
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_schema_eleven_allows_sync_jobs_and_local_directory_sources(tmp_path: Path) -> None:
+    """sync 任务不带 rebuild 字段也必须能插入。
+
+    0003 的 index_jobs_rebuild_requires_batch 写的是
+    `job_type = 'index' OR (rebuild 字段非空)`，新增的 sync 会落进后半句被要求提供
+    rebuild 字段。迁移能过但插入失败，所以这条约束必须同步改写。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    assert apply_migrations(database_url) == 11
+    check_schema_version(database_url, 11)
+
+    now = datetime.now(UTC)
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO knowledge_bases
+               (knowledge_base_id, name, name_normalized, is_default, created_at, updated_at)
+               VALUES ('kb_default', '默认知识库', '默认知识库', true, %s, %s)""",
+            (now, now),
+        )
+        connection.execute(
+            """INSERT INTO data_sources
+               (data_source_id, knowledge_base_id, source_type, name, configuration,
+                created_at, updated_at)
+               VALUES ('ds_dir', 'kb_default', 'local_directory', '手册目录',
+                       '{"root": "/mnt/docs", "include_suffixes": [".md"]}', %s, %s)""",
+            (now, now),
+        )
+        connection.execute(
+            """INSERT INTO index_jobs
+               (index_job_id, knowledge_base_id, data_source_id, idempotency_key,
+                status, job_type, created_at, updated_at)
+               VALUES ('job_sync', 'kb_default', 'ds_dir', 'sync:ds_dir:1',
+                       'queued', 'sync', %s, %s)""",
+            (now, now),
+        )
+        assert connection.execute(
+            "SELECT last_sync_status FROM data_sources WHERE data_source_id='ds_dir'"
+        ).fetchone()[0] == "idle"
+
+    # 同一数据源不得有两个活动 sync 任务
+    with psycopg.connect(database_url) as connection:
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            connection.execute(
+                """INSERT INTO index_jobs
+                   (index_job_id, knowledge_base_id, data_source_id, idempotency_key,
+                    status, job_type, created_at, updated_at)
+                   VALUES ('job_sync2', 'kb_default', 'ds_dir', 'sync:ds_dir:2',
+                           'queued', 'sync', now(), now())"""
+            )
