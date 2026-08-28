@@ -62,8 +62,7 @@ jobs:
 
       - name: 执行隔离备份恢复演练
         run: |
-          mkdir -p /tmp/rongrag-source/{chroma,uploads,knowledge_bases,conversations,auth,audit}
-          printf 'index-fixture\n' > /tmp/rongrag-source/chroma/chroma.sqlite3
+          mkdir -p /tmp/rongrag-source/{uploads,knowledge_bases,conversations,auth,audit}
           printf 'upload-fixture\n' > /tmp/rongrag-source/uploads/document.md
           printf '{"version":1,"knowledge_bases":[]}\n' > /tmp/rongrag-source/knowledge_bases/registry.json
           printf '{"version":1,"conversations":[],"answers":[]}\n' > /tmp/rongrag-source/conversations/records.json

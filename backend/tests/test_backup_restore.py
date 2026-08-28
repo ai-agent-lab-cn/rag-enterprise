@@ -1,11 +1,15 @@
 import io
 import json
+import re
 import tarfile
 from pathlib import Path
 
 import pytest
+import yaml
 
-from scripts.backup_restore import create_backup, restore_backup, verify_backup
+from scripts.backup_restore import DATASETS, create_backup, restore_backup, verify_backup
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def seed_data(root: Path) -> None:
@@ -23,6 +27,19 @@ def seed_data(root: Path) -> None:
             path.write_text(json.dumps(payload), encoding="utf-8")
         else:
             path.write_text(payload, encoding="utf-8")
+
+
+def test_ci_backup_fixture_matches_supported_datasets() -> None:
+    """CI 演练不得创建备份器明确不覆盖的旧数据目录。"""
+
+    workflow = yaml.safe_load((ROOT / ".github/workflows/pytest.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["backend"]["steps"]
+    rehearsal = next(step["run"] for step in steps if step["name"] == "执行隔离备份恢复演练")
+    fixture_line = next(line for line in rehearsal.splitlines() if "rongrag-source/{" in line)
+    match = re.search(r"rongrag-source/\{([^}]+)\}", fixture_line)
+
+    assert match is not None
+    assert set(match.group(1).split(",")) == set(DATASETS)
 
 
 def test_backup_verify_and_restore_round_trip(tmp_path: Path) -> None:
