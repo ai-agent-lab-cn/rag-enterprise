@@ -15,7 +15,7 @@ DEFAULT_KNOWLEDGE_BASE_NAME = "默认知识库"
 
 
 def validate_knowledge_base_id(knowledge_base_id: str) -> str:
-    """校验可用于 Chroma metadata 和文件目录的知识库 ID。"""
+    """校验可用于分块 metadata 和文件目录的知识库 ID。"""
 
     if not _KNOWLEDGE_BASE_ID_PATTERN.fullmatch(knowledge_base_id):
         raise ValueError("knowledge_base_id must start with 'kb_' and contain safe lowercase characters")

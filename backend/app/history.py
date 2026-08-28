@@ -25,7 +25,7 @@ def _owned_by(conversation: dict[str, Any], owner_id: str) -> bool:
 
 
 class ConversationRepository:
-    """追加保存会话和回答记录；仅存来源快照，不依赖当前 Chroma 内容。
+    """追加保存会话和回答记录；仅存来源快照，不依赖当前索引内容。
 
     会话按发起人隔离：知识库授权决定能否提问，不代表能读别人的问答正文。
     """

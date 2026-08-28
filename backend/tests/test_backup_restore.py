@@ -15,7 +15,6 @@ def seed_data(root: Path) -> None:
         "auth/store.json": {"version": 1, "users": [], "sessions": [], "memberships": []},
         "audit/events.json": {"version": 1, "events": []},
         "uploads/kb_default/guide.md": "可恢复资料",
-        "chroma/chroma.sqlite3": "isolated-index-fixture",
     }
     for relative, payload in payloads.items():
         path = root / relative

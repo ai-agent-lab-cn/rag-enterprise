@@ -430,7 +430,6 @@ class PostgresVectorStore:
 
 
 class PostgresAsyncRAGService(RAGService):
-    stores_source_files = True
 
     def __init__(
         self,

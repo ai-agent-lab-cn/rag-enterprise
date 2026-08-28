@@ -5,7 +5,6 @@ description = "An explainable personal-document RAG system with retrieval evalua
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "chromadb>=1.0.15",
     "fastapi>=0.116.0",
     "google-genai>=1.24.0",
     "pydantic-settings>=2.10.0",
@@ -28,7 +27,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["backend/tests"]
+testpaths = ["backend/tests", "evaluations"]
 pythonpath = ["."]
 
 [tool.ruff]

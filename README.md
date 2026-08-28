@@ -9,7 +9,7 @@
 ## 项目亮点
 
 - Markdown、TXT、PDF 多格式解析，稳定文档 ID 与完整来源 metadata
-- 本地中文 Embedding + ChromaDB 持久化向量召回
+- 本地中文 Embedding + PostgreSQL/pgvector 向量召回，按索引版本隔离
 - CrossEncoder 精排，同时展示粗召回与精排分数
 - Gemini 生成带 `[来源 N]` 标签的答案，未配置 Key 时仍可完成检索
 - FastAPI 类型化接口与 React/TypeScript 交互界面
@@ -22,7 +22,7 @@
 MD / TXT / PDF
       │
       ▼
-解析与重叠切片 ──► 中文 Embedding ──► ChromaDB 持久化索引
+解析与重叠切片 ──► 中文 Embedding ──► pgvector 索引（按索引版本隔离）
                                              │
 用户问题 ──► 查询向量 ──► top-k 粗召回 ──► CrossEncoder 精排
                                              │
@@ -37,7 +37,7 @@ MD / TXT / PDF
 | Web | React、TypeScript、Vite |
 | API | FastAPI、Pydantic |
 | 文档 | pypdf、UTF-8 Markdown/TXT 解析 |
-| 检索 | text2vec 中文 Embedding、ChromaDB |
+| 检索 | text2vec 中文 Embedding、PostgreSQL 16 + pgvector |
 | 精排 | sentence-transformers CrossEncoder |
 | 生成 | Google Gemini（环境变量配置） |
 | 质量 | pytest、Vitest、ESLint、Ruff |
@@ -97,20 +97,13 @@ docker compose up --build -d
 
 打开 <http://localhost:5173> 即可访问界面。前端会把 `/api` 请求转发到后端；健康检查地址为 <http://localhost:5173/api/health>。
 
-如需启用 Gemini 生成，先在仓库根目录的 `.env` 中填写 `GEMINI_API_KEY`。Chroma 索引、上传文件和知识库清单分别保存在 Compose 命名卷中。停止并删除容器：
+如需启用 Gemini 生成，先在仓库根目录的 `.env` 中填写 `GEMINI_API_KEY`。向量索引在 PostgreSQL 里，上传文件和知识库清单保存在 Compose 命名卷中。停止并删除容器：
 
 ```bash
 docker compose down
 ```
 
 上述命令默认保留命名卷。如需同时删除本地容器数据，请明确执行 `docker compose down --volumes`。
-
-### 部署 Render 免费 Demo
-
-仓库根目录提供 `render.yaml`，用于创建前端静态站点和后端免费 Web Service，并在
-`main` CI 通过后自动部署。首次创建 Blueprint 时需要在 Render 页面安全填写
-`GEMINI_API_KEY`。完整创建步骤、临时数据边界、Demo 专用轻量模型和部署后冒烟验证见
-[Render 免费 Demo 部署说明](docs/deployment/render-demo.md)。
 
 ## API
 
@@ -157,15 +150,15 @@ docker compose down
 
 ## 评测
 
-先通过 Web 或 API 索引 `knowledge/project-profile.md`，再运行：
-
 ```bash
-uv run python -m evaluations.evaluate
+DATABASE_URL="$TEST_DATABASE_URL" uv run python -m evaluations.evaluate
 ```
 
-脚本基于 `evaluations/questions.json` 计算向量检索的 Recall@10、MRR 和精排后的 MRR。仓库只提供可复现的评测方法，不提交未经实际运行的结果数字。
+脚本自建隔离知识库、索引 `knowledge/project-profile.md`、计算向量检索的 Recall@10、MRR
+和精排后的 MRR，跑完清理。标注锚定的是解析器的段落编号，因此解析与切分留在被测链路里。
+仓库只提供可复现的评测方法，不提交未经实际运行的结果数字。
 
-当前演示知识库的实测结果（2026-08-02，4 个标注问题）：
+实测结果（4 个标注问题，2026-08-28 在 pgvector 上复跑，与 2026-08-02 的 Chroma 结果逐位相同）：
 
 | 指标 | 结果 |
 | --- | ---: |
@@ -175,11 +168,14 @@ uv run python -m evaluations.evaluate
 
 小规模演示集仅用于验证评测链路，不代表通用数据集表现。
 
-V2 固定检索集的正式基线使用真实 embedding、CrossEncoder 和隔离的临时 ChromaStore 生成：
+V2 固定检索集的正式基线使用真实 embedding、CrossEncoder 和隔离的临时知识库生成。
+该数据集的候选分块是写死的，解析与切分不在被测范围，因此分块直接写入 pgvector，
+不经过解析链路：
 
 ```bash
 uv run python -m backend.evaluation.run_baseline \
   --dataset backend/evaluation/datasets/retrieval_v1.json \
+  --database-url "$TEST_DATABASE_URL" \
   --commit "$(git rev-parse HEAD)" \
   --output backend/evaluation/reports/retrieval_v1_baseline.json
 ```
@@ -452,7 +448,7 @@ npm run build
 
 ## 数据与隐私
 
-- `.env`、`data/uploads/` 和 `data/chroma/` 已加入 `.gitignore`。
+- `.env` 与 `data/uploads/` 已加入 `.gitignore`；向量索引在 PostgreSQL 里，不落 Git。
 - 上传只接受安全文件名及 MD、TXT、PDF 类型，并校验大小、MIME 和基础内容特征；原始
   上传文件以仅当前服务用户可读写的权限落盘。接口响应默认禁止缓存并设置基础安全头。
 - 登录和上传/问答等高成本请求设置进程内滑动窗口限流；高成本任务还受并发上限保护。
@@ -481,10 +477,8 @@ GitHub Release 附件为准，不在报告中复制维护。
   返回“未找到”，避免通过错误差异探测资源是否存在。正式评测和成员管理仅管理员可访问。
 - V3 起每个文档和来源都带有 `knowledge_base_id`；V2 数据统一迁入稳定的默认知识库
   `kb_default`，原始文件存放于 `data/uploads/kb_default/`。
-- Chroma 启动时会为缺少 `knowledge_base_id` 的 V2 chunk 补上默认值；迁移可重复执行，
-  不会复制 chunk。旧上传文件与新目录存在内容冲突时会停止迁移，不会静默覆盖。
 - 原 V2 文档和查询 API 继续映射默认知识库；V3 作用域 API 通过路径中的
-  `knowledge_base_id` 严格隔离上传文件、Chroma 检索与删除操作。
+  `knowledge_base_id` 严格隔离上传文件、向量检索与删除操作。
 - 默认知识库不能删除；其他知识库包含文档时也不能删除，必须先明确删除其中的文档。
 - 每次有效查询都会保存成功或失败记录，包括来源快照、分段耗时、模型集合、Prompt
   版本/哈希及稳定错误码；只保存 Prompt 哈希，不保存完整 Prompt。

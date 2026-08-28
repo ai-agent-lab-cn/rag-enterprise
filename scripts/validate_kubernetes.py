@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from backend.app.database import migration_files
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_ROOT = ROOT / "deploy" / "kubernetes"
@@ -92,6 +95,25 @@ def validate(manifest_root: Path = MANIFEST_ROOT) -> list[str]:
             for probe in ("startupProbe", "readinessProbe", "livenessProbe"):
                 if probe not in probe_container:
                     errors.append(f"{name} 缺少 {probe}")
+
+    # schema 版本此前没有任何校验，结果 configmap 停在 "5"、workloads 停在 "4"、
+    # 实际 schema 已到 10，三者互不相同也没人发现。迁移文件数就是当前 schema 版本。
+    expected_schema = str(len(migration_files()))
+    for item in documents:
+        if item.get("kind") == "ConfigMap":
+            declared = str((item.get("data") or {}).get("REQUIRED_DATABASE_SCHEMA_VERSION", ""))
+            if declared and declared != expected_schema:
+                errors.append(
+                    f"ConfigMap 的 REQUIRED_DATABASE_SCHEMA_VERSION 为 {declared}，"
+                    f"当前 schema 是 {expected_schema}"
+                )
+    manifest_text = "\n".join(path.read_text() for path in paths)
+    for declared in re.findall(r'--required-version,\s*"(\d+)"', manifest_text):
+        if declared != expected_schema:
+            errors.append(
+                f"database_migrate check 的 --required-version 为 {declared}，"
+                f"当前 schema 是 {expected_schema}"
+            )
 
     kustomization = yaml.safe_load((manifest_root / "kustomization.yaml").read_text())
     resources = set(kustomization.get("resources", []))

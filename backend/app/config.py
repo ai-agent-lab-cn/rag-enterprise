@@ -14,7 +14,6 @@ class Settings(BaseSettings):
     reranker_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     generation_model: str = "gemini-3.6-flash"
     gemini_api_key: str | None = None
-    chroma_path: Path = Path("data/chroma")
     upload_path: Path = Path("data/uploads")
     knowledge_bases_path: Path = Path("data/knowledge_bases/registry.json")
     conversations_path: Path = Path("data/conversations/records.json")
@@ -27,7 +26,6 @@ class Settings(BaseSettings):
     index_job_stale_seconds: int = Field(default=900, ge=60, le=86400)
     evaluation_reports_path: Path = Path("backend/evaluation/reports")
     demo_seed_path: Path | None = None
-    collection_name: str = "rongrag_documents"
     chunk_size: int = Field(default=700, ge=100, le=4000)
     chunk_overlap: int = Field(default=100, ge=0, le=1000)
     # 默认保持纯向量召回；hybrid 的实测收益确认前不改默认值。

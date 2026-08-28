@@ -13,8 +13,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 FORMAT_VERSION = 1
+# 向量索引不在文件型备份范围内：Chroma 移除后它存在 PostgreSQL 里，
+# 由 scripts/postgres_backup.py 负责。
 DATASETS = (
-    "chroma",
     "uploads",
     "knowledge_bases",
     "conversations",

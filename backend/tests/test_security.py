@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from backend.app.config import Settings, get_settings
+from backend.app.config import Settings
 from backend.app.errors import AppError, install_error_handlers
 from backend.app.security import (
     ConcurrencyGate,
@@ -15,6 +15,7 @@ from backend.app.security import (
     SlidingWindowRateLimiter,
     validate_upload,
     validate_upload_filename,
+    write_private_file,
 )
 
 
@@ -70,16 +71,21 @@ def test_upload_validation_rejects_mime_and_content_mismatch() -> None:
     assert binary_text_error.value.code == "INVALID_TEXT_FILE"
 
 
-def test_uploaded_original_uses_private_permissions(client) -> None:
-    response = client.post(
-        "/api/documents",
-        files={"file": ("private.md", "私密资料", "text/markdown")},
-    )
+def test_uploaded_original_uses_private_permissions(tmp_path) -> None:
+    """上传的源文件与其目录必须只有当前服务用户可读写。
 
-    assert response.status_code == 201
-    path = get_settings().upload_path / "kb_default" / "doc_test.md"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    这个约束原先由 API 层在 Chroma 路径上落盘时保证，覆盖也挂在那条端到端路径上。
+    Chroma 移除后落盘归 PostgresAsyncRAGService.index_document，覆盖改挂在
+    write_private_file 本身——权限约束不该随调用点迁移而失去覆盖。
+    """
+
+    target = tmp_path / "uploads" / "kb_default" / "private.md"
+
+    write_private_file(target, "私密资料".encode())
+
+    assert target.read_text(encoding="utf-8") == "私密资料"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
 
 
 def test_validation_errors_do_not_echo_password_or_question(client) -> None:

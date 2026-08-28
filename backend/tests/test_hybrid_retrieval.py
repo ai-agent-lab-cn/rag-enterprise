@@ -82,7 +82,7 @@ def test_vector_mode_never_touches_the_lexical_index() -> None:
 
 
 def test_service_without_lexical_index_falls_back_to_vector() -> None:
-    """单机 Chroma 运行时没有注入词法索引，即使配置成 hybrid 也必须退化为向量召回。"""
+    """未注入词法索引的运行时即使配置成 hybrid 也必须退化为向量召回。"""
 
     service = _service(["c1", "c3"], mode="hybrid", with_lexical=False)
 

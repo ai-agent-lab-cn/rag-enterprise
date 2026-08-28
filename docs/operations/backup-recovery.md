@@ -5,12 +5,14 @@
 
 ## 数据清单与边界
 
-备份根目录下固定覆盖 `chroma/`、`uploads/`、`knowledge_bases/`、`conversations/`、
-`auth/` 和 `audit/`。分别包含向量索引、原始资料、知识库元数据、会话与回答、账号/会话摘要/
-授权、审计链。环境变量、`.env`、API Key、TLS 私钥以及 `.key`/`.pem` 文件不属于备份；工具
+备份根目录下固定覆盖 `uploads/`、`knowledge_bases/`、`conversations/`、`auth/` 和
+`audit/`。分别包含原始资料、知识库元数据、会话与回答、账号/会话摘要/授权、审计链。
+**向量索引不在此清单内**：Chroma 移除后它存在 PostgreSQL 里，由
+`scripts/postgres_backup.py` 负责，见
+[PostgreSQL 迁移与恢复](postgres-migration-recovery.md)。环境变量、`.env`、API Key、TLS 私钥以及 `.key`/`.pem` 文件不属于备份；工具
 发现疑似密钥文件会直接失败。认证备份包含不可逆密码摘要和会话摘要，仍应按敏感数据保护。
 
-一致性备份要求先停止写请求。Compose 场景应先停止后端，再从六个命名卷挂载出的同一时间点
+一致性备份要求先停止写请求。Compose 场景应先停止后端与 Worker，再从命名卷挂载出的同一时间点
 快照目录执行备份。运行中的逐文件复制不提供事务一致性保证。
 
 ## 创建与校验

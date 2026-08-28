@@ -6,13 +6,11 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from backend.app.chunking import Chunk
 from backend.app.config import Settings
 from backend.app.database import apply_migrations
 from backend.app.postgres_documents import IndexWorker, PostgresAsyncRAGService
 from backend.app.postgres_repositories import PostgresDataSourceRepository
 from backend.app.retrieval_access import RetrievalAccessContext, can_retrieve_metadata
-from backend.app.store import ChromaStore
 
 USER = "usr_0123456789abcdef"
 OTHER = "usr_fedcba9876543210"
@@ -63,28 +61,6 @@ def test_empty_acl_and_active_validity_inherit_knowledge_base_access() -> None:
         "deny_user_ids": [],
     }
     assert can_retrieve_metadata(metadata, RetrievalAccessContext(USER), NOW) is True
-
-
-def test_chroma_acl_update_takes_effect_on_next_query(tmp_path) -> None:
-    store = ChromaStore(tmp_path / "chroma", "acl_boundary", "test-embedding")
-    chunk = Chunk(
-        chunk_id="doc_acl:chunk:00000",
-        knowledge_base_id="kb_default",
-        document_id="doc_acl",
-        filename="acl.md",
-        text="restricted content",
-        page=None,
-        paragraph=0,
-        chunk_index=0,
-        char_count=18,
-        summary="restricted content",
-        governance_metadata={"retrieval_status": "searchable", "acl_version": 1},
-    )
-    store.upsert([chunk], [[1.0, 0.0]])
-
-    assert store.query([1.0, 0.0], 5, access=RetrievalAccessContext(USER))
-    assert store.update_document_acl("doc_acl", [], [USER]) == 2
-    assert store.query([1.0, 0.0], 5, access=RetrievalAccessContext(USER)) == []
 
 
 class _FakeEmbedder:

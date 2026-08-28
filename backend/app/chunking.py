@@ -107,7 +107,7 @@ def split_sections(
                 index = len(chunks)
                 chunks.append(
                     Chunk(
-                        # 保留 V2 默认知识库的旧 ID；新知识库加前缀以避免 Chroma 全局 ID 冲突。
+                        # 保留 V2 默认知识库的旧 ID；新知识库加前缀，chunk_id 在全局唯一。
                         chunk_id=(
                             f"{document_id}:chunk:{index:05d}"
                             if knowledge_base_id == DEFAULT_KNOWLEDGE_BASE_ID

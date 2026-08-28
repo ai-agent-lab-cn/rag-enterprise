@@ -8,7 +8,6 @@ import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-import chromadb
 import psycopg
 import pytest
 from psycopg import sql
@@ -21,7 +20,7 @@ from backend.app.postgres_repositories import (
     PostgresDataSourceRepository,
     PostgresKnowledgeBaseRepository,
 )
-from scripts import legacy_to_postgres, postgres_backup
+from scripts import postgres_backup
 
 
 class FakeEmbedder:
@@ -49,16 +48,6 @@ def test_migration_files_are_contiguous() -> None:
         "0009_structured_parsing.sql",
         "0010_index_versions.sql",
     ]
-
-
-def test_source_fingerprint_changes_with_content(tmp_path: Path) -> None:
-    auth = tmp_path / "auth/store.json"
-    auth.parent.mkdir(parents=True)
-    auth.write_text("one", encoding="utf-8")
-    first = legacy_to_postgres.fingerprint(legacy_to_postgres.source_manifest(tmp_path))
-    auth.write_text("two", encoding="utf-8")
-    second = legacy_to_postgres.fingerprint(legacy_to_postgres.source_manifest(tmp_path))
-    assert first != second
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -161,7 +150,14 @@ def test_postgres_backup_manifest_and_tamper_detection(
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
-def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path: Path) -> None:
+def test_postgres_runtime_covers_auth_indexing_and_backup(tmp_path: Path) -> None:
+    """PostgreSQL 运行时的端到端覆盖：认证与授权、异步索引、版本升级、失败隔离与备份恢复。
+
+    这里原本还覆盖从 Chroma 全量迁入 PostgreSQL 的原子性与幂等。Chroma 移除后该工具
+    一并删除，初始数据改为直接走索引链路建立；其余断言原样保留——``PostgresAuthRepository``
+    只有这一个测试覆盖它，随迁移工具一起删掉会造成实质的覆盖损失。
+    """
+
     database_url = os.environ["TEST_DATABASE_URL"]
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
@@ -169,116 +165,24 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
     assert apply_migrations(database_url) == 10
     check_schema_version(database_url, 10)
 
-    now = "2026-08-22T00:00:00+00:00"
-    auth = tmp_path / "auth/store.json"
-    auth.parent.mkdir(parents=True)
-    auth.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "users": [
-                    {
-                        "user_id": "usr_0123456789abcdef",
-                        "username": "admin",
-                        "display_name": "Admin",
-                        "role": "admin",
-                        "active": True,
-                        "password_hash": "preserved-hash",
-                        "created_at": now,
-                        "updated_at": now,
-                    }
-                ],
-                "sessions": [
-                    {
-                        "session_id": "ses_0123456789abcdef",
-                        "user_id": "usr_0123456789abcdef",
-                        "token_hash": "a" * 64,
-                        "created_at": now,
-                        "expires_at": "2027-08-22T00:00:00+00:00",
-                        "revoked_at": None,
-                    }
-                ],
-                "memberships": [{"user_id": "usr_0123456789abcdef", "knowledge_base_id": "kb_default"}],
-            }
-        ),
-        encoding="utf-8",
-    )
-    registry = tmp_path / "knowledge_bases/registry.json"
-    registry.parent.mkdir(parents=True)
-    registry.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "knowledge_bases": [
-                    {
-                        "knowledge_base_id": "kb_default",
-                        "name": "默认知识库",
-                        "description": "",
-                        "created_at": now,
-                        "updated_at": now,
-                        "is_default": True,
-                    },
-                    {
-                        "knowledge_base_id": "kb_secondary",
-                        "name": "独立知识库",
-                        "description": "",
-                        "created_at": now,
-                        "updated_at": now,
-                        "is_default": False,
-                    },
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    upload = tmp_path / "uploads/kb_default/guide.md"
-    upload.parent.mkdir(parents=True)
-    upload.write_text("production guide", encoding="utf-8")
-    second_upload = tmp_path / "uploads/kb_secondary/guide.md"
-    second_upload.parent.mkdir(parents=True)
-    second_upload.write_text("secondary guide", encoding="utf-8")
-    collection = chromadb.PersistentClient(path=str(tmp_path / "chroma")).get_or_create_collection(
-        "rongrag_documents"
-    )
-    collection.add(
-        ids=["doc_guide:chunk:00000", "kb_secondary:doc_guide:chunk:00000"],
-        documents=["production guide", "secondary guide"],
-        embeddings=[[0.1, 0.2, 0.3], [0.3, 0.2, 0.1]],
-        metadatas=[
-            {
-                "knowledge_base_id": "kb_default",
-                "document_id": "doc_guide",
-                "filename": "guide.md",
-                "chunk_index": 0,
-            },
-            {
-                "knowledge_base_id": "kb_secondary",
-                "document_id": "doc_guide",
-                "filename": "guide.md",
-                "chunk_index": 0,
-            },
-        ],
-    )
+    now = datetime.now(UTC)
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO knowledge_bases
+               (knowledge_base_id, name, name_normalized, description, is_default,
+                created_at, updated_at)
+               VALUES ('kb_default', '默认知识库', '默认知识库', '', true, %s, %s)""",
+            (now, now),
+        )
 
-    first = legacy_to_postgres.migrate(tmp_path, database_url, "rongrag_documents")
-    second = legacy_to_postgres.migrate(tmp_path, database_url, "rongrag_documents")
-    assert first == second
-    assert first == {
-        "users": 1,
-        "knowledge_bases": 2,
-        "memberships": 1,
-        "sessions": 0,
-        "documents": 2,
-        "document_versions": 2,
-        "chunks": 2,
-    }
-    with psycopg.connect(database_url) as connection:
-        assert connection.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0
-        version = connection.execute(
-            """SELECT source_file_bytes, source_path FROM document_versions
-            WHERE knowledge_base_id = 'kb_default'"""
-        ).fetchone()
-        assert version == (len(b"production guide"), "uploads/kb_default/guide.md")
+    bootstrap_settings = Settings(
+        database_url=database_url,
+        upload_path=tmp_path / "uploads",
+        index_worker_id="bootstrap-worker",
+    )
+    bootstrap = PostgresAsyncRAGService(bootstrap_settings, FakeEmbedder(), object(), object())
+    bootstrap.index_document("guide.md", b"production guide", "kb_default")
+    assert IndexWorker(bootstrap_settings, FakeEmbedder()).run_once() is True
 
     auth_repository = PostgresAuthRepository(database_url)
     member = auth_repository.create_user("member", "long-enough-password", "Member", "member")
@@ -306,7 +210,10 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
     assert pending_versions[0]["status"] == "pending"
     assert pending_versions[0]["is_current"] is False
     with psycopg.connect(database_url) as connection:
-        assert connection.execute("SELECT count(*) FROM index_jobs").fetchone()[0] == 1
+        # 同一内容重复上传只入队一次；初始索引那条已经 succeeded，不计在内。
+        assert connection.execute(
+            "SELECT count(*) FROM index_jobs WHERE status = 'queued'"
+        ).fetchone()[0] == 1
     worker = IndexWorker(settings, FakeEmbedder())
     assert worker.run_once() is True
     current = service.list_documents("kb_default")[0]
@@ -356,9 +263,14 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
             == 1
         )
 
+    with psycopg.connect(database_url) as connection:
+        source_path = connection.execute(
+            """SELECT source_path FROM document_versions
+               WHERE knowledge_base_id = 'kb_default' AND status = 'ready'
+               ORDER BY version_number DESC LIMIT 1"""
+        ).fetchone()[0]
+    upload = settings.upload_path / source_path
     upload.write_text("changed", encoding="utf-8")
-    with pytest.raises(RuntimeError, match="目标数据库不是空库"):
-        legacy_to_postgres.migrate(tmp_path, database_url, "rongrag_documents")
 
     restore_url = os.getenv("TEST_RESTORE_DATABASE_URL")
     if restore_url:
@@ -379,7 +291,7 @@ def test_legacy_migration_is_atomic_idempotent_and_invalidates_sessions(tmp_path
         with psycopg.connect(restore_url) as connection:
             assert connection.execute("SELECT count(*) FROM users").fetchone()[0] == source_user_count
             assert connection.execute("SELECT count(*) FROM chunks").fetchone()[0] == source_chunk_count
-        assert (restored_uploads / "kb_default/guide.md").read_text() == "changed"
+        assert (restored_uploads / source_path).read_text() == "changed"
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")

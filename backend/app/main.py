@@ -75,25 +75,24 @@ from .schemas import (
     ReprocessDocumentVersionRequest,
     UserResponse,
 )
-from .security import AbuseProtection, SecurityBoundaryMiddleware, validate_upload, write_private_file
+from .security import AbuseProtection, SecurityBoundaryMiddleware, validate_upload
 from .service import RAGService, RAGServiceProtocol
-from .store import ChromaStore
 
 
 # FastAPI 路由、依赖注入、上传限制和 CORS
 @lru_cache
 def get_service() -> RAGService:
+    """构造唯一的 RAG 运行时。
+
+    Chroma 降级路径已移除：向量存储只剩 pgvector 一种实现，缺少 DATABASE_URL 时直接
+    失败，而不是悄悄退回一个能力与生产不同的本地存储。
+    """
+
     settings = get_settings()
-    if settings.database_url:
-        return PostgresAsyncRAGService(
-            settings=settings,
-            embedder=get_embedding_model(),
-            reranker=get_reranker(),
-            generator=get_generator(),
-        )
-    return RAGService(
+    if not settings.database_url:
+        raise RuntimeError("DATABASE_URL is required")
+    return PostgresAsyncRAGService(
         settings=settings,
-        store=ChromaStore(settings.chroma_path, settings.collection_name, settings.embedding_model),
         embedder=get_embedding_model(),
         reranker=get_reranker(),
         generator=get_generator(),
@@ -1611,15 +1610,6 @@ async def _upload_document(
                 *arguments,
                 **({"metadata": metadata} if metadata is not None else {}),
             )
-        if not getattr(service, "stores_source_files", False):
-            scope = KnowledgeBaseScope(knowledge_base_id, settings.upload_path)
-            scope.migrate_legacy_uploads()
-            extension = filename.rsplit(".", maxsplit=1)[-1].lower()
-            await run_in_threadpool(
-                write_private_file,
-                scope.upload_path / f"{result.document_id}.{extension}",
-                content,
-            )
     except Exception:
         metrics.record_index(_duration_ms(started), failed=True)
         await _record_audit(
@@ -1647,10 +1637,6 @@ async def _delete_document(
     deleted = await run_in_threadpool(service.delete_document, document_id, knowledge_base_id)
     if not deleted:
         raise AppError("DOCUMENT_NOT_FOUND", "未找到该文档。", 404)
-    scope = KnowledgeBaseScope(knowledge_base_id, settings.upload_path)
-    scope.migrate_legacy_uploads()
-    for path in scope.upload_path.glob(f"{document_id}.*"):
-        path.unlink(missing_ok=True)
     await _record_audit(audit, "document.delete", user, "document", document_id)
 
 

@@ -2,16 +2,13 @@ import json
 import time
 from dataclasses import replace
 from datetime import datetime
-from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
-from .chunking import split_sections, stable_document_id
 from .config import Settings
 from .errors import AppError
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
 from .lexical import LexicalIndexCache
 from .models import EmbeddingModel, GeminiGenerator, Reranker
-from .parsers import parse_document
 from .prompts import (
     GENERATION_FAILED_ANSWER,
     RETRIEVAL_ONLY_ANSWER,
@@ -23,7 +20,7 @@ from .query_understanding import build_query_plan
 from .ranking import fuse_query_candidates, rank_candidates, reciprocal_rank_fusion
 from .retrieval_access import RetrievalAccessContext, can_retrieve_metadata
 from .schemas import DocumentInfo, QueryMetadataFilter, QueryResponse, Source
-from .store import ChromaStore, RetrievedChunk
+from .store import RetrievedChunk
 
 # 完整 RAG 编排：入库、召回、精排、Prompt、生成
 
@@ -70,8 +67,6 @@ def _filter_candidates(
 
 
 class RAGServiceProtocol(Protocol):
-    stores_source_files: bool
-
     def index_document(
         self, filename: str, content: bytes, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
         metadata: dict[str, object] | None = None,
@@ -105,11 +100,10 @@ class RAGServiceProtocol(Protocol):
 
 
 class RAGService:
-    stores_source_files = False
     def __init__(
         self,
         settings: Settings,
-        store: ChromaStore,
+        store: Any,
         embedder: EmbeddingModel,
         reranker: Reranker,
         generator: GeminiGenerator,
@@ -120,43 +114,8 @@ class RAGService:
         self.embedder = embedder
         self.reranker = reranker
         self.generator = generator
-        # 未注入词法索引的运行时（如单机 Chroma）只走向量召回。
+        # 未注入词法索引时只走向量召回；离线评测入口按需省略它。
         self.lexical = lexical
-
-    def index_document(
-        self,
-        filename: str,
-        content: bytes,
-        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
-        metadata: dict[str, object] | None = None,
-    ) -> DocumentInfo:
-        document_id = stable_document_id(filename, content)
-        for document in self.store.list_documents(knowledge_base_id):
-            if document["document_id"] == document_id:
-                return DocumentInfo(**document)
-
-        sections = parse_document(filename, content)
-        chunks = split_sections(
-            document_id,
-            Path(filename).name,
-            sections,
-            self.settings.chunk_size,
-            self.settings.chunk_overlap,
-            knowledge_base_id,
-            {
-                **(metadata or {}),
-                "source_type": "file",
-                "created_at": datetime.now().astimezone().isoformat(),
-            },
-        )
-        embeddings = self.embedder.encode([chunk.text for chunk in chunks])
-        self.store.upsert(chunks, embeddings)
-        return DocumentInfo(
-            knowledge_base_id=knowledge_base_id,
-            document_id=document_id,
-            filename=Path(filename).name,
-            chunk_count=len(chunks),
-        )
 
     def list_documents(
         self,
@@ -194,7 +153,7 @@ class RAGService:
         self,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
     ) -> list[dict[str, object]]:
-        """Chroma 运行时没有索引版本概念，返回空列表而不是伪造记录。"""
+        """基类没有索引版本概念；pgvector 运行时在子类里覆盖为真实查询。"""
 
         return []
 

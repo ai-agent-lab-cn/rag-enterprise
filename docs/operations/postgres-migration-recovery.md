@@ -54,11 +54,13 @@ uv run python scripts/database_migrate.py check --required-version 4
 首次启动或升级时，先显式执行迁移，再启动 API、Worker 和前端：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
-  --profile tools run --rm migrate
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
-  up --detach --wait postgres backend worker frontend
+export POSTGRES_PASSWORD=...   # 必填，compose 缺少它会拒绝启动
+docker compose --profile tools run --rm migrate
+docker compose up --detach --wait postgres backend worker frontend
 ```
+
+Chroma 移除后 `docker-compose.yml` 自身即是完整拓扑（postgres、migrate、backend、
+worker、frontend），不再需要叠加 `docker-compose.postgres.yml` 这层 override。
 
 API 上传只创建不可变原始文件、文档版本和幂等任务。Worker 使用 `FOR UPDATE SKIP LOCKED` 领取任务；成功后在同一事务中写入 chunks 并切换当前版本，失败重试达到上限后保留上一可用版本。
 
