@@ -286,7 +286,7 @@ def test_retrieval_api_uses_a_real_pgvector_service(
         assert queried.status_code == 200
         assert queried.json()["sources"][0]["document_id"] == document_id
         assert queried.json()["sources"][0]["filename"] == "retrieval-evidence.md"
-        assert queried.json()["prompt_version"] == "v3-grounded-answer-1"
+        assert queried.json()["prompt_version"] == "v5-8-grounded-governance-1"
         assert len(queried.json()["prompt_hash"]) == 64
         assert queried.json()["models"] == {
             "embedding": "deterministic-embedding-v1",
