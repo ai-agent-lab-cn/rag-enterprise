@@ -203,6 +203,13 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if (url === "/api/knowledge-bases/kb_default/citations/chunk_1") return Promise.resolve(json({ chunk_id: "chunk_1", knowledge_base_id: "kb_default", document_id: "doc_1", document_version_id: "ver_1", content_sha256: "a".repeat(64), filename: "profile.md", text: "系统资料全文", page: null, paragraph: 0, heading_path: ["系统设计"], sheet_name: null, row_start: null, row_end: null, source_url: null, external_resource_id: null }));
   if (url === "/api/knowledge-bases/kb_default/conversations") return Promise.resolve(json([]));
   if (url === "/api/evaluations/answers/reports") return Promise.resolve(json([answerSummary]));
+  if (url === "/api/evaluation-center/overview") return Promise.resolve(json({
+    passed: true, report_count: 2,
+    retrieval_report: { report_id: "retrieval-official", dataset_id: "retrieval", dataset_version: "2.0.0", commit: "a".repeat(40), run_at: "2026-08-30T00:00:00Z", models: {}, passed: true },
+    answer_report: answerSummary,
+  }));
+  if (url.startsWith("/api/evaluation-center/pipeline")) return Promise.resolve(json({ run_count: 2, added_count: 4, updated_count: 1, deleted_count: 1, skipped_count: 2, failed_count: 1, retry_count: 3, failure_rate: 0.5, average_duration_ms: 20000 }));
+  if (url.startsWith("/api/evaluation-center/bad-cases")) return Promise.resolve(json([{ case_id: "case_1234567890abcdef", source_type: "online", source_record_id: "ans_1", knowledge_base_id: "kb_default", dataset_version: null, question: "为什么没有召回？", expected_source_ids: [], actual_source_ids: [], expected_answer_status: "answered", actual_answer_status: "insufficient_evidence", actual_answer: "资料不足。", failure_stage: "retrieval", root_cause: null, category: "没召回", severity: "high", assignee: null, fix_commit: null, status: "new", regression_added: false, created_at: "2026-08-30T00:00:00Z", confirmed_at: null, resolved_at: null, updated_at: "2026-08-30T00:00:00Z" }]));
   if (url === "/api/knowledge-bases/kb_default/query" && init?.method === "POST")
     return Promise.resolve(
       json({
@@ -518,6 +525,28 @@ test("回答评测页只读展示正式指标", async () => {
   expect(screen.getByRole("heading", { name: "幻觉风险" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "失败控制" })).toBeInTheDocument();
   expect(screen.getByText(/页面不会启动模型评测/)).toBeInTheDocument();
+});
+
+test("统一评测中心展示五个治理 Tab", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/evaluation");
+  render(<App />);
+
+  expect(await screen.findByRole("tab", { name: "总览" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "检索质量" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "回答质量" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "工程指标" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Bad Case" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "统一质量门已通过" })).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("tab", { name: "工程指标" }));
+  expect(await screen.findByText("2 个同步批次")).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("tab", { name: "Bad Case" }));
+  expect(await screen.findByText("为什么没有召回？")).toBeInTheDocument();
+  expect(screen.getByLabelText("Bad Case 状态筛选")).toBeInTheDocument();
+  expect(screen.getByLabelText("Bad Case 严重级别筛选")).toBeInTheDocument();
+  expect(screen.getByText("治理详情")).toBeInTheDocument();
 });
 
 test("保留检索评测页且可直接访问", async () => {

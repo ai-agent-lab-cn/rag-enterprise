@@ -345,3 +345,48 @@ export interface AnswerEvaluationReport extends AnswerEvaluationSummary {
   case_count: number;
   metrics: Record<string, AnswerEvaluationMetric | null>;
 }
+
+export interface EvaluationCenterOverview {
+  passed: boolean;
+  report_count: number;
+  retrieval_report: EvaluationReportSummary | null;
+  answer_report: AnswerEvaluationSummary | null;
+}
+
+export interface PipelineEvaluation {
+  run_count: number;
+  added_count: number;
+  updated_count: number;
+  deleted_count: number;
+  skipped_count: number;
+  failed_count: number;
+  retry_count: number;
+  failure_rate: number;
+  average_duration_ms: number;
+}
+
+export interface GovernedBadCase {
+  case_id: string;
+  source_type: "online" | "evaluation" | "manual";
+  source_record_id: string;
+  knowledge_base_id: string;
+  dataset_version: string | null;
+  question: string;
+  expected_source_ids: string[];
+  actual_source_ids: string[];
+  expected_answer_status: string | null;
+  actual_answer_status: string | null;
+  actual_answer: string | null;
+  failure_stage: string;
+  root_cause: string | null;
+  category: string;
+  severity: "low" | "medium" | "high" | "critical";
+  assignee: string | null;
+  fix_commit: string | null;
+  status: "new" | "confirmed" | "fixing" | "resolved" | "regression_added" | "ignored";
+  regression_added: boolean;
+  created_at: string;
+  confirmed_at: string | null;
+  resolved_at: string | null;
+  updated_at: string;
+}

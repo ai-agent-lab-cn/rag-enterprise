@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
 import { Circle, Cpu, LogOut } from "lucide-react";
 import { api, hasAccessToken, setAccessToken } from "./api";
-import { AnswerEvaluationPage } from "./components/AnswerEvaluationPage";
 import { AuditPage } from "./components/AuditPage";
 import { AppNavigation, type AppPage } from "./components/AppNavigation";
 import { AuthGate } from "./components/AuthGate";
 import { ChatPage } from "./components/ChatPage";
-import { EvaluationPage } from "./components/EvaluationPage";
+import { EvaluationCenterPage } from "./components/EvaluationCenterPage";
 import { DataSourcesPage } from "./components/DataSourcesPage";
 import { KnowledgeBaseDetailPage } from "./components/KnowledgeBaseDetailPage";
 import { KnowledgeBasesPage } from "./components/KnowledgeBasesPage";
@@ -21,8 +20,7 @@ function pageFromPath(path: string): AppPage {
   // 路由状态只由 URL 派生，保证刷新、前进/后退和可分享链接行为一致。
   if (path.startsWith("/knowledge-bases")) return "knowledge-bases";
   if (path === "/data-sources") return "data-sources";
-  if (path === "/evaluation/retrieval") return "retrieval-evaluation";
-  if (path === "/evaluation/answers") return "answer-evaluation";
+  if (path.startsWith("/evaluation")) return "evaluation-center";
   if (path.startsWith("/chat")) return "chat";
   if (path === "/system") return "system";
   if (path === "/settings/members") return "members";
@@ -103,8 +101,7 @@ export default function App() {
   else if (detailMatch) content = <KnowledgeBaseDetailPage id={detailMatch[1]} onOpen={navigate} />;
   else if (pathname === "/knowledge-bases") content = <KnowledgeBasesPage onOpen={navigate} showCreate={showKnowledgeBaseCreate} onCloseCreate={() => setShowKnowledgeBaseCreate(false)} />;
   else if (pathname === "/data-sources") content = <DataSourcesPage onOpen={navigate} />;
-  else if (pathname === "/evaluation/retrieval") content = <EvaluationPage />;
-  else if (pathname === "/evaluation/answers") content = <AnswerEvaluationPage />;
+  else if (pathname.startsWith("/evaluation")) content = <EvaluationCenterPage isAdmin={auth.user.role === "admin"} initialTab={pathname === "/evaluation/retrieval" ? "retrieval" : pathname === "/evaluation/answers" ? "answer" : "overview"} />;
   else if (pathname.startsWith("/chat")) content = <ChatPage conversationId={conversationMatch?.[1]} onOpen={navigate} />;
   else content = <OverviewPage onOpen={navigate} onLogout={() => void logout()} user={auth.user} />;
   const pageLabel: Record<AppPage, string> = {
@@ -112,8 +109,7 @@ export default function App() {
     "knowledge-bases": "知识库管理",
     "data-sources": "数据源管理",
     chat: "对话助手",
-    "answer-evaluation": "回答评测",
-    "retrieval-evaluation": "检索评测",
+    "evaluation-center": "评测中心",
     system: "系统状态",
     members: "成员与权限",
     audit: "审计记录",

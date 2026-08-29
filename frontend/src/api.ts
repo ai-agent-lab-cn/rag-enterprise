@@ -9,6 +9,9 @@ import type {
   EvaluationReportSummary,
   AnswerEvaluationReport,
   AnswerEvaluationSummary,
+  EvaluationCenterOverview,
+  GovernedBadCase,
+  PipelineEvaluation,
   ConversationDetail,
   ConversationSummary,
   KnowledgeBase,
@@ -201,4 +204,16 @@ export const api = {
   listAnswerEvaluations: () => request<AnswerEvaluationSummary[]>("/api/evaluations/answers/reports"),
   getAnswerEvaluation: (reportId: string) =>
     request<AnswerEvaluationReport>(`/api/evaluations/answers/reports/${encodeURIComponent(reportId)}`),
+  getEvaluationCenterOverview: () => request<EvaluationCenterOverview>("/api/evaluation-center/overview"),
+  getPipelineEvaluation: (knowledgeBaseId?: string) => request<PipelineEvaluation>(
+    `/api/evaluation-center/pipeline${knowledgeBaseId ? `?knowledge_base_id=${encodeURIComponent(knowledgeBaseId)}` : ""}`,
+  ),
+  listGovernedBadCases: (filters?: { knowledge_base_id?: string; status?: string; severity?: string; failure_stage?: string }) => {
+    const query = new URLSearchParams(Object.entries(filters ?? {}).filter((entry): entry is [string, string] => Boolean(entry[1])));
+    return request<GovernedBadCase[]>(`/api/evaluation-center/bad-cases${query.size ? `?${query}` : ""}`);
+  },
+  updateGovernedBadCase: (caseId: string, update: { status: GovernedBadCase["status"]; severity?: GovernedBadCase["severity"]; root_cause?: string; assignee?: string; fix_commit?: string; regression_passed?: boolean }) => request<GovernedBadCase>(
+    `/api/evaluation-center/bad-cases/${encodeURIComponent(caseId)}`,
+    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update) },
+  ),
 };

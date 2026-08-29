@@ -404,3 +404,145 @@ body { color: var(--ink); background: var(--canvas); }
   color: var(--text-muted);
   font-size: 0.82rem;
 }
+.evaluation-center {
+  padding: 20px 24px 32px;
+}
+
+.evaluation-tabs {
+  margin-bottom: 18px;
+}
+
+.evaluation-panel {
+  min-height: 180px;
+}
+
+.compact-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.compact-section-heading h2,
+.compact-section-heading p {
+  margin: 0;
+}
+
+.compact-section-heading p {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.governance-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+
+.governance-table th,
+.governance-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.governance-table th {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.governance-table td small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-muted);
+}
+
+.status-muted {
+  color: var(--text-muted);
+}
+
+.inline-governance-loading {
+  padding: 8px 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.bad-case-filters {
+  display: flex;
+  justify-content: space-between;
+  padding-bottom: 10px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.bad-case-filter-fields {
+  display: flex;
+  gap: 8px;
+}
+
+.bad-case-filter-fields label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.bad-case-filter-fields select {
+  min-height: 30px;
+  padding: 3px 24px 3px 7px;
+}
+
+.table-action {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+}
+
+.bad-case-details {
+  min-width: 230px;
+}
+
+.bad-case-details summary {
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.bad-case-details dl,
+.bad-case-details dl div {
+  margin: 6px 0;
+}
+
+.bad-case-details dt {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.bad-case-details dd {
+  margin: 2px 0 0;
+}
+
+.bad-case-editor {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.bad-case-editor label {
+  display: grid;
+  gap: 2px;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.bad-case-editor input {
+  min-height: 30px;
+  padding: 4px 7px;
+}
+
+.table-action.is-danger {
+  color: var(--danger);
+}

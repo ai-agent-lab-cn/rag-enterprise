@@ -135,6 +135,7 @@ def run_baseline(
             RERANK_MRR_THRESHOLD,
             baseline.rerank_mrr.value if baseline else None,
         ),
+        ndcg_at_5=assess_metric(metrics.ndcg_at_5, 0.70),
     )
 
 

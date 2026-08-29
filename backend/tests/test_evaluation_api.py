@@ -127,5 +127,22 @@ def test_answer_evaluation_api_only_exposes_official_report(client, tmp_path) ->
     assert detail.status_code == 200
     assert detail.json()["case_count"] == 30
     assert detail.json()["metrics"]["answer_correctness"]["value"] == 1.0
+    assert detail.json()["metrics"]["source_conflict_accuracy"]["value"] == 1.0
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "ANSWER_EVALUATION_REPORT_NOT_FOUND"
+
+
+def test_evaluation_center_overview_unifies_latest_official_reports(client, tmp_path) -> None:
+    _write_report(tmp_path / "retrieval.json", report_id="retrieval-official")
+    answers = tmp_path / "answers"
+    answers.mkdir()
+    source = Path("backend/evaluation/reports/answers/answer_v1_baseline.json")
+    answers.joinpath("answer.json").write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    _use_reports(client, tmp_path)
+
+    response = client.get("/api/evaluation-center/overview")
+
+    assert response.status_code == 200
+    assert response.json()["retrieval_report"]["report_id"] == "retrieval-official"
+    assert response.json()["answer_report"]["dataset_id"] == "rag-enterprise-answer-quality"
+    assert response.json()["passed"] is True

@@ -173,6 +173,7 @@ class AnswerQualityMetrics(BaseModel):
     unsupported_claim_rate: AnswerMetric | None = None
     contradiction_rate: AnswerMetric | None = None
     refusal_accuracy: AnswerMetric
+    source_conflict_accuracy: AnswerMetric | None = None
     failure_strategy_stability: AnswerMetric
 
 
@@ -275,18 +276,28 @@ def evaluate_answers(
         if expected[result.case_id].scenario != "answerable"
     ]
     refusal_accuracy = _average([result.status_correct for result in failure_results])
+    conflict_results = [
+        result
+        for result in deterministic
+        if expected[result.case_id].scenario == "source_conflict"
+    ]
+    source_conflict_accuracy = _average(
+        [result.status_correct for result in conflict_results]
+    )
     failure_stability = _average([result.response_stable for result in failure_results])
 
     semantic_metrics = _semantic_metrics(run.observations) if mode == "formal" else {}
     metrics = AnswerQualityMetrics(
         citation_validity=_assess_minimum(citation_validity, 1.0),
         refusal_accuracy=_assess_minimum(refusal_accuracy, 0.90),
+        source_conflict_accuracy=_assess_minimum(source_conflict_accuracy, 0.90),
         failure_strategy_stability=_assess_minimum(failure_stability, 1.0),
         **semantic_metrics,
     )
     metric_values = [
         metrics.citation_validity,
         metrics.refusal_accuracy,
+        metrics.source_conflict_accuracy,
         metrics.failure_strategy_stability,
     ]
     if mode == "formal":

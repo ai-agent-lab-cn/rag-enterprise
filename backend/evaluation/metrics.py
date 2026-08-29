@@ -1,5 +1,6 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from math import log2
 
 from .dataset import EvaluationQuery
 
@@ -26,6 +27,24 @@ def reciprocal_rank(ranked_chunk_ids: Sequence[str], relevant_chunk_ids: set[str
     return 0.0
 
 
+def ndcg_at_k(ranked_chunk_ids: Sequence[str], relevant_chunk_ids: set[str], k: int) -> float:
+    """以二元相关性计算归一化折损累计增益。"""
+
+    if k < 1:
+        raise ValueError("k 必须大于等于 1")
+    if not relevant_chunk_ids:
+        raise ValueError("相关分块不能为空")
+    seen: set[str] = set()
+    gains: list[float] = []
+    for rank, item in enumerate(ranked_chunk_ids[:k], 1):
+        if item in relevant_chunk_ids and item not in seen:
+            gains.append(1.0 / log2(rank + 1))
+            seen.add(item)
+    ideal_count = min(k, len(relevant_chunk_ids))
+    ideal = sum(1.0 / log2(rank + 1) for rank in range(1, ideal_count + 1))
+    return sum(gains) / ideal
+
+
 @dataclass(frozen=True)
 class RetrievalMetrics:
     query_count: int
@@ -36,6 +55,7 @@ class RetrievalMetrics:
     # 而用户看到的是精排后的来源列表，因此扩大召回窗口的收益只有这一项能体现。
     rerank_recall_at_5: float = 0.0
     hybrid_mrr: float | None = None
+    ndcg_at_5: float = 0.0
 
 
 def evaluate_rankings(
@@ -63,12 +83,14 @@ def evaluate_rankings(
     vector_rrs: list[float] = []
     rerank_rrs: list[float] = []
     hybrid_rrs: list[float] = []
+    ndcgs: list[float] = []
     for query in queries:
         relevant = set(query.relevant_chunk_ids)
         recalls.append(recall_at_k(vector_rankings[query.query_id], relevant, 5))
         rerank_recalls.append(recall_at_k(reranked_rankings[query.query_id], relevant, 5))
         vector_rrs.append(reciprocal_rank(vector_rankings[query.query_id], relevant))
         rerank_rrs.append(reciprocal_rank(reranked_rankings[query.query_id], relevant))
+        ndcgs.append(ndcg_at_k(reranked_rankings[query.query_id], relevant, 5))
         if hybrid_rankings is not None:
             hybrid_rrs.append(reciprocal_rank(hybrid_rankings[query.query_id], relevant))
 
@@ -80,4 +102,5 @@ def evaluate_rankings(
         rerank_mrr=sum(rerank_rrs) / count,
         rerank_recall_at_5=sum(rerank_recalls) / count,
         hybrid_mrr=sum(hybrid_rrs) / count if hybrid_rrs else None,
+        ndcg_at_5=sum(ndcgs) / count,
     )

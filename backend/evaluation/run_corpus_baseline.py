@@ -193,6 +193,7 @@ def run_corpus_baseline(
             if baseline and baseline.rerank_recall_at_5
             else None,
         ),
+        ndcg_at_5=assess_metric(metrics.ndcg_at_5, 0.70),
         config_fingerprint=fingerprint,
     )
     return report.model_copy(update={"official": report.passed})

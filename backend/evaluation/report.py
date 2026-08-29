@@ -53,6 +53,12 @@ class RetrievalEvaluationReport(BaseModel):
     # 1.0.0 的历史报告没有这一项，保持可选以免旧报告失效。
     rerank_recall_at_5: EvaluationMetric | None = None
     hybrid_mrr: EvaluationMetric | None = None
+    ndcg_at_5: EvaluationMetric | None = None
+    metadata_filter_accuracy: EvaluationMetric | None = None
+    query_rewrite_success_rate: EvaluationMetric | None = None
+    query_rewrite_fallback_rate: EvaluationMetric | None = None
+    no_result_rate: EvaluationMetric | None = None
+    acl_leak_count: int | None = Field(default=None, ge=0)
     # 同上，1.0.0 的历史报告没有这一项；但缺该字段的报告不能用于放行索引切换，
     # 因为无法证明报告跑的是目标索引版本那套配置。
     config_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
@@ -66,4 +72,15 @@ class RetrievalEvaluationReport(BaseModel):
 
     @property
     def passed(self) -> bool:
-        return all((self.recall_at_5.passed, self.vector_mrr.passed, self.rerank_mrr.passed))
+        optional = (
+            self.ndcg_at_5,
+            self.metadata_filter_accuracy,
+            self.query_rewrite_success_rate,
+            self.query_rewrite_fallback_rate,
+            self.no_result_rate,
+        )
+        return (
+            all((self.recall_at_5.passed, self.vector_mrr.passed, self.rerank_mrr.passed))
+            and all(metric.passed for metric in optional if metric is not None)
+            and (self.acl_leak_count in {None, 0})
+        )

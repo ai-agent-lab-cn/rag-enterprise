@@ -615,6 +615,53 @@ class BadCaseResponse(BaseModel):
     created_at: datetime
 
 
+class PipelineEvaluationResponse(BaseModel):
+    run_count: int = Field(ge=0)
+    added_count: int = Field(ge=0)
+    updated_count: int = Field(ge=0)
+    deleted_count: int = Field(ge=0)
+    skipped_count: int = Field(ge=0)
+    failed_count: int = Field(ge=0)
+    retry_count: int = Field(ge=0)
+    failure_rate: float = Field(ge=0, le=1)
+    average_duration_ms: float = Field(ge=0)
+
+
+class GovernedBadCaseResponse(BaseModel):
+    case_id: str
+    source_type: Literal["online", "evaluation", "manual"]
+    source_record_id: str
+    knowledge_base_id: str
+    dataset_version: str | None = None
+    question: str
+    expected_source_ids: list[str] = Field(default_factory=list)
+    actual_source_ids: list[str] = Field(default_factory=list)
+    expected_answer_status: str | None = None
+    actual_answer_status: str | None = None
+    actual_answer: str | None = None
+    failure_stage: str
+    root_cause: str | None = None
+    category: str
+    severity: Literal["low", "medium", "high", "critical"]
+    assignee: str | None = None
+    fix_commit: str | None = None
+    status: Literal["new", "confirmed", "fixing", "resolved", "regression_added", "ignored"]
+    regression_added: bool = False
+    created_at: datetime
+    confirmed_at: datetime | None = None
+    resolved_at: datetime | None = None
+    updated_at: datetime
+
+
+class GovernedBadCaseUpdate(BaseModel):
+    status: Literal["new", "confirmed", "fixing", "resolved", "regression_added", "ignored"]
+    root_cause: str | None = Field(default=None, max_length=500)
+    severity: Literal["low", "medium", "high", "critical"] | None = None
+    assignee: str | None = Field(default=None, max_length=120)
+    fix_commit: str | None = Field(default=None, pattern=r"^[0-9a-f]{7,40}$")
+    regression_passed: bool | None = None
+
+
 class ConversationSummaryResponse(BaseModel):
     conversation_id: str
     knowledge_base_id: str
@@ -715,6 +762,14 @@ class EvaluationReportResponse(EvaluationReportSummary):
     recall_at_5: EvaluationMetricResponse
     vector_mrr: EvaluationMetricResponse
     rerank_mrr: EvaluationMetricResponse
+    rerank_recall_at_5: EvaluationMetricResponse | None = None
+    hybrid_mrr: EvaluationMetricResponse | None = None
+    ndcg_at_5: EvaluationMetricResponse | None = None
+    metadata_filter_accuracy: EvaluationMetricResponse | None = None
+    query_rewrite_success_rate: EvaluationMetricResponse | None = None
+    query_rewrite_fallback_rate: EvaluationMetricResponse | None = None
+    no_result_rate: EvaluationMetricResponse | None = None
+    acl_leak_count: int | None = Field(default=None, ge=0)
 
 
 class AnswerEvaluationMetricResponse(EvaluationMetricResponse):
@@ -737,6 +792,13 @@ class AnswerEvaluationReportResponse(AnswerEvaluationReportSummary):
     parameters: dict[str, int | float | str | bool]
     case_count: int
     metrics: dict[str, AnswerEvaluationMetricResponse | None]
+
+
+class EvaluationCenterOverviewResponse(BaseModel):
+    passed: bool
+    retrieval_report: EvaluationReportSummary | None = None
+    answer_report: AnswerEvaluationReportSummary | None = None
+    report_count: int = Field(ge=0)
 
 
 class ErrorBody(BaseModel):

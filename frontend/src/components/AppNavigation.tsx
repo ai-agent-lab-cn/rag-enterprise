@@ -1,6 +1,6 @@
-import { BookOpen, Database, LayoutDashboard, MessageSquareText, Plug, SearchCheck, Settings, ShieldCheck, Users, type LucideIcon } from "lucide-react";
+import { Database, LayoutDashboard, MessageSquareText, Plug, SearchCheck, Settings, ShieldCheck, Users, type LucideIcon } from "lucide-react";
 
-export type AppPage = "overview" | "knowledge-bases" | "data-sources" | "chat" | "retrieval-evaluation" | "answer-evaluation" | "system" | "members" | "audit";
+export type AppPage = "overview" | "knowledge-bases" | "data-sources" | "chat" | "evaluation-center" | "system" | "members" | "audit";
 
 interface AppNavigationProps { page: AppPage; onNavigate: (path: string) => void; isAdmin: boolean; }
 const ITEMS: Array<{ page: AppPage; path: string; label: string; icon: LucideIcon; group?: string }> = [
@@ -8,8 +8,7 @@ const ITEMS: Array<{ page: AppPage; path: string; label: string; icon: LucideIco
   { page: "chat", path: "/chat", label: "问答工作台", icon: MessageSquareText, group: "应用" },
   { page: "knowledge-bases", path: "/knowledge-bases", label: "知识库管理", icon: Database, group: "知识库管理" },
   { page: "data-sources", path: "/data-sources", label: "数据源管理", icon: Plug },
-  { page: "answer-evaluation", path: "/evaluation/answers", label: "回答评测", icon: BookOpen, group: "测评评估" },
-  { page: "retrieval-evaluation", path: "/evaluation/retrieval", label: "检索评测", icon: SearchCheck },
+  { page: "evaluation-center", path: "/evaluation", label: "评测中心", icon: SearchCheck, group: "测评评估" },
 ];
 const ADMIN_ITEMS: typeof ITEMS = [
   { page: "system", path: "/system", label: "系统状态", icon: Settings, group: "管理配置" },

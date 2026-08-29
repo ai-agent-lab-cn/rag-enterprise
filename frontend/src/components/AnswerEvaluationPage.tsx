@@ -13,6 +13,7 @@ const LABELS: Record<string, string> = {
   unsupported_claim_rate: "无支持声明率",
   contradiction_rate: "矛盾声明率",
   refusal_accuracy: "拒答正确率",
+  source_conflict_accuracy: "来源冲突识别率",
   failure_strategy_stability: "失败策略稳定性",
 };
 const METRIC_GROUPS = [
@@ -34,7 +35,7 @@ const METRIC_GROUPS = [
   {
     title: "失败控制",
     description: "验证资料不足或服务异常时能否稳定拒答和降级。",
-    metrics: ["refusal_accuracy", "failure_strategy_stability"],
+    metrics: ["refusal_accuracy", "source_conflict_accuracy", "failure_strategy_stability"],
   },
 ] as const;
 function Metric({ name, metric }: { name: string; metric: AnswerEvaluationMetric }) {

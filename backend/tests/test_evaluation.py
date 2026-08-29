@@ -12,6 +12,7 @@ from backend.evaluation import (
     assess_metric,
     evaluate_rankings,
     load_dataset,
+    ndcg_at_k,
     recall_at_k,
     reciprocal_rank,
 )
@@ -88,6 +89,15 @@ def test_recall_at_k_validates_boundary() -> None:
 def test_reciprocal_rank_uses_first_relevant_result() -> None:
     assert reciprocal_rank(["other", "relevant", "relevant-2"], {"relevant", "relevant-2"}) == 0.5
     assert reciprocal_rank(["other"], {"relevant"}) == 0.0
+
+
+def test_ndcg_rewards_relevant_results_near_the_top() -> None:
+    assert ndcg_at_k(["c1", "c3", "c2"], {"c1", "c3"}, 3) == pytest.approx(1.0)
+    assert ndcg_at_k(["c2", "c1", "c3"], {"c1", "c3"}, 3) < 1.0
+
+
+def test_ndcg_does_not_reward_duplicate_results() -> None:
+    assert ndcg_at_k(["c1", "c1", "c2"], {"c1", "c2"}, 3) < 1.0
 
 
 def test_evaluate_rankings_preserves_vector_and_rerank_order() -> None:

@@ -18,7 +18,7 @@ from .corpus_dataset import (
     paragraph_key,
 )
 from .dataset import EvaluationDataset, EvaluationQuery, load_dataset
-from .metrics import RetrievalMetrics, evaluate_rankings, recall_at_k, reciprocal_rank
+from .metrics import RetrievalMetrics, evaluate_rankings, ndcg_at_k, recall_at_k, reciprocal_rank
 from .report import EvaluationMetric, RetrievalEvaluationReport, assess_metric
 
 __all__ = [
@@ -39,6 +39,7 @@ __all__ = [
     "evaluate_rankings",
     "load_corpus_dataset",
     "load_dataset",
+    "ndcg_at_k",
     "paragraph_key",
     "load_answer_dataset",
     "load_answer_run",

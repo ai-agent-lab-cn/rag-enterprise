@@ -123,6 +123,8 @@ def test_fast_evaluation_checks_citations_and_failure_contract_without_judge() -
     assert report.case_count == 30
     assert report.metrics.citation_validity.value == 1
     assert report.metrics.refusal_accuracy.value == 1
+    assert report.metrics.source_conflict_accuracy is not None
+    assert report.metrics.source_conflict_accuracy.value == 1
     assert report.metrics.failure_strategy_stability.value == 1
     assert report.metrics.answer_correctness is None
     assert report.semantic_judgements == {}

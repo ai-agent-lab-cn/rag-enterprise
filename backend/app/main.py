@@ -17,6 +17,7 @@ from .data_source_sync import build_connector, enqueue_sync
 from .database import check_schema_version
 from .demo import seed_demo_document
 from .errors import AppError, install_error_handlers
+from .evaluation_governance import BadCaseUpdate
 from .evaluation_reports import EvaluationReportRepository
 from .history import ConversationRepository
 from .knowledge_bases import (
@@ -28,6 +29,7 @@ from .knowledge_bases import (
 from .models import get_embedding_model, get_generator, get_reranker
 from .observability import MetricsRegistry, ObservabilityMiddleware, bind_actor, hash_identifier
 from .postgres_documents import PostgresAsyncRAGService, check_embedding_model
+from .postgres_evaluation import PostgresEvaluationGovernanceRepository
 from .postgres_repositories import (
     PostgresAuthRepository,
     PostgresCategoryRepository,
@@ -62,8 +64,11 @@ from .schemas import (
     DocumentInfo,
     DocumentMetadata,
     DocumentVersionResponse,
+    EvaluationCenterOverviewResponse,
     EvaluationReportResponse,
     EvaluationReportSummary,
+    GovernedBadCaseResponse,
+    GovernedBadCaseUpdate,
     HealthResponse,
     IndexVersionResponse,
     KnowledgeBaseCreate,
@@ -74,6 +79,7 @@ from .schemas import (
     MemberUpdate,
     MetricsResponse,
     ParsingPreviewResponse,
+    PipelineEvaluationResponse,
     QueryRequest,
     QueryResponse,
     ReadinessResponse,
@@ -118,6 +124,18 @@ def get_evaluation_reports() -> EvaluationReportRepository:
 
 
 EvaluationReportsDependency = Annotated[EvaluationReportRepository, Depends(get_evaluation_reports)]
+
+
+@lru_cache
+def get_evaluation_governance() -> PostgresEvaluationGovernanceRepository | None:
+    database_url = get_settings().database_url
+    return PostgresEvaluationGovernanceRepository(database_url) if database_url else None
+
+
+EvaluationGovernanceDependency = Annotated[
+    PostgresEvaluationGovernanceRepository | None,
+    Depends(get_evaluation_governance),
+]
 
 
 @lru_cache
@@ -1352,6 +1370,77 @@ def create_app() -> FastAPI:
         )
         return {"index_job_id": index_job_id}
 
+    @app.get("/api/evaluation-center/overview", response_model=EvaluationCenterOverviewResponse)
+    async def get_evaluation_center_overview(
+        reports: EvaluationReportsDependency,
+        current: CurrentSessionDependency,
+    ) -> EvaluationCenterOverviewResponse:
+        return await run_in_threadpool(reports.center_overview)
+
+    @app.get("/api/evaluation-center/pipeline", response_model=PipelineEvaluationResponse)
+    async def get_pipeline_evaluation(
+        governance: EvaluationGovernanceDependency,
+        current: CurrentSessionDependency,
+        knowledge_base_id: str | None = Query(default=None),
+        data_source_id: str | None = Query(default=None),
+    ) -> PipelineEvaluationResponse:
+        if governance is None:
+            raise AppError("POSTGRES_REQUIRED", "工程指标需要 PostgreSQL 运行时。", 503)
+        summary = await run_in_threadpool(
+            governance.pipeline_summary, knowledge_base_id, data_source_id
+        )
+        return PipelineEvaluationResponse(**summary)
+
+    @app.get(
+        "/api/evaluation-center/bad-cases",
+        response_model=list[GovernedBadCaseResponse],
+    )
+    async def list_governed_bad_cases(
+        governance: EvaluationGovernanceDependency,
+        current: CurrentSessionDependency,
+        knowledge_base_id: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        severity: str | None = Query(default=None),
+        failure_stage: str | None = Query(default=None),
+        limit: PageLimit = 100,
+    ) -> list[GovernedBadCaseResponse]:
+        if governance is None:
+            raise AppError("POSTGRES_REQUIRED", "Bad Case 治理需要 PostgreSQL 运行时。", 503)
+        items = await run_in_threadpool(
+            governance.list_bad_cases,
+            knowledge_base_id=knowledge_base_id,
+            status=status,
+            severity=severity,
+            failure_stage=failure_stage,
+            limit=limit,
+        )
+        return [GovernedBadCaseResponse(**item) for item in items]
+
+    @app.put(
+        "/api/evaluation-center/bad-cases/{case_id}",
+        response_model=GovernedBadCaseResponse,
+    )
+    async def update_governed_bad_case(
+        case_id: str,
+        payload: GovernedBadCaseUpdate,
+        governance: EvaluationGovernanceDependency,
+        current: CurrentSessionDependency,
+    ) -> GovernedBadCaseResponse:
+        _require_admin(current.user)
+        if governance is None:
+            raise AppError("POSTGRES_REQUIRED", "Bad Case 治理需要 PostgreSQL 运行时。", 503)
+        try:
+            item = await run_in_threadpool(
+                governance.update_bad_case,
+                case_id,
+                BadCaseUpdate(**payload.model_dump()),
+            )
+        except ValueError as exc:
+            raise AppError("INVALID_BAD_CASE_TRANSITION", str(exc), 409) from exc
+        if item is None:
+            raise AppError("BAD_CASE_NOT_FOUND", "未找到该 Bad Case。", 404)
+        return GovernedBadCaseResponse(**item)
+
     @app.get("/api/evaluations", response_model=list[EvaluationReportSummary])
     async def list_evaluations(
         reports: EvaluationReportsDependency,
@@ -1359,7 +1448,6 @@ def create_app() -> FastAPI:
         offset: PageOffset = 0,
         limit: PageLimit = 50,
     ) -> list[EvaluationReportSummary]:
-        _require_admin(current.user)
         items = await run_in_threadpool(reports.list_official)
         return _page(items, offset, limit)
 
@@ -1369,7 +1457,6 @@ def create_app() -> FastAPI:
         reports: EvaluationReportsDependency,
         current: CurrentSessionDependency,
     ) -> EvaluationReportResponse:
-        _require_admin(current.user)
         return await run_in_threadpool(reports.get_official, report_id)
 
     @app.get(
@@ -1382,7 +1469,6 @@ def create_app() -> FastAPI:
         offset: PageOffset = 0,
         limit: PageLimit = 50,
     ) -> list[AnswerEvaluationReportSummary]:
-        _require_admin(current.user)
         items = await run_in_threadpool(reports.list_official_answers)
         return _page(items, offset, limit)
 
@@ -1395,7 +1481,6 @@ def create_app() -> FastAPI:
         reports: EvaluationReportsDependency,
         current: CurrentSessionDependency,
     ) -> AnswerEvaluationReportResponse:
-        _require_admin(current.user)
         return await run_in_threadpool(reports.get_official_answer, report_id)
 
     @app.delete("/api/documents/{document_id}", status_code=204)
@@ -1884,6 +1969,19 @@ async def _execute_recorded_query(
             error_code=exc.code,
             error_message=exc.message,
         )
+        governance = get_evaluation_governance()
+        if governance and error_details.get("bad_case_category"):
+            await run_in_threadpool(
+                _capture_online_bad_case,
+                governance,
+                record_id=record["record_id"],
+                knowledge_base_id=knowledge_base_id,
+                question=question,
+                category=str(error_details["bad_case_category"]),
+                answer_status=None,
+                answer=None,
+                source_ids=[],
+            )
         details = error_details
         details.update(
             {
@@ -1927,11 +2025,53 @@ async def _execute_recorded_query(
         error_code=result.error_code,
         error_message=result.error_message,
     )
+    if record_status == "failed":
+        governance = get_evaluation_governance()
+        if governance:
+            await run_in_threadpool(
+                _capture_online_bad_case,
+                governance,
+                record_id=record["record_id"],
+                knowledge_base_id=knowledge_base_id,
+                question=question,
+                category=f"answer_{result.answer_status}",
+                answer_status=result.answer_status,
+                answer=result.answer,
+                source_ids=[item.chunk_id for item in result.sources],
+            )
     return result.model_copy(
         update={
             "conversation_id": conversation["conversation_id"],
             "record_id": record["record_id"],
         }
+    )
+
+
+def _capture_online_bad_case(
+    repository: PostgresEvaluationGovernanceRepository,
+    *,
+    record_id: str,
+    knowledge_base_id: str,
+    question: str,
+    category: str,
+    answer_status: str | None,
+    answer: str | None,
+    source_ids: list[str],
+) -> str:
+    failure_stage = "generation" if category.startswith("answer_") else "retrieval"
+    if category.startswith(("parsing_", "chunking_")):
+        failure_stage = "processing"
+    if category.startswith("pipeline_"):
+        failure_stage = "pipeline"
+    return repository.capture_online_bad_case(
+        record_id=record_id,
+        knowledge_base_id=knowledge_base_id,
+        question=question,
+        category=category,
+        failure_stage=failure_stage,
+        actual_answer_status=answer_status,
+        actual_answer=answer,
+        actual_source_ids=source_ids,
     )
 
 

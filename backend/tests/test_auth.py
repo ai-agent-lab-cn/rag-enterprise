@@ -131,7 +131,7 @@ def test_member_only_sees_authorized_knowledge_base_and_cannot_administer(client
         headers=member_headers,
         json={"name": "越权创建", "description": ""},
     )
-    evaluation_denied = client.get("/api/evaluations", headers=member_headers)
+    evaluation_readonly = client.get("/api/evaluations", headers=member_headers)
 
     assert [item["knowledge_base_id"] for item in listed.json()] == [allowed_id]
     assert allowed.status_code == 200
@@ -140,7 +140,7 @@ def test_member_only_sees_authorized_knowledge_base_and_cannot_administer(client
     assert legacy_denied.status_code == 404
     assert create_denied.status_code == 403
     assert create_denied.json()["error"]["code"] == "ADMIN_REQUIRED"
-    assert evaluation_denied.status_code == 403
+    assert evaluation_readonly.status_code == 200
 
 
 def test_logout_and_member_deactivation_invalidate_sessions(client) -> None:

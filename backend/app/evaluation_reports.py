@@ -11,6 +11,7 @@ from .errors import AppError
 from .schemas import (
     AnswerEvaluationReportResponse,
     AnswerEvaluationReportSummary,
+    EvaluationCenterOverviewResponse,
     EvaluationReportResponse,
     EvaluationReportSummary,
 )
@@ -54,6 +55,19 @@ class EvaluationReportRepository:
             if report.official and report.report_id == report_id:
                 return self._answer_detail(report)
         raise AppError("ANSWER_EVALUATION_REPORT_NOT_FOUND", "未找到该正式回答评测报告。", 404)
+
+    def center_overview(self) -> EvaluationCenterOverviewResponse:
+        retrieval = self.list_official()
+        answers = self.list_official_answers()
+        latest_retrieval = retrieval[0] if retrieval else None
+        latest_answer = answers[0] if answers else None
+        reports = [item for item in (latest_retrieval, latest_answer) if item is not None]
+        return EvaluationCenterOverviewResponse(
+            passed=bool(reports) and all(item.passed for item in reports),
+            retrieval_report=latest_retrieval,
+            answer_report=latest_answer,
+            report_count=len(retrieval) + len(answers),
+        )
 
     @staticmethod
     def _load(path: Path) -> RetrievalEvaluationReport:
@@ -101,7 +115,28 @@ class EvaluationReportRepository:
             recall_at_5=report.recall_at_5.model_dump(),
             vector_mrr=report.vector_mrr.model_dump(),
             rerank_mrr=report.rerank_mrr.model_dump(),
+            rerank_recall_at_5=(
+                report.rerank_recall_at_5.model_dump() if report.rerank_recall_at_5 else None
+            ),
             hybrid_mrr=report.hybrid_mrr.model_dump() if report.hybrid_mrr else None,
+            ndcg_at_5=report.ndcg_at_5.model_dump() if report.ndcg_at_5 else None,
+            metadata_filter_accuracy=(
+                report.metadata_filter_accuracy.model_dump()
+                if report.metadata_filter_accuracy
+                else None
+            ),
+            query_rewrite_success_rate=(
+                report.query_rewrite_success_rate.model_dump()
+                if report.query_rewrite_success_rate
+                else None
+            ),
+            query_rewrite_fallback_rate=(
+                report.query_rewrite_fallback_rate.model_dump()
+                if report.query_rewrite_fallback_rate
+                else None
+            ),
+            no_result_rate=report.no_result_rate.model_dump() if report.no_result_rate else None,
+            acl_leak_count=report.acl_leak_count,
         )
 
     @staticmethod
@@ -119,10 +154,29 @@ class EvaluationReportRepository:
 
     @classmethod
     def _answer_detail(cls, report: AnswerEvaluationReport) -> AnswerEvaluationReportResponse:
+        metrics = {key: value.model_dump() if value else None for key, value in report.metrics}
+        if metrics.get("source_conflict_accuracy") is None:
+            conflict_results = [
+                item for item in report.deterministic_results
+                if item.expected_status == "source_conflict"
+            ]
+            value = (
+                sum(item.status_correct for item in conflict_results) / len(conflict_results)
+                if conflict_results
+                else 1.0
+            )
+            metrics["source_conflict_accuracy"] = {
+                "value": value,
+                "threshold": 0.90,
+                "direction": "minimum",
+                "baseline": None,
+                "passed": value >= 0.90,
+                "regressed": False,
+            }
         return AnswerEvaluationReportResponse(
             **cls._answer_summary(report).model_dump(),
             prompt_hash=report.prompt_hash,
             parameters=report.parameters,
             case_count=report.case_count,
-            metrics={key: value.model_dump() if value else None for key, value in report.metrics},
+            metrics=metrics,
         )
