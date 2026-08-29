@@ -398,3 +398,9 @@ body { color: var(--ink); background: var(--canvas); }
   .knowledge-detail-summary { grid-template-columns: 1fr 1fr; }.knowledge-detail-summary > div { border-bottom: 1px solid #edf0f5; }.knowledge-detail-summary > div:nth-child(even) { border-right: 0; }.version-list article { grid-template-columns: 1fr auto; }.version-list article > div:nth-child(2) { grid-column: 1/-1; }.management-pagination { justify-content: center; }
   .quick-actions > div { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }.quick-actions button { min-height: 126px; height: auto; }
 }
+.source-original-action{margin:0 14px 12px}.source-error{display:block;color:var(--danger);padding:0 14px 12px}.citation-original{display:grid;gap:14px}.citation-original>p{white-space:pre-wrap;line-height:1.75;padding:14px;background:var(--surface-soft);border-radius:8px}.citation-original dl{display:grid;gap:8px}.citation-original dl div{display:grid;grid-template-columns:90px 1fr;gap:12px}.citation-original dt{color:var(--muted)}.citation-original dd{margin:0;overflow-wrap:anywhere}
+.answer-governance-copy {
+  margin: 6px 0 12px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}

@@ -38,6 +38,27 @@ class _DataSourcesStub:
             "created_at": datetime.now(UTC), "updated_at": datetime.now(UTC),
         }]
 
+    def get_citation(self, knowledge_base_id: str, chunk_id: str, user_id: str):
+        if (knowledge_base_id, chunk_id) != ("kb_default", "chunk_1"):
+            return None
+        return {
+            "chunk_id": chunk_id,
+            "knowledge_base_id": knowledge_base_id,
+            "document_id": "doc_1",
+            "document_version_id": "ver_1",
+            "content_sha256": "a" * 64,
+            "filename": "guide.md",
+            "text": "可信原文片段",
+            "page": 3,
+            "paragraph": 2,
+            "heading_path": ["安全", "权限"],
+            "sheet_name": None,
+            "row_start": None,
+            "row_end": None,
+            "source_url": None,
+            "external_resource_id": "docs/guide.md",
+        }
+
 
 def test_admin_can_create_external_source_and_read_sync_runs(client, monkeypatch) -> None:
     repository = _DataSourcesStub()
@@ -70,6 +91,33 @@ def test_admin_can_create_external_source_and_read_sync_runs(client, monkeypatch
     runs = client.get("/api/data-sources/ds_external/sync-runs")
     assert runs.status_code == 200
     assert runs.json()[0]["added_count"] == 2
+
+
+def test_citation_endpoint_returns_acl_checked_original_location(client) -> None:
+    client.app.dependency_overrides[get_data_sources] = lambda: _DataSourcesStub()
+
+    response = client.get("/api/knowledge-bases/kb_default/citations/chunk_1")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "chunk_id": "chunk_1",
+        "knowledge_base_id": "kb_default",
+        "document_id": "doc_1",
+        "document_version_id": "ver_1",
+        "content_sha256": "a" * 64,
+        "filename": "guide.md",
+        "text": "可信原文片段",
+        "page": 3,
+        "paragraph": 2,
+        "heading_path": ["安全", "权限"],
+        "sheet_name": None,
+        "row_start": None,
+        "row_end": None,
+        "column_start": None,
+        "column_end": None,
+        "source_url": None,
+        "external_resource_id": "docs/guide.md",
+    }
 
 
 def test_data_source_response_normalizes_repository_sync_status() -> None:

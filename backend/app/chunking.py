@@ -53,6 +53,8 @@ class Chunk:
     sheet_name: str | None = None
     row_start: int | None = None
     row_end: int | None = None
+    column_start: int | None = None
+    column_end: int | None = None
 
     def metadata(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -74,6 +76,9 @@ class Chunk:
         if self.row_start is not None:
             data["row_start"] = self.row_start
             data["row_end"] = self.row_end
+        if self.column_start is not None:
+            data["column_start"] = self.column_start
+            data["column_end"] = self.column_end
         return {**data, **self.governance_metadata}
 
 
@@ -129,6 +134,8 @@ def split_sections(
                         sheet_name=section.sheet_name,
                         row_start=section.row_start,
                         row_end=section.row_end,
+                        column_start=section.column_start,
+                        column_end=section.column_end,
                     )
                 )
             if start + chunk_size >= len(section.text):

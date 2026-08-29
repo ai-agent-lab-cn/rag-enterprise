@@ -22,6 +22,30 @@ def test_split_preserves_metadata_and_overlap() -> None:
     assert chunks[1].char_count == 6
 
 
+def test_split_preserves_table_column_location() -> None:
+    chunks = split_sections(
+        "doc_table",
+        "data.xlsx",
+        [
+            ParsedSection(
+                "A | B",
+                None,
+                0,
+                sheet_name="Sheet1",
+                row_start=2,
+                row_end=3,
+                column_start=1,
+                column_end=2,
+            )
+        ],
+        chunk_size=100,
+        overlap=0,
+    )
+
+    assert chunks[0].metadata()["column_start"] == 1
+    assert chunks[0].metadata()["column_end"] == 2
+
+
 def test_non_default_knowledge_base_scopes_chunk_ids_and_metadata() -> None:
     chunks = split_sections(
         "doc_1",

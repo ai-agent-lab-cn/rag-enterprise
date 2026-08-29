@@ -94,6 +94,28 @@ export interface Source {
   lexical_score?: number | null;
   retrieval_methods?: Array<"vector" | "lexical">;
   query_match_count?: number;
+  document_version_id?: string | null;
+  content_sha256?: string | null;
+  heading_path?: string[];
+  sheet_name?: string | null;
+  row_start?: number | null;
+  row_end?: number | null;
+  column_start?: number | null;
+  column_end?: number | null;
+  source_url?: string | null;
+  external_resource_id?: string | null;
+}
+
+export interface Citation extends Source {
+  document_version_id: string;
+  content_sha256: string;
+}
+
+export interface GenerationGovernance {
+  minimum_evidence_count: number; evidence_count: number;
+  acl_revalidated: boolean; current_version_revalidated: boolean; retrieval_status_revalidated: boolean;
+  citation_indices: number[]; citation_valid: boolean; claim_citation_coverage: boolean;
+  outcome_reason: string | null;
 }
 
 export interface QueryResult {
@@ -110,6 +132,7 @@ export interface QueryResult {
   model_metadata: Record<string, string | number | boolean>;
   prompt_version: string | null;
   prompt_hash: string | null;
+  generation_governance?: GenerationGovernance | null;
   query_metadata?: {
     strategy: "original" | "normalized" | "controlled_expansion";
     query_count: number;
@@ -283,6 +306,8 @@ export interface AnswerRecord {
   model_metadata: Record<string, string | number | boolean>;
   prompt_version: string | null;
   prompt_hash: string | null;
+  answer_status?: QueryResult["answer_status"] | null;
+  generation_governance?: GenerationGovernance | null;
   query_metadata?: {
     strategy: "original" | "normalized" | "controlled_expansion";
     query_count: number;

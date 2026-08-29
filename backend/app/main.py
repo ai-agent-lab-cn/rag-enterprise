@@ -51,6 +51,7 @@ from .schemas import (
     CategoryCreate,
     CategoryResponse,
     CategoryUpdate,
+    CitationResponse,
     ClassificationUpdate,
     ConversationDetailResponse,
     ConversationSummaryResponse,
@@ -1249,6 +1250,37 @@ def create_app() -> FastAPI:
         return [DocumentVersionResponse(**row) for row in _page(rows, offset, limit)]
 
     @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/citations/{chunk_id}",
+        response_model=CitationResponse,
+    )
+    async def get_citation_source(
+        knowledge_base_id: str,
+        chunk_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> CitationResponse:
+        await _require_accessible_knowledge_base(
+            knowledge_bases, auth, current.user, knowledge_base_id
+        )
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "可信引用定位需要 PostgreSQL 运行时。", 503)
+        row = await run_in_threadpool(
+            sources.get_citation,
+            knowledge_base_id,
+            chunk_id,
+            current.user.user_id,
+        )
+        if row is None:
+            raise AppError(
+                "CITATION_NOT_FOUND",
+                "未找到当前可用引用，或当前用户没有查看权限。",
+                404,
+            )
+        return CitationResponse(**row)
+
+    @app.get(
         "/api/knowledge-bases/{knowledge_base_id}/document-versions/{document_version_id}/parsing",
         response_model=ParsingPreviewResponse,
     )
@@ -1884,6 +1916,12 @@ async def _execute_recorded_query(
         model_metadata=result.model_metadata,
         prompt_version=result.prompt_version,
         prompt_hash=result.prompt_hash,
+        answer_status=result.answer_status,
+        generation_governance=(
+            result.generation_governance.model_dump(mode="json")
+            if result.generation_governance
+            else None
+        ),
         query_metadata=(result.query_metadata.model_dump(mode="json") if result.query_metadata else None),
         bad_case_category=(f"answer_{result.answer_status}" if record_status == "failed" else None),
         error_code=result.error_code,

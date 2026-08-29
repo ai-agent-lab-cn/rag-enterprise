@@ -108,6 +108,13 @@ def test_service_fuses_multiple_queries_and_reports_strategy() -> None:
     assert response.query_metadata.fused_candidate_count == 4
     assert response.query_metadata.returned_source_count == 4
     assert response.query_metadata.filter_match_count is None
+    assert response.generation_governance is not None
+    assert response.generation_governance.evidence_count == 4
+    assert response.generation_governance.minimum_evidence_count == 1
+    assert response.generation_governance.acl_revalidated is True
+    assert response.generation_governance.current_version_revalidated is True
+    assert response.generation_governance.retrieval_status_revalidated is True
+    assert response.generation_governance.citation_indices == []
 
 
 def test_query_expansion_reuses_the_same_metadata_filter() -> None:

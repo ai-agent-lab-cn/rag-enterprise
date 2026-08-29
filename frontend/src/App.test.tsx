@@ -200,6 +200,7 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if (url === "/api/knowledge-bases/kb_default/categories") return Promise.resolve(json([category]));
   if (url === "/api/knowledge-bases/kb_default/document-versions?offset=0&limit=100") return Promise.resolve(json([documentVersion]));
   if (url === "/api/knowledge-bases/kb_default/document-versions/ver_1/parsing") return Promise.resolve(json({ ...documentVersion, tree: [{ node_id: "node_00000", node_type: "heading", text: "安全规范", level: 1, location: { heading_path: ["安全规范"], paragraph_index: 0 }, children: [] }], chunks: [{ chunk_id: "chunk_1", chunk_index: 0, content: "ACL 必须在召回前过滤。", metadata: { node_id: "node_00000", heading_path: ["安全规范"], paragraph: 0 } }] }));
+  if (url === "/api/knowledge-bases/kb_default/citations/chunk_1") return Promise.resolve(json({ chunk_id: "chunk_1", knowledge_base_id: "kb_default", document_id: "doc_1", document_version_id: "ver_1", content_sha256: "a".repeat(64), filename: "profile.md", text: "系统资料全文", page: null, paragraph: 0, heading_path: ["系统设计"], sheet_name: null, row_start: null, row_end: null, source_url: null, external_resource_id: null }));
   if (url === "/api/knowledge-bases/kb_default/conversations") return Promise.resolve(json([]));
   if (url === "/api/evaluations/answers/reports") return Promise.resolve(json([answerSummary]));
   if (url === "/api/knowledge-bases/kb_default/query" && init?.method === "POST")
@@ -228,6 +229,7 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
           filter_match_count: 5,
           applied_filters: { categories: ["安全"], tags: ["ACL"], source_types: ["file"], created_from: null, created_to: null },
         },
+        generation_governance: { minimum_evidence_count: 1, evidence_count: 1, acl_revalidated: true, current_version_revalidated: true, retrieval_status_revalidated: true, citation_indices: [1], citation_valid: true, claim_citation_coverage: true, outcome_reason: "answered" },
         sources: [
           {
             knowledge_base_id: "kb_default",
@@ -246,6 +248,9 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
             lexical_score: 0.64,
             retrieval_methods: ["vector", "lexical"],
             query_match_count: 2,
+            document_version_id: "ver_1",
+            content_sha256: "a".repeat(64),
+            heading_path: ["系统设计"],
           },
         ],
       }),
@@ -430,6 +435,41 @@ test("问答工作台使用所选知识库接口并渲染来源", async () => {
   expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/query", expect.objectContaining({ method: "POST" }));
   const queryCall = fetchMock.mock.calls.find(([url]) => String(url) === "/api/knowledge-bases/kb_default/query");
   expect(JSON.parse(String(queryCall?.[1]?.body))).toMatchObject({ filters: { category_ids: ["cat_1234567890abcdef"], tags: ["ACL"], source_types: ["file"] } });
+});
+
+test("可信引用可以在局部弹窗定位到原文", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/chat?knowledge_base_id=kb_default");
+  render(<App />);
+  await userEvent.type(await screen.findByLabelText("向知识库提问"), "系统如何工作？");
+  await userEvent.click(screen.getByRole("button", { name: /提问/ }));
+
+  await userEvent.click(await screen.findByRole("button", { name: "查看 profile.md 原文" }));
+
+  expect(await screen.findByRole("dialog", { name: "可信引用原文" })).toHaveTextContent("系统资料全文");
+  expect(screen.getByRole("dialog", { name: "可信引用原文" })).toHaveTextContent("系统设计");
+  expect(screen.getByRole("dialog", { name: "可信引用原文" })).toHaveTextContent("ver_1");
+});
+
+test("证据不足状态说明不会把降级结果伪装成答案", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/knowledge-bases/kb_default/query") {
+      return commonFetch(input, init).then(async (response) => json({
+        ...await response.json(),
+        answer: "当前资料不足以支持确定回答。",
+        answer_status: "insufficient_evidence",
+        sources: [],
+      }));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/chat?knowledge_base_id=kb_default");
+  render(<App />);
+  await userEvent.type(await screen.findByLabelText("向知识库提问"), "未知问题");
+  await userEvent.click(screen.getByRole("button", { name: /提问/ }));
+
+  expect(await screen.findByText("证据不足")).toBeInTheDocument();
+  expect(screen.getByText("未达到证据阈值，不生成确定性结论。")).toBeInTheDocument();
 });
 
 test("回答评测页只读展示正式指标", async () => {

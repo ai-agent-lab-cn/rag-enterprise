@@ -69,7 +69,7 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
   const activeRecord = useMemo(() => history?.records.at(-1) ?? null, [history]);
   const historicalResult = useMemo<QueryResult | null>(() => activeRecord ? {
     answer: activeRecord.answer ?? activeRecord.error_message ?? "本次回答失败。",
-    answer_status: activeRecord.status === "insufficient_evidence" || activeRecord.status === "source_conflict" || activeRecord.status === "retrieval_only" || activeRecord.status === "generation_failed" ? activeRecord.status : "answered",
+    answer_status: activeRecord.answer_status ?? (activeRecord.status === "failed" ? "generation_failed" : "answered"),
     error_code: activeRecord.error_code,
     error_message: activeRecord.error_message,
     sources: activeRecord.sources,
@@ -81,6 +81,7 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
     model_metadata: activeRecord.model_metadata,
     prompt_version: activeRecord.prompt_version,
     prompt_hash: activeRecord.prompt_hash,
+    generation_governance: activeRecord.generation_governance,
     query_metadata: activeRecord.query_metadata,
   } : null, [activeRecord]);
   const sources = result?.sources ?? activeRecord?.sources ?? [];

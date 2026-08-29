@@ -109,7 +109,11 @@ class PostgresVectorStore:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             register_vector(connection)
             rows = connection.execute(
-                f"""SELECT c.chunk_id, c.content, c.metadata,
+                f"""SELECT c.chunk_id, c.content,
+                          c.metadata || jsonb_build_object(
+                            'document_version_id', c.document_version_id,
+                            'content_sha256', v.content_sha256
+                          ) AS metadata,
                           1 - (c.embedding <=> %s::vector) AS retrieval_score
                    FROM chunks c
                    JOIN documents d
@@ -117,6 +121,7 @@ class PostgresVectorStore:
                     AND d.document_id = (c.metadata->>'document_id')
                     AND d.current_version_id = c.document_version_id
                    JOIN data_sources s ON s.data_source_id = d.data_source_id
+                   JOIN document_versions v ON v.document_version_id = c.document_version_id
                    WHERE {where_clause}
                    ORDER BY c.embedding <=> %s::vector
                    LIMIT %s""",
@@ -156,13 +161,18 @@ class PostgresVectorStore:
                          OR COALESCE(s.acl->'allow_user_ids', '[]'::jsonb) ? %s)"""
                 parameters.extend([access.user_id] * 4)
             rows = connection.execute(
-                f"""SELECT c.chunk_id, c.content, c.metadata
+                f"""SELECT c.chunk_id, c.content,
+                          c.metadata || jsonb_build_object(
+                            'document_version_id', c.document_version_id,
+                            'content_sha256', v.content_sha256
+                          ) AS metadata
                    FROM chunks c
                    JOIN documents d
                      ON d.knowledge_base_id = c.knowledge_base_id
                     AND d.document_id = (c.metadata->>'document_id')
                     AND d.current_version_id = c.document_version_id
                    JOIN data_sources s ON s.data_source_id = d.data_source_id
+                   JOIN document_versions v ON v.document_version_id = c.document_version_id
                    WHERE c.knowledge_base_id = %s
                      AND c.index_version_id = %s
                      AND COALESCE(c.metadata->>'retrieval_status', 'searchable') = 'searchable'

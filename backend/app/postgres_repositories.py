@@ -125,6 +125,56 @@ class PostgresDataSourceRepository:
     def __init__(self, database_url: str):
         self.database_url = database_url
 
+    def get_citation(
+        self, knowledge_base_id: str, chunk_id: str, user_id: str
+    ) -> dict[str, object] | None:
+        """只返回当前活动索引、当前文档版本且仍对用户可见的原文片段。"""
+
+        validate_knowledge_base_id(knowledge_base_id)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """SELECT c.chunk_id, c.knowledge_base_id, d.document_id,
+                          c.document_version_id, v.content_sha256, d.filename,
+                          c.content AS text, c.metadata
+                   FROM chunks c
+                   JOIN documents d
+                     ON d.knowledge_base_id=c.knowledge_base_id
+                    AND d.document_id=(c.metadata->>'document_id')
+                    AND d.current_version_id=c.document_version_id
+                   JOIN document_versions v ON v.document_version_id=c.document_version_id
+                   JOIN index_versions iv ON iv.index_version_id=c.index_version_id
+                   JOIN data_sources s ON s.data_source_id=d.data_source_id
+                   WHERE c.knowledge_base_id=%s AND c.chunk_id=%s AND iv.status='active'
+                     AND COALESCE(c.metadata->>'retrieval_status', 'searchable')='searchable'
+                     AND (c.metadata->>'valid_from' IS NULL
+                          OR (c.metadata->>'valid_from')::timestamptz <= now())
+                     AND (c.metadata->>'valid_to' IS NULL
+                          OR (c.metadata->>'valid_to')::timestamptz >= now())
+                     AND NOT (COALESCE(c.metadata->'deny_user_ids', '[]'::jsonb) ? %s)
+                     AND (jsonb_array_length(COALESCE(c.metadata->'allow_user_ids', '[]'::jsonb))=0
+                          OR COALESCE(c.metadata->'allow_user_ids', '[]'::jsonb) ? %s)
+                     AND NOT (COALESCE(s.acl->'deny_user_ids', '[]'::jsonb) ? %s)
+                     AND (jsonb_array_length(COALESCE(s.acl->'allow_user_ids', '[]'::jsonb))=0
+                          OR COALESCE(s.acl->'allow_user_ids', '[]'::jsonb) ? %s)""",
+                (knowledge_base_id, chunk_id, user_id, user_id, user_id, user_id),
+            ).fetchone()
+        if row is None:
+            return None
+        metadata = dict(row.pop("metadata") or {})
+        return {
+            **dict(row),
+            "page": metadata.get("page"),
+            "paragraph": int(metadata.get("paragraph", 0)),
+            "heading_path": list(metadata.get("heading_path") or []),
+            "sheet_name": metadata.get("sheet_name"),
+            "row_start": metadata.get("row_start"),
+            "row_end": metadata.get("row_end"),
+            "column_start": metadata.get("column_start"),
+            "column_end": metadata.get("column_end"),
+            "source_url": metadata.get("source_url"),
+            "external_resource_id": metadata.get("external_resource_id"),
+        }
+
     def list(self, accessible_ids: set[str] | None = None) -> list[dict[str, object]]:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             rows = connection.execute(

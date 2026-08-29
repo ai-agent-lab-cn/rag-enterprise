@@ -18,7 +18,7 @@ def test_prompt_has_version_hash_and_evidence_contract() -> None:
 
     prompt = build_prompt("系统如何回答？", [chunk])
 
-    assert prompt.version == PROMPT_VERSION == "v3-grounded-answer-1"
+    assert prompt.version == PROMPT_VERSION == "v5-8-grounded-governance-1"
     assert len(prompt.sha256) == 64
     assert "禁止补充外部知识或猜测" in prompt.text
     assert "[STATUS: SOURCE_CONFLICT]" in prompt.text
@@ -61,3 +61,25 @@ def test_unknown_or_missing_citation_is_not_displayed_as_answer() -> None:
         parsed = parse_answer(raw_answer, 2)
         assert parsed.status == "generation_failed"
         assert parsed.answer == INVALID_OUTPUT_ANSWER
+
+
+def test_each_factual_claim_requires_a_citation() -> None:
+    parsed = parse_answer(
+        "[STATUS: ANSWERED]\n系统支持审计。系统支持权限隔离。[来源 1]",
+        1,
+    )
+
+    assert parsed.status == "generation_failed"
+    assert parsed.error_code == "CLAIM_CITATION_MISSING"
+
+
+def test_answer_reports_deduplicated_valid_citation_indices() -> None:
+    parsed = parse_answer(
+        "[STATUS: ANSWERED]\n系统支持审计[来源 2]，并保留审计事件[来源 2]。[来源 1]",
+        2,
+    )
+
+    assert parsed.status == "answered"
+    assert parsed.citation_indices == (1, 2)
+    assert parsed.citation_valid is True
+    assert parsed.claim_citation_coverage is True

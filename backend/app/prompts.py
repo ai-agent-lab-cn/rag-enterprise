@@ -5,7 +5,7 @@ from typing import Literal
 
 from .store import RetrievedChunk
 
-PROMPT_VERSION = "v3-grounded-answer-1"
+PROMPT_VERSION = "v5-8-grounded-governance-1"
 
 AnswerStatus = Literal[
     "answered",
@@ -29,6 +29,9 @@ class ParsedAnswer:
     answer: str
     error_code: str | None = None
     error_message: str | None = None
+    citation_indices: tuple[int, ...] = ()
+    citation_valid: bool = True
+    claim_citation_coverage: bool = True
 
 
 _STATUS_PATTERN = re.compile(
@@ -97,18 +100,42 @@ def parse_answer(raw_answer: str, source_count: int) -> ParsedAnswer:
     if not body or not citations:
         return _invalid_output()
 
+    citation_indices = tuple(sorted(set(citations)))
+    if not _claims_have_citations(body):
+        return _invalid_output(
+            "CLAIM_CITATION_MISSING",
+            "生成结果包含没有引用支持的事实声明。",
+            citation_indices=citation_indices,
+        )
+
     if provider_status == "SOURCE_CONFLICT":
         if len(set(citations)) < 2:
             return _invalid_output()
-        return ParsedAnswer("source_conflict", body)
+        return ParsedAnswer("source_conflict", body, citation_indices=citation_indices)
 
-    return ParsedAnswer("answered", body)
+    return ParsedAnswer("answered", body, citation_indices=citation_indices)
 
 
-def _invalid_output() -> ParsedAnswer:
+def _claims_have_citations(body: str) -> bool:
+    """每个中文句子或独立行都必须携带来源；短连接语不单独视为事实声明。"""
+
+    normalized = re.sub(r"([。！？])((?:\[来源\s+\d+\])+)", r"\2\1", body)
+    claims = [item.strip() for item in re.split(r"(?<=[。！？])|\n+", normalized) if item.strip()]
+    return all(_CITATION_PATTERN.search(claim) for claim in claims if len(claim) >= 4)
+
+
+def _invalid_output(
+    error_code: str = "MODEL_OUTPUT_INVALID",
+    error_message: str = "生成结果未通过证据约束校验。",
+    *,
+    citation_indices: tuple[int, ...] = (),
+) -> ParsedAnswer:
     return ParsedAnswer(
         "generation_failed",
         INVALID_OUTPUT_ANSWER,
-        "MODEL_OUTPUT_INVALID",
-        "生成结果未通过证据约束校验。",
+        error_code,
+        error_message,
+        citation_indices=citation_indices,
+        citation_valid=error_code != "MODEL_OUTPUT_INVALID",
+        claim_citation_coverage=False,
     )

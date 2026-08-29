@@ -25,6 +25,14 @@ const ANSWER_STATUS_LABELS: Record<QueryResult["answer_status"], string> = {
   generation_failed: "答案生成已降级",
 };
 
+const ANSWER_STATUS_DESCRIPTIONS: Record<QueryResult["answer_status"], string> = {
+  answered: "证据与引用校验通过。",
+  insufficient_evidence: "未达到证据阈值，不生成确定性结论。",
+  source_conflict: "来源之间存在冲突，请核对引用原文。",
+  retrieval_only: "生成模型不可用，当前仅保留可核对的检索证据。",
+  generation_failed: "答案生成失败，当前仍保留可用引用证据。",
+};
+
 function answerWithSourceLinks(answer: string, sourceCount: number) {
   return answer.split(SOURCE_REFERENCE).map((part, index) => {
     const sourceNumber = Number(part);
@@ -55,6 +63,7 @@ export function AnswerPanel({ result, loading, showSources = true }: AnswerPanel
       <div className={`answer-label answer-status-${result.answer_status}`}>
         {ANSWER_STATUS_LABELS[result.answer_status]}
       </div>
+      <p className="answer-governance-copy">{ANSWER_STATUS_DESCRIPTIONS[result.answer_status]}</p>
       <p className="answer-text">{answerWithSourceLinks(result.answer, result.sources.length)}</p>
       <div className="metric-strip" aria-label="查询性能">
         {METRICS.map(([key, label]) => {

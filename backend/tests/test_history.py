@@ -25,6 +25,8 @@ def test_history_persists_source_and_execution_metadata(tmp_path: Path) -> None:
         model_metadata={"configured_model": "test-model"},
         prompt_version="v1",
         prompt_hash="abc123",
+        answer_status="answered",
+        generation_governance={"evidence_count": 1, "citation_valid": True},
         query_metadata={
             "strategy": "controlled_expansion",
             "query_count": 2,
@@ -40,6 +42,8 @@ def test_history_persists_source_and_execution_metadata(tmp_path: Path) -> None:
     assert detail["records"][0]["sources"][0]["text"] == "来源快照"
     assert detail["records"][0]["prompt_hash"] == "abc123"
     assert detail["records"][0]["query_metadata"]["query_count"] == 2
+    assert detail["records"][0]["answer_status"] == "answered"
+    assert detail["records"][0]["generation_governance"]["citation_valid"] is True
     assert restored.get_answer("kb_default", record["record_id"], OWNER)["answer"] == "有来源的答案"
 
 

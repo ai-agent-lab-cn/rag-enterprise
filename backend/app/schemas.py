@@ -495,6 +495,36 @@ class Source(BaseModel):
     lexical_score: float | None = None
     retrieval_methods: list[Literal["vector", "lexical"]] = Field(default_factory=list)
     query_match_count: int = Field(default=1, ge=1)
+    document_version_id: str | None = None
+    content_sha256: str | None = None
+    heading_path: list[str] = Field(default_factory=list)
+    sheet_name: str | None = None
+    row_start: int | None = None
+    row_end: int | None = None
+    column_start: int | None = None
+    column_end: int | None = None
+    source_url: str | None = None
+    external_resource_id: str | None = None
+
+
+class CitationResponse(BaseModel):
+    chunk_id: str
+    knowledge_base_id: str
+    document_id: str
+    document_version_id: str
+    content_sha256: str
+    filename: str
+    text: str
+    page: int | None = None
+    paragraph: int
+    heading_path: list[str] = Field(default_factory=list)
+    sheet_name: str | None = None
+    row_start: int | None = None
+    row_end: int | None = None
+    column_start: int | None = None
+    column_end: int | None = None
+    source_url: str | None = None
+    external_resource_id: str | None = None
 
 
 class QueryExecutionMetadata(BaseModel):
@@ -509,9 +539,27 @@ class QueryExecutionMetadata(BaseModel):
     filter_match_count: int | None = Field(default=None, ge=0)
 
 
+class GenerationGovernance(BaseModel):
+    minimum_evidence_count: int = Field(default=1, ge=1)
+    evidence_count: int = Field(ge=0)
+    acl_revalidated: bool
+    current_version_revalidated: bool
+    retrieval_status_revalidated: bool
+    citation_indices: list[int] = Field(default_factory=list)
+    citation_valid: bool
+    claim_citation_coverage: bool
+    outcome_reason: str | None = None
+
+
 class QueryResponse(BaseModel):
     answer: str
-    answer_status: str = "answered"
+    answer_status: Literal[
+        "answered",
+        "insufficient_evidence",
+        "source_conflict",
+        "retrieval_only",
+        "generation_failed",
+    ] = "answered"
     error_code: str | None = None
     error_message: str | None = None
     sources: list[Source]
@@ -524,6 +572,7 @@ class QueryResponse(BaseModel):
     prompt_version: str | None = None
     prompt_hash: str | None = None
     query_metadata: QueryExecutionMetadata | None = None
+    generation_governance: GenerationGovernance | None = None
 
 
 class AnswerRecordResponse(BaseModel):
@@ -539,6 +588,14 @@ class AnswerRecordResponse(BaseModel):
     model_metadata: dict[str, str | int | float | bool]
     prompt_version: str | None
     prompt_hash: str | None
+    answer_status: Literal[
+        "answered",
+        "insufficient_evidence",
+        "source_conflict",
+        "retrieval_only",
+        "generation_failed",
+    ] | None = None
+    generation_governance: GenerationGovernance | None = None
     query_metadata: QueryExecutionMetadata | None = None
     bad_case_category: str | None = None
     error_code: str | None

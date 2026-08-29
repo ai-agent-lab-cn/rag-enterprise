@@ -36,6 +36,7 @@ export function TechnicalDrawer({ result }: TechnicalDrawerProps) {
   const breakdown = channelBreakdown(result.sources);
   const hybrid = breakdown.labelled > 0 && (breakdown.both > 0 || breakdown.lexicalOnly > 0);
   const queryMetadata = result.query_metadata;
+  const governance = result.generation_governance;
   const appliedFilters = queryMetadata?.applied_filters;
   const filterLabels = [
     ...(appliedFilters?.categories ?? []).map((item) => `分类：${item}`),
@@ -76,6 +77,7 @@ export function TechnicalDrawer({ result }: TechnicalDrawerProps) {
           <span className="section-kicker">模型与参数</span>
           <h3 title={result.model}>{result.model}</h3>
           <p>默认召回 10 条候选，精排后返回 5 条来源。</p>
+          {governance ? <><p>证据：{governance.evidence_count} 条 / 最低 {governance.minimum_evidence_count} 条</p><p>引用校验：{governance.citation_valid ? "通过" : "失败"} · 声明覆盖：{governance.claim_citation_coverage ? "通过" : "失败"}</p><p>权限、当前版本、检索状态：{governance.acl_revalidated && governance.current_version_revalidated && governance.retrieval_status_revalidated ? "已复核" : "未通过"}</p></> : null}
         </section>
         <section>
           <span className="section-kicker">性能耗时</span>

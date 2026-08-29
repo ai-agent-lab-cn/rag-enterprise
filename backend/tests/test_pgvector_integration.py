@@ -28,6 +28,7 @@ from backend.app.main import (
     get_service,
 )
 from backend.app.postgres_documents import IndexWorker, PostgresAsyncRAGService
+from backend.app.postgres_repositories import PostgresDataSourceRepository
 
 KNOWLEDGE_BASE_ID = "kb_default"
 TEAM_KNOWLEDGE_BASE_ID = "kb_team"
@@ -154,9 +155,26 @@ def test_pgvector_import_query_sources_and_delete(
     assert response.sources[0].document_id == document.document_id
     assert response.sources[0].filename == "retrieval-evidence.md"
     assert response.sources[0].paragraph == 1
+    assert response.sources[0].document_version_id is not None
+    assert len(response.sources[0].content_sha256 or "") == 64
+    assert response.sources[0].heading_path == ["可追溯问答"]
     assert "原文证据" in response.sources[0].text
     assert response.sources[0].retrieval_score == pytest.approx(1.0)
     assert response.sources[0].rerank_score == pytest.approx(2.0)
+    citation = PostgresDataSourceRepository(
+        isolated_service.database_url
+    ).get_citation(KNOWLEDGE_BASE_ID, response.sources[0].chunk_id, "usr_reader")
+    assert citation is not None
+    assert citation["document_version_id"] == response.sources[0].document_version_id
+    assert citation["text"] == response.sources[0].text
+    assert isolated_service.update_document_acl(
+        document.document_id,
+        [],
+        ["usr_reader"],
+    ) == 2
+    assert PostgresDataSourceRepository(
+        isolated_service.database_url
+    ).get_citation(KNOWLEDGE_BASE_ID, response.sources[0].chunk_id, "usr_reader") is None
 
     assert isolated_service.delete_document(document.document_id) is True
     assert isolated_service.delete_document(document.document_id) is False
@@ -185,7 +203,7 @@ def test_generation_failure_keeps_ranked_sources(
     assert response.answer_status == "generation_failed"
     assert response.error_code == "MODEL_TIMEOUT"
     assert response.sources
-    assert response.prompt_version == "v3-grounded-answer-1"
+    assert response.prompt_version == "v5-8-grounded-governance-1"
     assert len(response.prompt_hash or "") == 64
 
 

@@ -383,6 +383,18 @@ class RAGService:
                 "returned_source_count": len(ranked),
                 "filter_match_count": len(candidates) if filters else None,
             },
+            generation_governance={
+                "minimum_evidence_count": 1,
+                "evidence_count": len(ranked),
+                # 候选进入 ranked 前已经通过统一 ACL、当前版本、有效期和检索状态过滤。
+                "acl_revalidated": True,
+                "current_version_revalidated": True,
+                "retrieval_status_revalidated": True,
+                "citation_indices": list(parsed_answer.citation_indices),
+                "citation_valid": parsed_answer.citation_valid,
+                "claim_citation_coverage": parsed_answer.claim_citation_coverage,
+                "outcome_reason": parsed_answer.error_code or parsed_answer.status,
+            },
             latency_ms={
                 "retrieval": retrieval_ms,
                 "rerank": rerank_ms,
@@ -457,4 +469,24 @@ def _source(item: RetrievedChunk) -> Source:
         lexical_score=item.lexical_score,
         retrieval_methods=item.retrieval_methods or ["vector"],
         query_match_count=item.query_match_count,
+        document_version_id=(
+            str(metadata["document_version_id"]) if metadata.get("document_version_id") else None
+        ),
+        content_sha256=(str(metadata["content_sha256"]) if metadata.get("content_sha256") else None),
+        heading_path=list(metadata.get("heading_path") or []),
+        sheet_name=(str(metadata["sheet_name"]) if metadata.get("sheet_name") else None),
+        row_start=(int(metadata["row_start"]) if metadata.get("row_start") is not None else None),
+        row_end=(int(metadata["row_end"]) if metadata.get("row_end") is not None else None),
+        column_start=(
+            int(metadata["column_start"]) if metadata.get("column_start") is not None else None
+        ),
+        column_end=(
+            int(metadata["column_end"]) if metadata.get("column_end") is not None else None
+        ),
+        source_url=(str(metadata["source_url"]) if metadata.get("source_url") else None),
+        external_resource_id=(
+            str(metadata["external_resource_id"])
+            if metadata.get("external_resource_id")
+            else None
+        ),
     )
