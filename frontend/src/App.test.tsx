@@ -60,6 +60,15 @@ const category = {
   description: "安全资料", sort_order: 100, active: true, is_system: false,
   document_count: 1, created_at: "2026-08-12T00:00:00Z", updated_at: "2026-08-12T00:00:00Z",
 };
+const categoryTemplate = {
+  template_id: "category_template_default", name: "默认分类模板",
+  description: "创建知识库时复制的通用企业分类。", active: true, item_count: 2,
+  created_at: "2026-08-30T00:00:00Z", updated_at: "2026-08-30T00:00:00Z",
+  items: [
+    { template_item_id: "cti_product", template_id: "category_template_default", name: "产品资料", description: "产品资料", sort_order: 100, active: true, created_at: "2026-08-30T00:00:00Z", updated_at: "2026-08-30T00:00:00Z" },
+    { template_item_id: "cti_ops", template_id: "category_template_default", name: "运维文档", description: "运维资料", sort_order: 200, active: false, created_at: "2026-08-30T00:00:00Z", updated_at: "2026-08-30T00:00:00Z" },
+  ],
+};
 const documentVersion = {
   document_version_id: "ver_1", document_id: "doc_1", filename: "profile.md",
   version_number: 1, content_sha256: "a".repeat(64), source_file_bytes: 2048,
@@ -187,6 +196,10 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
         chunk_count: 0,
       }),
     );
+  if (url === "/api/category-templates/default") return Promise.resolve(json(categoryTemplate));
+  if (url === "/api/category-templates/default/items" && init?.method === "POST") return Promise.resolve(json(categoryTemplate.items[0], 201));
+  if (url.startsWith("/api/category-templates/default/items/") && init?.method === "PUT") return Promise.resolve(json(categoryTemplate.items[0]));
+  if (url.startsWith("/api/category-templates/default/items/") && init?.method === "DELETE") return Promise.resolve(new Response(null, { status: 204 }));
   if (url === "/api/knowledge-bases/kb_default/documents/doc_1" && init?.method === "DELETE") return Promise.resolve(new Response(null, { status: 204 }));
   if ((url === "/api/knowledge-bases" || url.startsWith("/api/knowledge-bases?")) && !init?.method) return Promise.resolve(json([base]));
   if (url === "/api/data-sources?offset=0&limit=21") return Promise.resolve(json([dataSource]));
@@ -199,6 +212,7 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if (url === "/api/knowledge-bases/kb_default/documents") return Promise.resolve(json([document]));
   if (url === "/api/knowledge-bases/kb_default/categories") return Promise.resolve(json([category]));
   if (url === "/api/knowledge-bases/kb_default/document-versions?offset=0&limit=100") return Promise.resolve(json([documentVersion]));
+  if (url === "/api/knowledge-bases/kb_default/index-versions") return Promise.resolve(json([{ index_version_id: "iv_active", status: "active", chunking_version: "semantic-v1", parser_version: "registry-v1", embedding_model: "text2vec", embedding_dimension: 768, processing_options: {}, config_fingerprint: "a".repeat(64), evaluation_report_id: "retrieval-official", rebuild_batch_id: null, created_at: "2026-08-30T00:00:00Z", activated_at: "2026-08-30T00:01:00Z", retired_at: null }]));
   if (url === "/api/knowledge-bases/kb_default/document-versions/ver_1/parsing") return Promise.resolve(json({ ...documentVersion, tree: [{ node_id: "node_00000", node_type: "heading", text: "安全规范", level: 1, location: { heading_path: ["安全规范"], paragraph_index: 0 }, children: [] }], chunks: [{ chunk_id: "chunk_1", chunk_index: 0, content: "ACL 必须在召回前过滤。", metadata: { node_id: "node_00000", heading_path: ["安全规范"], paragraph: 0 } }] }));
   if (url === "/api/knowledge-bases/kb_default/citations/chunk_1") return Promise.resolve(json({ chunk_id: "chunk_1", knowledge_base_id: "kb_default", document_id: "doc_1", document_version_id: "ver_1", content_sha256: "a".repeat(64), filename: "profile.md", text: "系统资料全文", page: null, paragraph: 0, heading_path: ["系统设计"], sheet_name: null, row_start: null, row_end: null, source_url: null, external_resource_id: null }));
   if (url === "/api/knowledge-bases/kb_default/conversations") return Promise.resolve(json([]));
@@ -210,6 +224,7 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   }));
   if (url.startsWith("/api/evaluation-center/pipeline")) return Promise.resolve(json({ run_count: 2, added_count: 4, updated_count: 1, deleted_count: 1, skipped_count: 2, failed_count: 1, retry_count: 3, failure_rate: 0.5, average_duration_ms: 20000 }));
   if (url.startsWith("/api/evaluation-center/bad-cases")) return Promise.resolve(json([{ case_id: "case_1234567890abcdef", source_type: "online", source_record_id: "ans_1", knowledge_base_id: "kb_default", dataset_version: null, question: "为什么没有召回？", expected_source_ids: [], actual_source_ids: [], expected_answer_status: "answered", actual_answer_status: "insufficient_evidence", actual_answer: "资料不足。", failure_stage: "retrieval", root_cause: null, category: "没召回", severity: "high", assignee: null, fix_commit: null, status: "new", regression_added: false, created_at: "2026-08-30T00:00:00Z", confirmed_at: null, resolved_at: null, updated_at: "2026-08-30T00:00:00Z" }]));
+  if (url.startsWith("/api/evaluation-center/acceptance-runs")) return Promise.resolve(json([{ acceptance_run_id: "acc_1", knowledge_base_id: "kb_default", status: "blocked", commit_sha: "local-working-tree", schema_version: 14, steps: [{ step_key: "external_source", title: "真实数据源", status: "blocked", summary: "缺少 S3 兼容外部数据源。", evidence: { external_source_count: 0 } }], limitations: ["缺少 S3 兼容外部数据源。"], created_by: admin.user_id, created_at: "2026-08-30T00:00:00Z" }]));
   if (url === "/api/knowledge-bases/kb_default/query" && init?.method === "POST")
     return Promise.resolve(
       json({
@@ -350,6 +365,8 @@ test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
   await userEvent.click(screen.getByRole("button", { name: "取消" }));
   await userEvent.click(screen.getByRole("tab", { name: /版本治理/ }));
   expect(screen.getByRole("tab", { name: /版本治理/ })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("heading", { name: "Index Version" })).toBeInTheDocument();
+  expect(screen.getByText("iv_active")).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "文档与版本" })).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("tab", { name: /解析与切片/ }));
   expect(await screen.findByRole("heading", { name: "文档结构" })).toBeInTheDocument();
@@ -403,9 +420,58 @@ test("通过弹框创建知识库并支持取消", async () => {
   render(<App />);
   await userEvent.click(await screen.findByRole("button", { name: "＋ 新建知识库" }));
   expect(screen.getByRole("dialog", { name: "新建知识库" })).toBeInTheDocument();
+  expect(screen.getByRole("checkbox", { name: "应用默认分类模板" })).toBeChecked();
+  expect(screen.getByText("将复制 1 个有效分类：产品资料")).toBeInTheDocument();
   await userEvent.type(screen.getByLabelText("知识库名称"), "产品资料");
   await userEvent.click(screen.getByRole("button", { name: "确认创建" }));
-  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases", expect.objectContaining({ method: "POST" })));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases", expect.objectContaining({
+    method: "POST",
+    body: JSON.stringify({ name: "产品资料", description: "", apply_default_category_template: true }),
+  })));
+});
+
+test("管理员可在知识库列表治理默认分类模板", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases");
+  render(<App />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "知识库分类模板" }));
+
+  expect(screen.getByRole("dialog", { name: "默认分类模板" })).toBeInTheDocument();
+  expect(screen.queryByText(/个分类 · 更新于/)).not.toBeInTheDocument();
+  expect(screen.getByText("模板只在创建知识库时复制，修改模板不会影响已有知识库。")).toBeInTheDocument();
+  expect(screen.getAllByText("产品资料").length).toBeGreaterThan(0);
+  expect(screen.getByText("运维文档")).toBeInTheDocument();
+  expect(screen.getByText(/已停用/)).toBeInTheDocument();
+});
+
+test("模板分类编辑使用独立弹框且不占用新建表单", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases");
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", { name: "知识库分类模板" }));
+
+  await userEvent.click(screen.getAllByRole("button", { name: "编辑" })[0]);
+
+  expect(screen.getByRole("dialog", { name: "编辑模板分类" })).toBeInTheDocument();
+  expect(screen.getByLabelText("编辑分类名称")).toHaveValue("产品资料");
+  expect(screen.queryByRole("dialog", { name: "默认分类模板" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "取消" }));
+  expect(screen.getByRole("dialog", { name: "默认分类模板" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "新建分类" })).toBeEnabled();
+});
+
+test("模板新建分类按钮可点击并反馈必填错误", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases");
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", { name: "知识库分类模板" }));
+
+  const createButton = screen.getByRole("button", { name: "新建分类" });
+  expect(createButton).toBeEnabled();
+  await userEvent.click(createButton);
+
+  expect(screen.getByRole("alert")).toHaveTextContent("请输入分类名称");
 });
 
 test("删除资料使用站内确认弹框", async () => {
@@ -527,7 +593,7 @@ test("回答评测页只读展示正式指标", async () => {
   expect(screen.getByText(/页面不会启动模型评测/)).toBeInTheDocument();
 });
 
-test("统一评测中心展示五个治理 Tab", async () => {
+test("统一评测中心展示六个治理 Tab 和链路验收证据", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
   window.history.replaceState({}, "", "/evaluation");
   render(<App />);
@@ -537,6 +603,7 @@ test("统一评测中心展示五个治理 Tab", async () => {
   expect(screen.getByRole("tab", { name: "回答质量" })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "工程指标" })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "Bad Case" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "链路验收" })).toBeInTheDocument();
   expect(await screen.findByRole("heading", { name: "统一质量门已通过" })).toBeInTheDocument();
 
   await userEvent.click(screen.getByRole("tab", { name: "工程指标" }));
@@ -547,6 +614,9 @@ test("统一评测中心展示五个治理 Tab", async () => {
   expect(screen.getByLabelText("Bad Case 状态筛选")).toBeInTheDocument();
   expect(screen.getByLabelText("Bad Case 严重级别筛选")).toBeInTheDocument();
   expect(screen.getByText("治理详情")).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("tab", { name: "链路验收" }));
+  expect(await screen.findByText("缺少 S3 兼容外部数据源。")).toBeInTheDocument();
 });
 
 test("保留检索评测页且可直接访问", async () => {

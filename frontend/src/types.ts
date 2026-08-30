@@ -40,6 +40,28 @@ export interface DocumentCategory {
   updated_at: string;
 }
 
+export interface CategoryTemplateItem {
+  template_item_id: string;
+  template_id: string;
+  name: string;
+  description: string;
+  sort_order: number;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CategoryTemplate {
+  template_id: string;
+  name: string;
+  description: string;
+  active: boolean;
+  item_count: number;
+  items: CategoryTemplateItem[];
+  created_at: string | null;
+  updated_at: string;
+}
+
 export interface DocumentVersion {
   document_version_id: string; document_id: string; filename: string; version_number: number;
   content_sha256: string; source_file_bytes: number; source_type: string;
@@ -389,4 +411,40 @@ export interface GovernedBadCase {
   confirmed_at: string | null;
   resolved_at: string | null;
   updated_at: string;
+}
+
+export interface AcceptanceStep {
+  step_key: string;
+  title: string;
+  status: "passed" | "failed" | "blocked";
+  summary: string;
+  evidence: Record<string, unknown>;
+}
+
+export interface AcceptanceRun {
+  acceptance_run_id: string;
+  knowledge_base_id: string | null;
+  status: "passed" | "failed" | "blocked";
+  commit_sha: string;
+  schema_version: number;
+  steps: AcceptanceStep[];
+  limitations: string[];
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface IndexVersion {
+  index_version_id: string;
+  status: "building" | "ready" | "active" | "previous" | "retired" | "failed";
+  chunking_version: string;
+  parser_version: string;
+  embedding_model: string;
+  embedding_dimension: number;
+  processing_options: Record<string, unknown>;
+  config_fingerprint: string;
+  evaluation_report_id: string | null;
+  rebuild_batch_id: string | null;
+  created_at: string;
+  activated_at: string | null;
+  retired_at: string | null;
 }

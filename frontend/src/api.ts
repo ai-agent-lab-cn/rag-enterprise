@@ -1,4 +1,7 @@
 import type {
+  AcceptanceRun,
+  CategoryTemplate,
+  CategoryTemplateItem,
   ApiErrorPayload,
   AuthToken,
   DocumentInfo,
@@ -11,6 +14,7 @@ import type {
   AnswerEvaluationSummary,
   EvaluationCenterOverview,
   GovernedBadCase,
+  IndexVersion,
   PipelineEvaluation,
   ConversationDetail,
   ConversationSummary,
@@ -116,12 +120,18 @@ export const api = {
     return request<KnowledgeBase[]>(`/api/knowledge-bases${query ? `?${query}` : ""}`);
   },
   getKnowledgeBase: (id: string) => request<KnowledgeBase>(`/api/knowledge-bases/${id}`),
-  createKnowledgeBase: (name: string, description: string) =>
+  createKnowledgeBase: (name: string, description: string, applyDefaultCategoryTemplate = true) =>
     request<KnowledgeBase>("/api/knowledge-bases", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, description }),
+      body: JSON.stringify({ name, description, apply_default_category_template: applyDefaultCategoryTemplate }),
     }),
+  getDefaultCategoryTemplate: () => request<CategoryTemplate>("/api/category-templates/default"),
+  createDefaultCategoryTemplateItem: (payload: { name: string; description: string; sort_order: number }) =>
+    request<CategoryTemplateItem>("/api/category-templates/default/items", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
+  updateDefaultCategoryTemplateItem: (id: string, payload: { name: string; description: string; sort_order: number; active: boolean }) =>
+    request<CategoryTemplateItem>(`/api/category-templates/default/items/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
+  deleteDefaultCategoryTemplateItem: (id: string) => request<void>(`/api/category-templates/default/items/${id}`, { method: "DELETE" }),
   updateKnowledgeBase: (id: string, name: string, description: string) =>
     request<KnowledgeBase>(`/api/knowledge-bases/${id}`, {
       method: "PUT",
@@ -151,6 +161,7 @@ export const api = {
   batchAssignDocumentCategory: (id: string, documentIds: string[], categoryId: string) =>
     request<{ updated: number }>(`/api/knowledge-bases/${id}/documents/categories`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ document_ids: documentIds, category_id: categoryId }) }),
   listKnowledgeBaseDocumentVersions: (id: string) => request<DocumentVersion[]>(`/api/knowledge-bases/${id}/document-versions?offset=0&limit=100`),
+  listKnowledgeBaseIndexVersions: (id: string) => request<IndexVersion[]>(`/api/knowledge-bases/${id}/index-versions`),
   getDocumentParsingPreview: (id: string, versionId: string) => request<ParsingPreview>(`/api/knowledge-bases/${id}/document-versions/${versionId}/parsing`),
   getCitation: (knowledgeBaseId: string, chunkId: string) => request<Citation>(`/api/knowledge-bases/${knowledgeBaseId}/citations/${encodeURIComponent(chunkId)}`),
   reprocessDocumentVersion: (id: string, versionId: string, chunkSize: number, chunkOverlap: number) => request<{ index_job_id: string }>(`/api/knowledge-bases/${id}/document-versions/${versionId}/reprocess`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chunk_size: chunkSize, chunk_overlap: chunkOverlap }) }),
@@ -216,4 +227,6 @@ export const api = {
     `/api/evaluation-center/bad-cases/${encodeURIComponent(caseId)}`,
     { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update) },
   ),
+  listAcceptanceRuns: (knowledgeBaseId?: string) => request<AcceptanceRun[]>(`/api/evaluation-center/acceptance-runs${knowledgeBaseId ? `?knowledge_base_id=${encodeURIComponent(knowledgeBaseId)}` : ""}`),
+  startAcceptanceRun: (knowledgeBaseId: string) => request<AcceptanceRun>("/api/evaluation-center/acceptance-runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ knowledge_base_id: knowledgeBaseId }) }),
 };

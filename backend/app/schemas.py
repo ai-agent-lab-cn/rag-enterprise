@@ -139,6 +139,36 @@ class CategoryResponse(BaseModel):
     updated_at: datetime
 
 
+class CategoryTemplateItemCreate(CategoryCreate):
+    pass
+
+
+class CategoryTemplateItemUpdate(CategoryUpdate):
+    pass
+
+
+class CategoryTemplateItemResponse(BaseModel):
+    template_item_id: str
+    template_id: str
+    name: str
+    description: str
+    sort_order: int
+    active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class CategoryTemplateResponse(BaseModel):
+    template_id: str
+    name: str
+    description: str
+    active: bool
+    item_count: int
+    items: list[CategoryTemplateItemResponse]
+    created_at: datetime | None = None
+    updated_at: datetime
+
+
 class BatchCategoryUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     document_ids: list[str] = Field(min_length=1, max_length=500)
@@ -295,6 +325,7 @@ class ReprocessDocumentVersionRequest(BaseModel):
 class KnowledgeBaseCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     description: str = Field(default="", max_length=500)
+    apply_default_category_template: bool | None = None
 
     @field_validator("name")
     @classmethod
@@ -395,8 +426,14 @@ class SyncRunResponse(BaseModel):
     sync_run_id: str
     data_source_id: str
     status: Literal[
-        "queued", "discovering", "syncing", "indexing", "succeeded",
-        "partial_failed", "aborted", "failed",
+        "queued",
+        "discovering",
+        "syncing",
+        "indexing",
+        "succeeded",
+        "partial_failed",
+        "aborted",
+        "failed",
     ]
     stage: str
     added_count: int
@@ -588,13 +625,16 @@ class AnswerRecordResponse(BaseModel):
     model_metadata: dict[str, str | int | float | bool]
     prompt_version: str | None
     prompt_hash: str | None
-    answer_status: Literal[
-        "answered",
-        "insufficient_evidence",
-        "source_conflict",
-        "retrieval_only",
-        "generation_failed",
-    ] | None = None
+    answer_status: (
+        Literal[
+            "answered",
+            "insufficient_evidence",
+            "source_conflict",
+            "retrieval_only",
+            "generation_failed",
+        ]
+        | None
+    ) = None
     generation_governance: GenerationGovernance | None = None
     query_metadata: QueryExecutionMetadata | None = None
     bad_case_category: str | None = None
@@ -660,6 +700,30 @@ class GovernedBadCaseUpdate(BaseModel):
     assignee: str | None = Field(default=None, max_length=120)
     fix_commit: str | None = Field(default=None, pattern=r"^[0-9a-f]{7,40}$")
     regression_passed: bool | None = None
+
+
+class AcceptanceRunCreate(BaseModel):
+    knowledge_base_id: str = Field(min_length=3, max_length=80)
+
+
+class AcceptanceStepResponse(BaseModel):
+    step_key: str
+    title: str
+    status: Literal["passed", "failed", "blocked"]
+    summary: str
+    evidence: dict[str, object] = Field(default_factory=dict)
+
+
+class AcceptanceRunResponse(BaseModel):
+    acceptance_run_id: str
+    knowledge_base_id: str | None = None
+    status: Literal["passed", "failed", "blocked"]
+    commit_sha: str
+    schema_version: int
+    steps: list[AcceptanceStepResponse]
+    limitations: list[str] = Field(default_factory=list)
+    created_by: str | None = None
+    created_at: datetime
 
 
 class ConversationSummaryResponse(BaseModel):

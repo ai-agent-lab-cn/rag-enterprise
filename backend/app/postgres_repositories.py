@@ -52,6 +52,17 @@ class PostgresKnowledgeBaseRepository:
                           now(), now()
                    WHERE NOT EXISTS (SELECT 1 FROM knowledge_bases)"""
             )
+            connection.execute(
+                """INSERT INTO document_categories
+                   (category_id, knowledge_base_id, name, normalized_name, description,
+                    sort_order, active, is_system)
+                   SELECT 'cat_' || substr(md5(knowledge_base_id || ':未分类'), 1, 16),
+                          knowledge_base_id, '未分类', '未分类', '尚未完成分类的资料',
+                          0, true, true
+                   FROM knowledge_bases WHERE knowledge_base_id=%s
+                   ON CONFLICT (knowledge_base_id, normalized_name) DO NOTHING""",
+                (DEFAULT_KNOWLEDGE_BASE_ID,),
+            )
 
     def list(self) -> list[KnowledgeBaseRecord]:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
@@ -70,17 +81,48 @@ class PostgresKnowledgeBaseRepository:
             ).fetchone()
         return self._record(row) if row else None
 
-    def create(self, name: str, description: str) -> KnowledgeBaseRecord:
+    def create(
+        self, name: str, description: str, apply_default_category_template: bool = True
+    ) -> KnowledgeBaseRecord:
         now = datetime.now(UTC)
         try:
             with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
-                row = connection.execute(
+                with connection.transaction():
+                    knowledge_base_id = f"kb_{uuid4().hex[:12]}"
+                    row = connection.execute(
                     """INSERT INTO knowledge_bases
                        (knowledge_base_id, name, name_normalized, description, is_default,
                         created_at, updated_at)
                        VALUES (%s, %s, %s, %s, false, %s, %s) RETURNING *""",
-                    (f"kb_{uuid4().hex[:12]}", name, name.casefold(), description, now, now),
-                ).fetchone()
+                        (knowledge_base_id, name, name.casefold(), description, now, now),
+                    ).fetchone()
+                    connection.execute(
+                        """INSERT INTO document_categories
+                           (category_id, knowledge_base_id, name, normalized_name, description,
+                            sort_order, active, is_system)
+                           VALUES (%s, %s, '未分类', '未分类', '尚未完成分类的资料', 0, true, true)""",
+                        (f"cat_{uuid4().hex[:16]}", knowledge_base_id),
+                    )
+                    if apply_default_category_template:
+                        items = connection.execute(
+                            """SELECT i.name, i.normalized_name, i.description, i.sort_order
+                               FROM category_template_items i
+                               JOIN category_templates t ON t.template_id=i.template_id
+                               WHERE t.is_default AND t.active AND i.active
+                               ORDER BY i.sort_order, i.normalized_name"""
+                        ).fetchall()
+                        for item in items:
+                            connection.execute(
+                                """INSERT INTO document_categories
+                                   (category_id, knowledge_base_id, name, normalized_name,
+                                    description, sort_order, active, is_system)
+                                   VALUES (%s, %s, %s, %s, %s, %s, true, false)""",
+                                (
+                                    f"cat_{uuid4().hex[:16]}", knowledge_base_id,
+                                    item["name"], item["normalized_name"], item["description"],
+                                    item["sort_order"],
+                                ),
+                            )
         except errors.UniqueViolation as exc:
             raise ValueError("knowledge base name already exists") from exc
         return self._record(row)
@@ -512,6 +554,7 @@ class PostgresCategoryRepository:
             raise ValueError("category name already exists") from exc
         return {**dict(row), "document_count": 0}
 
+
     def update(
         self,
         knowledge_base_id: str,
@@ -631,6 +674,101 @@ class PostgresCategoryRepository:
                     (Jsonb(patch), knowledge_base_id, document_ids),
                 )
         return updated
+
+
+class PostgresCategoryTemplateRepository:
+    DEFAULT_TEMPLATE_ID = "category_template_default"
+
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+
+    @staticmethod
+    def _normalized_name(name: str) -> tuple[str, str]:
+        cleaned = name.strip()
+        if not cleaned:
+            raise ValueError("category template item name is empty")
+        normalized = cleaned.casefold()
+        if normalized == "未分类":
+            raise PermissionError("reserved category name")
+        return cleaned, normalized
+
+    def get_default(self) -> dict[str, object]:
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            template = connection.execute(
+                "SELECT * FROM category_templates WHERE template_id=%s AND is_default",
+                (self.DEFAULT_TEMPLATE_ID,),
+            ).fetchone()
+            if template is None:
+                return {
+                    "template_id": self.DEFAULT_TEMPLATE_ID,
+                    "name": "默认分类模板",
+                    "description": "",
+                    "active": False,
+                    "items": [],
+                    "item_count": 0,
+                    "updated_at": datetime.now(UTC),
+                }
+            items = connection.execute(
+                """SELECT * FROM category_template_items WHERE template_id=%s
+                   ORDER BY active DESC, sort_order, normalized_name""",
+                (self.DEFAULT_TEMPLATE_ID,),
+            ).fetchall()
+        return {**dict(template), "items": [dict(item) for item in items], "item_count": len(items)}
+
+    def create_item(self, name: str, description: str, sort_order: int) -> dict[str, object]:
+        cleaned, normalized = self._normalized_name(name)
+        try:
+            with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+                row = connection.execute(
+                    """INSERT INTO category_template_items
+                       (template_item_id, template_id, name, normalized_name, description, sort_order)
+                       VALUES (%s,%s,%s,%s,%s,%s) RETURNING *""",
+                    (f"cti_{uuid4().hex[:16]}", self.DEFAULT_TEMPLATE_ID, cleaned,
+                     normalized, description.strip(), sort_order),
+                ).fetchone()
+                connection.execute(
+                    "UPDATE category_templates SET updated_at=now() WHERE template_id=%s",
+                    (self.DEFAULT_TEMPLATE_ID,),
+                )
+        except errors.UniqueViolation as exc:
+            raise ValueError("category template item name already exists") from exc
+        return dict(row)
+
+    def update_item(
+        self, template_item_id: str, name: str, description: str, sort_order: int, active: bool
+    ) -> dict[str, object] | None:
+        cleaned, normalized = self._normalized_name(name)
+        try:
+            with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+                row = connection.execute(
+                    """UPDATE category_template_items
+                       SET name=%s, normalized_name=%s, description=%s, sort_order=%s,
+                           active=%s, updated_at=now()
+                       WHERE template_id=%s AND template_item_id=%s RETURNING *""",
+                    (cleaned, normalized, description.strip(), sort_order, active,
+                     self.DEFAULT_TEMPLATE_ID, template_item_id),
+                ).fetchone()
+                if row is not None:
+                    connection.execute(
+                        "UPDATE category_templates SET updated_at=now() WHERE template_id=%s",
+                        (self.DEFAULT_TEMPLATE_ID,),
+                    )
+        except errors.UniqueViolation as exc:
+            raise ValueError("category template item name already exists") from exc
+        return dict(row) if row else None
+
+    def delete_item(self, template_item_id: str) -> bool:
+        with psycopg.connect(self.database_url) as connection:
+            result = connection.execute(
+                "DELETE FROM category_template_items WHERE template_id=%s AND template_item_id=%s",
+                (self.DEFAULT_TEMPLATE_ID, template_item_id),
+            )
+            if result.rowcount:
+                connection.execute(
+                    "UPDATE category_templates SET updated_at=now() WHERE template_id=%s",
+                    (self.DEFAULT_TEMPLATE_ID,),
+                )
+        return result.rowcount > 0
 
 
 class PostgresAuthRepository:

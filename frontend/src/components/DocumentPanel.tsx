@@ -53,7 +53,7 @@ export function DocumentPanel({ documents, categories, loading, uploadProgress, 
       >
         <span className="upload-icon" aria-hidden="true">↑</span>
         <strong>{uploadProgress ? `正在上传 ${uploadProgress.completed} / ${uploadProgress.total}` : loading ? "正在建立索引…" : "批量添加资料"}</strong>
-        <small>拖入或多选 MD、TXT、PDF · 单文件最大 15 MB</small>
+        <small>拖入或多选 MD、TXT、PDF、HTML、DOCX、XLSX、CSV · 单文件最大 15 MB</small>
         {uploadProgress ? <progress aria-label="批量上传进度" max={uploadProgress.total} value={uploadProgress.completed}/> : null}
       </button>
       <input

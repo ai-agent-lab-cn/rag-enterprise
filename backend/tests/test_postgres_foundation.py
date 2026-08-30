@@ -17,6 +17,7 @@ from backend.app.database import apply_migrations, check_schema_version, migrati
 from backend.app.postgres_documents import IndexWorker, PostgresAsyncRAGService
 from backend.app.postgres_repositories import (
     PostgresAuthRepository,
+    PostgresCategoryTemplateRepository,
     PostgresDataSourceRepository,
     PostgresKnowledgeBaseRepository,
 )
@@ -50,6 +51,8 @@ def test_migration_files_are_contiguous() -> None:
         "0011_data_source_sync.sql",
         "0012_sync_run_governance.sql",
         "0013_evaluation_governance.sql",
+        "0014_acceptance_runs.sql",
+        "0015_default_category_template.sql",
     ]
 
 
@@ -59,7 +62,7 @@ def test_schema_thirteen_adds_evaluation_and_bad_case_governance() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 13
+        assert apply_migrations(database_url) == 15
 
     with psycopg.connect(database_url) as connection:
         tables = {
@@ -73,12 +76,83 @@ def test_schema_thirteen_adds_evaluation_and_bad_case_governance() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_schema_fourteen_adds_acceptance_runs() -> None:
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    assert apply_migrations(database_url) == 15
+
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute(
+            "SELECT to_regclass('public.acceptance_runs')"
+        ).fetchone()[0] == "acceptance_runs"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_schema_fifteen_adds_seeded_default_category_template() -> None:
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    assert apply_migrations(database_url) == 15
+
+    with psycopg.connect(database_url) as connection:
+        template = connection.execute(
+            "SELECT template_id, is_default, active FROM category_templates"
+        ).fetchone()
+        names = [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM category_template_items ORDER BY sort_order"
+            ).fetchall()
+        ]
+    assert template == ("category_template_default", True, True)
+    assert names == ["产品资料", "技术文档", "操作手册", "运维文档", "制度规范", "常见问题"]
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_new_knowledge_base_copies_active_template_as_independent_categories() -> None:
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    assert apply_migrations(database_url) == 15
+
+    templates = PostgresCategoryTemplateRepository(database_url)
+    disabled = templates.create_item("停用分类", "不会复制", 700)
+    templates.update_item(disabled["template_item_id"], "停用分类", "不会复制", 700, False)
+    repository = PostgresKnowledgeBaseRepository(database_url)
+    first = repository.create("模板知识库", "", True)
+    second = repository.create("空分类知识库", "", False)
+
+    with psycopg.connect(database_url) as connection:
+        default_categories = connection.execute(
+            "SELECT name, is_system FROM document_categories WHERE knowledge_base_id='kb_default'"
+        ).fetchall()
+        first_categories = connection.execute(
+            "SELECT name, is_system FROM document_categories WHERE knowledge_base_id=%s ORDER BY sort_order",
+            (first.knowledge_base_id,),
+        ).fetchall()
+        second_categories = connection.execute(
+            "SELECT name, is_system FROM document_categories WHERE knowledge_base_id=%s",
+            (second.knowledge_base_id,),
+        ).fetchall()
+    assert default_categories == [("未分类", True)]
+    assert first_categories[0] == ("未分类", True)
+    assert [item[0] for item in first_categories[1:]] == [
+        "产品资料", "技术文档", "操作手册", "运维文档", "制度规范", "常见问题"
+    ]
+    assert second_categories == [("未分类", True)]
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
 def test_schema_twelve_adds_sync_run_governance() -> None:
     database_url = os.environ["TEST_DATABASE_URL"]
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 13
+    assert apply_migrations(database_url) == 15
 
     with psycopg.connect(database_url) as connection:
         columns = {
@@ -89,9 +163,20 @@ def test_schema_twelve_adds_sync_run_governance() -> None:
             ).fetchall()
         }
         assert {
-            "sync_run_id", "data_source_id", "status", "stage", "added_count",
-            "updated_count", "deleted_count", "skipped_count", "failed_count",
-            "cursor", "next_cursor", "retry_count", "error_code", "failure_reason",
+            "sync_run_id",
+            "data_source_id",
+            "status",
+            "stage",
+            "added_count",
+            "updated_count",
+            "deleted_count",
+            "skipped_count",
+            "failed_count",
+            "cursor",
+            "next_cursor",
+            "retry_count",
+            "error_code",
+            "failure_reason",
         } <= columns
         index_job_columns = {
             row[0]
@@ -157,7 +242,7 @@ def test_schema_two_with_existing_data_upgrades_to_schema_three(tmp_path: Path) 
             (now, now),
         )
 
-    assert apply_migrations(database_url) == 13
+    assert apply_migrations(database_url) == 15
     check_schema_version(database_url, 13)
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
@@ -215,7 +300,7 @@ def test_postgres_runtime_covers_auth_indexing_and_backup(tmp_path: Path) -> Non
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 13
+    assert apply_migrations(database_url) == 15
     check_schema_version(database_url, 13)
 
     now = datetime.now(UTC)
@@ -264,9 +349,9 @@ def test_postgres_runtime_covers_auth_indexing_and_backup(tmp_path: Path) -> Non
     assert pending_versions[0]["is_current"] is False
     with psycopg.connect(database_url) as connection:
         # 同一内容重复上传只入队一次；初始索引那条已经 succeeded，不计在内。
-        assert connection.execute(
-            "SELECT count(*) FROM index_jobs WHERE status = 'queued'"
-        ).fetchone()[0] == 1
+        assert (
+            connection.execute("SELECT count(*) FROM index_jobs WHERE status = 'queued'").fetchone()[0] == 1
+        )
     worker = IndexWorker(settings, FakeEmbedder())
     assert worker.run_once() is True
     current = service.list_documents("kb_default")[0]
@@ -415,7 +500,7 @@ def test_schema_nine_with_existing_chunks_upgrades_to_schema_ten(tmp_path: Path)
             (json.dumps({"document_id": "doc_legacy"}), now),
         )
 
-    assert apply_migrations(database_url) == 13
+    assert apply_migrations(database_url) == 15
     check_schema_version(database_url, 13)
 
     with psycopg.connect(database_url) as connection:
@@ -430,14 +515,20 @@ def test_schema_nine_with_existing_chunks_upgrades_to_schema_ten(tmp_path: Path)
         ).fetchone()[0]
         assert index_version_id.startswith("iv_")
         # 历史分块必须归入该版本，否则升级后检索为空
-        assert connection.execute(
-            "SELECT index_version_id FROM chunks WHERE chunk_id = 'ver_legacy:00000'"
-        ).fetchone()[0] == index_version_id
+        assert (
+            connection.execute(
+                "SELECT index_version_id FROM chunks WHERE chunk_id = 'ver_legacy:00000'"
+            ).fetchone()[0]
+            == index_version_id
+        )
         # 维度固定后才能建 HNSW 索引；无维度列会报 column does not have dimensions
-        assert connection.execute(
-            """SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+        assert (
+            connection.execute(
+                """SELECT format_type(atttypid, atttypmod) FROM pg_attribute
                WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'"""
-        ).fetchone()[0] == "vector(3)"
+            ).fetchone()[0]
+            == "vector(3)"
+        )
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -448,12 +539,15 @@ def test_schema_ten_on_empty_database_keeps_embedding_unconstrained(tmp_path: Pa
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 13
+    assert apply_migrations(database_url) == 15
     with psycopg.connect(database_url) as connection:
-        assert connection.execute(
-            """SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+        assert (
+            connection.execute(
+                """SELECT format_type(atttypid, atttypmod) FROM pg_attribute
                WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'"""
-        ).fetchone()[0] == "vector"
+            ).fetchone()[0]
+            == "vector"
+        )
         assert connection.execute("SELECT count(*) FROM index_versions").fetchone()[0] == 0
 
 
@@ -509,7 +603,7 @@ def test_schema_eleven_allows_sync_jobs_and_local_directory_sources(tmp_path: Pa
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 13
+    assert apply_migrations(database_url) == 15
     check_schema_version(database_url, 13)
 
     now = datetime.now(UTC)
@@ -536,9 +630,12 @@ def test_schema_eleven_allows_sync_jobs_and_local_directory_sources(tmp_path: Pa
                        'queued', 'sync', %s, %s)""",
             (now, now),
         )
-        assert connection.execute(
-            "SELECT last_sync_status FROM data_sources WHERE data_source_id='ds_dir'"
-        ).fetchone()[0] == "idle"
+        assert (
+            connection.execute(
+                "SELECT last_sync_status FROM data_sources WHERE data_source_id='ds_dir'"
+            ).fetchone()[0]
+            == "idle"
+        )
 
     # 同一数据源不得有两个活动 sync 任务
     with psycopg.connect(database_url) as connection:

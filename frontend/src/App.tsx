@@ -99,7 +99,7 @@ export default function App() {
   else if (pathname === "/settings/members") content = <MembersPage currentUser={auth.user} />;
   else if (pathname === "/settings/audit") content = <AuditPage />;
   else if (detailMatch) content = <KnowledgeBaseDetailPage id={detailMatch[1]} onOpen={navigate} />;
-  else if (pathname === "/knowledge-bases") content = <KnowledgeBasesPage onOpen={navigate} showCreate={showKnowledgeBaseCreate} onCloseCreate={() => setShowKnowledgeBaseCreate(false)} />;
+  else if (pathname === "/knowledge-bases") content = <KnowledgeBasesPage isAdmin={auth.user.role === "admin"} onOpen={navigate} showCreate={showKnowledgeBaseCreate} onCloseCreate={() => setShowKnowledgeBaseCreate(false)} />;
   else if (pathname === "/data-sources") content = <DataSourcesPage onOpen={navigate} />;
   else if (pathname.startsWith("/evaluation")) content = <EvaluationCenterPage isAdmin={auth.user.role === "admin"} initialTab={pathname === "/evaluation/retrieval" ? "retrieval" : pathname === "/evaluation/answers" ? "answer" : "overview"} />;
   else if (pathname.startsWith("/chat")) content = <ChatPage conversationId={conversationMatch?.[1]} onOpen={navigate} />;

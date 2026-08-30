@@ -123,7 +123,11 @@ class KnowledgeBaseRepository:
         validate_knowledge_base_id(knowledge_base_id)
         return next((item for item in self.list() if item.knowledge_base_id == knowledge_base_id), None)
 
-    def create(self, name: str, description: str) -> KnowledgeBaseRecord:
+    def create(
+        self, name: str, description: str, apply_default_category_template: bool = False
+    ) -> KnowledgeBaseRecord:
+        if apply_default_category_template:
+            raise RuntimeError("category templates require PostgreSQL")
         with self._lock:
             records = self._load()
             self._ensure_unique_name(records, name)

@@ -408,6 +408,18 @@ body { color: var(--ink); background: var(--canvas); }
   padding: 20px 24px 32px;
 }
 
+.acceptance-summary { display: flex; align-items: center; gap: 12px; margin: 12px 0; padding: 10px 12px; border-left: 3px solid #dfe3ed; background: #f8f9fc; }
+.acceptance-summary.is-passed { border-color: #36ad68; }
+.acceptance-summary.is-failed { border-color: #cc3d3d; }
+.acceptance-summary.is-blocked { border-color: #d99024; }
+.acceptance-steps { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.acceptance-steps li { display: grid; grid-template-columns: 24px 1fr; gap: 8px; padding: 10px 0; border-bottom: 1px solid #e6e9f1; }
+.acceptance-steps p, .acceptance-steps small { margin: 2px 0 0; color: #7b8395; }
+.acceptance-history { margin-top: 16px; }
+.version-governance > h3 { margin: 18px 0 8px; }
+.index-version-table { overflow-x: auto; }
+.index-version-table td small { display: block; color: #7b8395; }
+
 .evaluation-tabs {
   margin-bottom: 18px;
 }
@@ -546,3 +558,17 @@ body { color: var(--ink); background: var(--canvas); }
 .table-action.is-danger {
   color: var(--danger);
 }
+.management-toolbar > button { margin-left: auto; }
+.template-apply-option { display: grid; gap: 4px; border-top: 1px solid #edf0f5; padding-top: 10px; }
+.template-apply-option label { display: flex; align-items: center; gap: 7px; color: #344054; }
+.template-apply-option input { width: auto; }
+.template-apply-option small,.template-copy-note { color: #7b8395; font-size: 11px; }
+.category-template-panel { display: grid; gap: 12px; padding: 16px 22px 20px; }
+.category-template-panel p { margin: 0; }
+.category-template-form { display: grid; grid-template-columns: 1fr 1.4fr 90px auto; gap: 8px; }
+.category-template-form input { min-width: 0; height: 36px; border: 1px solid #d9deea; border-radius: 7px; padding: 0 10px; }
+.category-template-list { border-top: 1px solid #e5e9f2; }
+.category-template-list > div { display: flex; min-height: 58px; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid #edf0f5; }
+.category-template-list span { display: grid; gap: 2px; }
+.category-template-list small { color: #7b8395; }
+.category-template-list button { min-height: 32px; border: 0; background: transparent; color: #5738dc; padding: 0 8px; }

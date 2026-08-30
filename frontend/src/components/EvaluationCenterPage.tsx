@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { EvaluationCenterOverview, GovernedBadCase, PipelineEvaluation } from "../types";
+import type { AcceptanceRun, EvaluationCenterOverview, GovernedBadCase, PipelineEvaluation } from "../types";
 import { AnswerEvaluationPage } from "./AnswerEvaluationPage";
 import { EvaluationPage } from "./EvaluationPage";
 import { TopbarPortal } from "./TopbarPortal";
 
-type EvaluationTab = "overview" | "retrieval" | "answer" | "pipeline" | "bad-cases";
+type EvaluationTab = "overview" | "retrieval" | "answer" | "pipeline" | "bad-cases" | "acceptance";
 
 const TABS: Array<{ id: EvaluationTab; label: string }> = [
   { id: "overview", label: "总览" },
@@ -13,6 +13,7 @@ const TABS: Array<{ id: EvaluationTab; label: string }> = [
   { id: "answer", label: "回答质量" },
   { id: "pipeline", label: "工程指标" },
   { id: "bad-cases", label: "Bad Case" },
+  { id: "acceptance", label: "链路验收" },
 ];
 
 export function EvaluationCenterPage({ isAdmin, initialTab = "overview" }: { isAdmin: boolean; initialTab?: EvaluationTab }) {
@@ -20,6 +21,7 @@ export function EvaluationCenterPage({ isAdmin, initialTab = "overview" }: { isA
   const [overview, setOverview] = useState<EvaluationCenterOverview | null>(null);
   const [pipeline, setPipeline] = useState<PipelineEvaluation | null>(null);
   const [badCases, setBadCases] = useState<GovernedBadCase[] | null>(null);
+  const [acceptanceRuns, setAcceptanceRuns] = useState<AcceptanceRun[] | null>(null);
   const [error, setError] = useState("");
   const [localLoading, setLocalLoading] = useState(false);
 
@@ -46,6 +48,16 @@ export function EvaluationCenterPage({ isAdmin, initialTab = "overview" }: { isA
         setBadCases(await api.listGovernedBadCases());
       } catch (reason) {
         setError(reason instanceof Error ? reason.message : "无法读取 Bad Case。");
+      } finally {
+        setLocalLoading(false);
+      }
+    }
+    if (next === "acceptance" && acceptanceRuns === null) {
+      setLocalLoading(true);
+      try {
+        setAcceptanceRuns(await api.listAcceptanceRuns("kb_default"));
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "无法读取链路验收记录。");
       } finally {
         setLocalLoading(false);
       }
@@ -77,7 +89,14 @@ export function EvaluationCenterPage({ isAdmin, initialTab = "overview" }: { isA
     {tab === "answer" ? <AnswerEvaluationPage /> : null}
     {tab === "pipeline" && pipeline ? <PipelinePanel summary={pipeline} /> : null}
     {tab === "bad-cases" && badCases ? <BadCasePanel items={badCases} isAdmin={isAdmin} onUpdate={updateCase} /> : null}
+    {tab === "acceptance" && acceptanceRuns ? <AcceptancePanel runs={acceptanceRuns} isAdmin={isAdmin} busy={localLoading} onStarted={(run) => setAcceptanceRuns((current) => [run, ...(current ?? [])])} onError={setError}/> : null}
   </section>;
+}
+
+function AcceptancePanel({ runs, isAdmin, busy, onStarted, onError }: { runs: AcceptanceRun[]; isAdmin: boolean; busy: boolean; onStarted: (run: AcceptanceRun) => void; onError: (message: string) => void }) {
+  const latest = runs[0] ?? null;
+  const start = async () => { try { onStarted(await api.startAcceptanceRun("kb_default")); } catch (reason) { onError(reason instanceof Error ? reason.message : "链路验收启动失败。"); } };
+  return <div className="evaluation-panel"><header className="compact-section-heading"><div><h2>真实链路总验收</h2><p>S3 → Sync → Parse → Index → Retrieval → ACL → Citation → Evaluation</p></div>{isAdmin ? <button type="button" className="primary-action" disabled={busy} onClick={() => void start()}>运行默认知识库验收</button> : null}</header>{latest ? <><div className={`acceptance-summary is-${latest.status}`}><strong>{latest.status === "passed" ? "通过" : latest.status === "failed" ? "失败" : "阻塞"}</strong><span>Schema V{latest.schema_version} · {latest.commit_sha.slice(0, 12)} · {new Date(latest.created_at).toLocaleString("zh-CN")}</span></div><ol className="acceptance-steps">{latest.steps.map((step) => <li key={step.step_key} className={`is-${step.status}`}><span>{step.status === "passed" ? "✓" : step.status === "failed" ? "×" : "!"}</span><div><strong>{step.title}</strong><p>{step.summary}</p>{Object.keys(step.evidence).length ? <small>{JSON.stringify(step.evidence)}</small> : null}</div></li>)}</ol><div className="table-scroll acceptance-history"><table className="governance-table"><thead><tr><th>验收记录</th><th>结论</th><th>Schema</th><th>Commit</th><th>运行时间</th></tr></thead><tbody>{runs.map((run) => <tr key={run.acceptance_run_id}><td>{run.acceptance_run_id}</td><td>{run.status === "passed" ? "通过" : run.status === "failed" ? "失败" : "阻塞"}</td><td>V{run.schema_version}</td><td>{run.commit_sha.slice(0, 12)}</td><td>{new Date(run.created_at).toLocaleString("zh-CN")}</td></tr>)}</tbody></table></div></> : <div className="evaluation-state">还没有链路验收记录。</div>}</div>;
 }
 
 function OverviewPanel({ overview }: { overview: EvaluationCenterOverview | null }) {

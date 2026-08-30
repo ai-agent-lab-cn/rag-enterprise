@@ -33,11 +33,14 @@ from .postgres_evaluation import PostgresEvaluationGovernanceRepository
 from .postgres_repositories import (
     PostgresAuthRepository,
     PostgresCategoryRepository,
+    PostgresCategoryTemplateRepository,
     PostgresDataSourceRepository,
     PostgresKnowledgeBaseRepository,
 )
 from .retrieval_access import RetrievalAccessContext
 from .schemas import (
+    AcceptanceRunCreate,
+    AcceptanceRunResponse,
     AclPolicyResponse,
     AclUpdate,
     AnswerEvaluationReportResponse,
@@ -52,6 +55,10 @@ from .schemas import (
     BatchCategoryUpdate,
     CategoryCreate,
     CategoryResponse,
+    CategoryTemplateItemCreate,
+    CategoryTemplateItemResponse,
+    CategoryTemplateItemUpdate,
+    CategoryTemplateResponse,
     CategoryUpdate,
     CitationResponse,
     ClassificationUpdate,
@@ -165,6 +172,18 @@ def get_categories() -> PostgresCategoryRepository | None:
 
 
 CategoriesDependency = Annotated[PostgresCategoryRepository | None, Depends(get_categories)]
+
+
+@lru_cache
+def get_category_templates() -> PostgresCategoryTemplateRepository | None:
+    database_url = get_settings().database_url
+    return PostgresCategoryTemplateRepository(database_url) if database_url else None
+
+
+CategoryTemplatesDependency = Annotated[
+    PostgresCategoryTemplateRepository | None,
+    Depends(get_category_templates),
+]
 
 
 @lru_cache
@@ -597,7 +616,11 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise AppError("DATA_SOURCE_CONFIGURATION_INVALID", "知识库或默认分类无效。", 400) from exc
         await _record_audit(
-            audit, "data_source.create", current.user, "data_source", data_source_id,
+            audit,
+            "data_source.create",
+            current.user,
+            "data_source",
+            data_source_id,
             metadata={"knowledge_base_id": knowledge_base_id, "source_type": payload.source_type},
         )
         return {"data_source_id": data_source_id}
@@ -743,29 +766,135 @@ def create_app() -> FastAPI:
             raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
         await _record_audit(audit, "data_source.delete", current.user, "data_source", data_source_id)
 
+    @app.get("/api/category-templates/default", response_model=CategoryTemplateResponse)
+    async def get_default_category_template(
+        templates: CategoryTemplatesDependency,
+        current: CurrentSessionDependency,
+    ) -> CategoryTemplateResponse:
+        _require_admin(current.user)
+        if templates is None:
+            raise AppError("POSTGRES_REQUIRED", "分类模板治理需要 PostgreSQL 运行时。", 503)
+        return CategoryTemplateResponse(**await run_in_threadpool(templates.get_default))
+
+    @app.post(
+        "/api/category-templates/default/items",
+        response_model=CategoryTemplateItemResponse,
+        status_code=201,
+    )
+    async def create_default_category_template_item(
+        payload: CategoryTemplateItemCreate,
+        templates: CategoryTemplatesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> CategoryTemplateItemResponse:
+        _require_admin(current.user)
+        if templates is None:
+            raise AppError("POSTGRES_REQUIRED", "分类模板治理需要 PostgreSQL 运行时。", 503)
+        try:
+            row = await run_in_threadpool(
+                templates.create_item, payload.name, payload.description, payload.sort_order
+            )
+        except PermissionError as exc:
+            raise AppError("CATEGORY_TEMPLATE_RESERVED_NAME", "“未分类”为系统保留名称。", 409) from exc
+        except ValueError as exc:
+            raise AppError("CATEGORY_TEMPLATE_NAME_CONFLICT", "模板分类名称已存在。", 409) from exc
+        await _record_audit(
+            audit, "category_template.create", current.user, "category_template_item",
+            str(row["template_item_id"]),
+        )
+        return CategoryTemplateItemResponse(**row)
+
+    @app.put(
+        "/api/category-templates/default/items/{template_item_id}",
+        response_model=CategoryTemplateItemResponse,
+    )
+    async def update_default_category_template_item(
+        template_item_id: str,
+        payload: CategoryTemplateItemUpdate,
+        templates: CategoryTemplatesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> CategoryTemplateItemResponse:
+        _require_admin(current.user)
+        if templates is None:
+            raise AppError("POSTGRES_REQUIRED", "分类模板治理需要 PostgreSQL 运行时。", 503)
+        try:
+            row = await run_in_threadpool(
+                templates.update_item, template_item_id, payload.name, payload.description,
+                payload.sort_order, payload.active,
+            )
+        except PermissionError as exc:
+            raise AppError("CATEGORY_TEMPLATE_RESERVED_NAME", "“未分类”为系统保留名称。", 409) from exc
+        except ValueError as exc:
+            raise AppError("CATEGORY_TEMPLATE_NAME_CONFLICT", "模板分类名称已存在。", 409) from exc
+        if row is None:
+            raise AppError("CATEGORY_TEMPLATE_ITEM_NOT_FOUND", "未找到该模板分类。", 404)
+        await _record_audit(
+            audit, "category_template.update", current.user, "category_template_item", template_item_id
+        )
+        return CategoryTemplateItemResponse(**row)
+
+    @app.delete("/api/category-templates/default/items/{template_item_id}", status_code=204)
+    async def delete_default_category_template_item(
+        template_item_id: str,
+        templates: CategoryTemplatesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> None:
+        _require_admin(current.user)
+        if templates is None:
+            raise AppError("POSTGRES_REQUIRED", "分类模板治理需要 PostgreSQL 运行时。", 503)
+        if not await run_in_threadpool(templates.delete_item, template_item_id):
+            raise AppError("CATEGORY_TEMPLATE_ITEM_NOT_FOUND", "未找到该模板分类。", 404)
+        await _record_audit(
+            audit, "category_template.delete", current.user, "category_template_item", template_item_id
+        )
+
     @app.post("/api/knowledge-bases", response_model=KnowledgeBaseResponse, status_code=201)
     async def create_knowledge_base(
         payload: KnowledgeBaseCreate,
         knowledge_bases: KnowledgeBasesDependency,
+        categories: CategoriesDependency,
         service: ServiceDependency,
         current: CurrentSessionDependency,
         audit: AuditRepositoryDependency,
     ) -> KnowledgeBaseResponse:
         _require_admin(current.user)
+        apply_template = (
+            categories is not None
+            if payload.apply_default_category_template is None
+            else payload.apply_default_category_template
+        )
+        if apply_template and categories is None:
+            raise AppError("POSTGRES_REQUIRED", "默认分类模板需要 PostgreSQL 运行时。", 503)
         try:
             record = await run_in_threadpool(
                 knowledge_bases.create,
                 payload.name.strip(),
                 payload.description.strip(),
+                apply_template,
             )
         except ValueError as exc:
             raise AppError("KNOWLEDGE_BASE_NAME_CONFLICT", "知识库名称已存在。", 409) from exc
+        copied_count = 0
+        if categories is not None:
+            copied_count = len(
+                [
+                    item
+                    for item in await run_in_threadpool(categories.list, record.knowledge_base_id)
+                    if not item["is_system"]
+                ]
+            )
         await _record_audit(
             audit,
             "knowledge_base.create",
             current.user,
             "knowledge_base",
             record.knowledge_base_id,
+            metadata={
+                "apply_default_category_template": apply_template,
+                "copied_category_count": copied_count,
+            },
         )
         return await _knowledge_base_response(record, service, current.user)
 
@@ -1279,9 +1408,7 @@ def create_app() -> FastAPI:
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
     ) -> CitationResponse:
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
-        )
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         if sources is None:
             raise AppError("POSTGRES_REQUIRED", "可信引用定位需要 PostgreSQL 运行时。", 503)
         row = await run_in_threadpool(
@@ -1386,9 +1513,7 @@ def create_app() -> FastAPI:
     ) -> PipelineEvaluationResponse:
         if governance is None:
             raise AppError("POSTGRES_REQUIRED", "工程指标需要 PostgreSQL 运行时。", 503)
-        summary = await run_in_threadpool(
-            governance.pipeline_summary, knowledge_base_id, data_source_id
-        )
+        summary = await run_in_threadpool(governance.pipeline_summary, knowledge_base_id, data_source_id)
         return PipelineEvaluationResponse(**summary)
 
     @app.get(
@@ -1440,6 +1565,65 @@ def create_app() -> FastAPI:
         if item is None:
             raise AppError("BAD_CASE_NOT_FOUND", "未找到该 Bad Case。", 404)
         return GovernedBadCaseResponse(**item)
+
+    @app.get(
+        "/api/evaluation-center/acceptance-runs",
+        response_model=list[AcceptanceRunResponse],
+    )
+    async def list_acceptance_runs(
+        governance: EvaluationGovernanceDependency,
+        current: CurrentSessionDependency,
+        knowledge_bases: KnowledgeBasesDependency,
+        auth: AuthRepositoryDependency,
+        knowledge_base_id: str = Query(),
+        limit: PageLimit = 50,
+    ) -> list[AcceptanceRunResponse]:
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if governance is None:
+            raise AppError("POSTGRES_REQUIRED", "链路验收需要 PostgreSQL 运行时。", 503)
+        items = await run_in_threadpool(governance.list_acceptance_runs, knowledge_base_id, limit)
+        return [AcceptanceRunResponse(**item) for item in items]
+
+    @app.post(
+        "/api/evaluation-center/acceptance-runs",
+        response_model=AcceptanceRunResponse,
+        status_code=201,
+    )
+    async def start_acceptance_run(
+        payload: AcceptanceRunCreate,
+        governance: EvaluationGovernanceDependency,
+        reports: EvaluationReportsDependency,
+        current: CurrentSessionDependency,
+        knowledge_bases: KnowledgeBasesDependency,
+        auth: AuthRepositoryDependency,
+    ) -> AcceptanceRunResponse:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(
+            knowledge_bases,
+            auth,
+            current.user,
+            payload.knowledge_base_id,
+        )
+        if governance is None:
+            raise AppError("POSTGRES_REQUIRED", "链路验收需要 PostgreSQL 运行时。", 503)
+        overview = await run_in_threadpool(reports.center_overview)
+        retrieval_passed = bool(overview.retrieval_report and overview.retrieval_report.passed)
+        answer_passed = bool(overview.answer_report and overview.answer_report.passed)
+        retrieval_detail = (
+            await run_in_threadpool(reports.get_official, overview.retrieval_report.report_id)
+            if overview.retrieval_report
+            else None
+        )
+        acl_leak_count = int(retrieval_detail.acl_leak_count or 0) if retrieval_detail else 0
+        item = await run_in_threadpool(
+            governance.run_acceptance,
+            payload.knowledge_base_id,
+            current.user.user_id,
+            retrieval_passed,
+            answer_passed,
+            acl_leak_count,
+        )
+        return AcceptanceRunResponse(**item)
 
     @app.get("/api/evaluations", response_model=list[EvaluationReportSummary])
     async def list_evaluations(
@@ -1827,7 +2011,8 @@ def _data_source_response(row: dict[str, object], user: UserRecord) -> DataSourc
     normalized = {
         **row,
         "configuration": {
-            key: value for key, value in configuration.items()
+            key: value
+            for key, value in configuration.items()
             if key not in {"default_category_id", "metadata_defaults"}
         },
         "default_category_id": configuration.get("default_category_id"),
@@ -2016,9 +2201,7 @@ async def _execute_recorded_query(
         prompt_hash=result.prompt_hash,
         answer_status=result.answer_status,
         generation_governance=(
-            result.generation_governance.model_dump(mode="json")
-            if result.generation_governance
-            else None
+            result.generation_governance.model_dump(mode="json") if result.generation_governance else None
         ),
         query_metadata=(result.query_metadata.model_dump(mode="json") if result.query_metadata else None),
         bad_case_category=(f"answer_{result.answer_status}" if record_status == "failed" else None),

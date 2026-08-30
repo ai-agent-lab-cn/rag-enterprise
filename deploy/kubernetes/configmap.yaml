@@ -8,7 +8,7 @@ metadata:
 data:
   APP_ENVIRONMENT: test
   FRONTEND_ORIGIN: http://127.0.0.1:30080
-  REQUIRED_DATABASE_SCHEMA_VERSION: "13"
+  REQUIRED_DATABASE_SCHEMA_VERSION: "15"
   EMBEDDING_MODEL: shibing624/text2vec-base-chinese
   RERANKER_MODEL: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
   GENERATION_MODEL: gemini-3.6-flash
