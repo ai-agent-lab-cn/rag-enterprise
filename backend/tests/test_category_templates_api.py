@@ -34,8 +34,6 @@ class CategoryTemplateStub:
         }
 
     def create_item(self, name, description, sort_order):
-        if name == "未分类":
-            raise PermissionError("reserved")
         item = self._item("cti_created", name, sort_order)
         item["description"] = description
         self.items.append(item)
@@ -75,16 +73,28 @@ def test_admin_can_govern_default_category_template(client) -> None:
     assert deleted.status_code == 204
 
 
-def test_template_api_has_stable_reserved_and_not_found_errors(client) -> None:
+def test_template_accepts_uncategorized_as_an_ordinary_name(client) -> None:
+    """「未分类」不再是保留名。
+
+    它曾被保留，是因为系统用一个叫「未分类」的伪分类表示「没有分类」。取消伪分类之后
+    这个词没有任何特殊含义，管理员想拿它当业务分类名就能用。
+    """
+
     client.app.dependency_overrides[get_category_templates] = lambda: CategoryTemplateStub()
 
-    reserved = client.post(
+    created = client.post(
         "/api/category-templates/default/items",
         json={"name": "未分类", "description": "", "sort_order": 100},
     )
+
+    assert created.status_code == 201
+    assert created.json()["name"] == "未分类"
+
+
+def test_template_api_has_stable_not_found_error(client) -> None:
+    client.app.dependency_overrides[get_category_templates] = lambda: CategoryTemplateStub()
+
     missing = client.delete("/api/category-templates/default/items/cti_missing")
 
-    assert reserved.status_code == 409
-    assert reserved.json()["error"]["code"] == "CATEGORY_TEMPLATE_RESERVED_NAME"
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "CATEGORY_TEMPLATE_ITEM_NOT_FOUND"

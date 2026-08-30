@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { AnswerEvaluationMetric, AnswerEvaluationReport, AnswerEvaluationSummary } from "../types";
-import { TopbarPortal } from "./TopbarPortal";
+import { Select } from "./ui/Select";
 
 const LABELS: Record<string, string> = {
   answer_correctness: "回答正确性",
@@ -83,7 +83,8 @@ export function AnswerEvaluationPage() {
   }, [selected]);
   return (
     <section className="evaluation-page answer-evaluation-page" aria-label="回答评测">
-      <TopbarPortal>{report ? <span className={report.passed ? "release-badge" : "release-badge is-failed"}>{report.passed ? "回答质量门已通过" : "回答质量门未通过"}</span> : null}</TopbarPortal>
+      {/* 曾经是页面级徽章放顶栏；改成 Section 后，顶栏只留统一质量门，分项结论回到各自小节。 */}
+      {report ? <span className={report.passed ? "release-badge" : "release-badge is-failed"}>{report.passed ? "回答质量门已通过" : "回答质量门未通过"}</span> : null}
       {error ? (
         <div className="error-banner" role="alert">
           {error}
@@ -92,14 +93,16 @@ export function AnswerEvaluationPage() {
       {reports === null && !error ? <div className="evaluation-state pulse">正在读取正式回答评测…</div> : null}
       {reports?.length === 0 ? (
         <div className="evaluation-state">
-          <h2>还没有正式回答评测报告</h2>
+          <h3>还没有正式回答评测报告</h3>
           <p>页面只读取人工复核后放行的正式报告。</p>
         </div>
       ) : null}
       {reports?.length ? (
         <label className="report-picker">
           评测运行
-          <select
+          <Select
+            size="sm"
+            className="w-90"
             value={selected}
             onChange={(event) => {
               setReport(null);
@@ -111,7 +114,7 @@ export function AnswerEvaluationPage() {
                 {new Date(item.run_at).toLocaleString("zh-CN")} · {item.dataset_version}
               </option>
             ))}
-          </select>
+          </Select>
         </label>
       ) : null}
       {report ? (
@@ -141,7 +144,7 @@ export function AnswerEvaluationPage() {
               <section className="metric-group" key={group.title}>
                 <header>
                   <div>
-                    <h2>{group.title}</h2>
+                    <h3>{group.title}</h3>
                     <p>{group.description}</p>
                   </div>
                   <span>{group.metrics.length} 项指标</span>

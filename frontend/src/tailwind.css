@@ -1,0 +1,71 @@
+/* 字体必须留在最前：CSS 规范要求 @import url() 先于其它规则，而 styles.css 被包进
+   layer 之后，它内部的 @import 会失效。 */
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
+
+/* Layer 顺序决定谁能覆盖谁：后声明的优先级更高。
+   把 3137 条旧声明关进 legacy 层，是为了让新写的 utility 类能盖住它们——不在任何
+   layer 里的样式优先级高于所有 layer，不这么做的话迁移期新旧同时存在时旧的永远赢。 */
+@layer legacy, theme, base, components, utilities;
+
+@import "./styles.css" layer(legacy);
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+/* preflight（Tailwind 的 CSS reset）**暂不引入**。
+       @import "tailwindcss/preflight.css" layer(base);
+   这不是谨慎起见，是实测结论：2026-08-30 临时打开跑了一遍视觉基线，**17 张图全红**，
+   多个页面高度剧变——评测中心 2745px → 1491px（几乎腰斩）、概览 1000px → 826px。
+   形态是卡片边框与内边距塌陷、标题字号变小、整体散架。
+
+   原因是 legacy 层剩下的 2720 条声明大量建立在浏览器默认样式之上：h1/h2/p/dl 的
+   margin 与字号、table 的 border-spacing、ul 的 list-style。preflight 把这些清零，
+   而 legacy 里没有对应的显式声明去接住。
+
+   所以它的前置条件不是「控件迁完」，而是「**布局**迁完」：.chat-layout、.member-row、
+   .management-table、.evidence-panel 这些页面骨架都得改写成 utility 类。控件治理
+   （Button/Select/Input/Dialog）不解锁这一步。 */
+
+/* Token 定义见 docs/design/ui-foundation-tokens.md。取值全部来自现有最高频值，
+   目的是收敛而不是重新设计——迁移后的视觉位移应当很小。 */
+@theme {
+  /* 主色：取 --brand，它是 .primary-action 实际生效的值 */
+  --color-brand: #5744dd;
+  --color-brand-hover: #4532c7;
+  --color-brand-subtle: #f0edff;
+
+  /* 中性 */
+  --color-ink: #171d31;
+  --color-ink-muted: #4f5873;
+  --color-ink-faint: #8690aa;
+  --color-line: #e5e9f2;
+  --color-line-firm: #d8deeb;
+  --color-divider: #edf0f5;
+  --color-surface: #ffffff;
+  --color-canvas: #fafbfe;
+
+  /* 语义色：只用于表意，不做装饰 */
+  --color-danger: #d94848;
+  --color-danger-text: #c2354a;
+  --color-danger-subtle: #fff0f0;
+  --color-success: #197d4a;
+  --color-success-subtle: #eefaf3;
+  --color-warning: #ef8500;
+
+  /* 圆角：15 种收敛为 4 档 */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* 字阶：26 种收敛为 6 档 */
+  --text-xs: 10px;
+  --text-sm: 11px;
+  --text-base: 12px;
+  --text-md: 13px;
+  --text-lg: 15px;
+  --text-xl: 20px;
+
+  /* 阴影：只用于浮层 */
+  --shadow-pop: 0 4px 12px rgb(29 41 81 / 0.08);
+  --shadow-modal: 0 16px 40px rgb(29 41 81 / 0.10);
+  --shadow-focus: 0 0 0 3px rgb(87 68 221 / 0.18);
+}

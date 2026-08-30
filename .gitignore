@@ -18,6 +18,7 @@ data/conversations/
 data/auth/
 data/audit/
 frontend/node_modules/
+frontend/.vite/
 frontend/dist/
 frontend/*.tsbuildinfo
 frontend/vite.config.js

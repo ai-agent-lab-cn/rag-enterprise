@@ -1,6 +1,6 @@
-import { Database, LayoutDashboard, MessageSquareText, Plug, SearchCheck, Settings, ShieldCheck, Users, type LucideIcon } from "lucide-react";
+import { Bug, ClipboardCheck, Database, LayoutDashboard, MessageSquareText, Plug, SearchCheck, Settings, ShieldCheck, Users, type LucideIcon } from "lucide-react";
 
-export type AppPage = "overview" | "knowledge-bases" | "data-sources" | "chat" | "evaluation-center" | "system" | "members" | "audit";
+export type AppPage = "overview" | "knowledge-bases" | "data-sources" | "chat" | "evaluation-center" | "bad-cases" | "acceptance" | "system" | "members" | "audit";
 
 interface AppNavigationProps { page: AppPage; onNavigate: (path: string) => void; isAdmin: boolean; }
 const ITEMS: Array<{ page: AppPage; path: string; label: string; icon: LucideIcon; group?: string }> = [
@@ -9,6 +9,8 @@ const ITEMS: Array<{ page: AppPage; path: string; label: string; icon: LucideIco
   { page: "knowledge-bases", path: "/knowledge-bases", label: "知识库管理", icon: Database, group: "知识库管理" },
   { page: "data-sources", path: "/data-sources", label: "数据源管理", icon: Plug },
   { page: "evaluation-center", path: "/evaluation", label: "评测中心", icon: SearchCheck, group: "测评评估" },
+  { page: "bad-cases", path: "/evaluation/bad-cases", label: "Bad Case", icon: Bug },
+  { page: "acceptance", path: "/evaluation/acceptance", label: "链路验收", icon: ClipboardCheck },
 ];
 const ADMIN_ITEMS: typeof ITEMS = [
   { page: "system", path: "/system", label: "系统状态", icon: Settings, group: "管理配置" },

@@ -52,17 +52,8 @@ class PostgresKnowledgeBaseRepository:
                           now(), now()
                    WHERE NOT EXISTS (SELECT 1 FROM knowledge_bases)"""
             )
-            connection.execute(
-                """INSERT INTO document_categories
-                   (category_id, knowledge_base_id, name, normalized_name, description,
-                    sort_order, active, is_system)
-                   SELECT 'cat_' || substr(md5(knowledge_base_id || ':未分类'), 1, 16),
-                          knowledge_base_id, '未分类', '未分类', '尚未完成分类的资料',
-                          0, true, true
-                   FROM knowledge_bases WHERE knowledge_base_id=%s
-                   ON CONFLICT (knowledge_base_id, normalized_name) DO NOTHING""",
-                (DEFAULT_KNOWLEDGE_BASE_ID,),
-            )
+            # 不再自动创建系统「未分类」：资料可以没有分类，那是 category_id IS NULL，
+            # 不是「属于某个叫未分类的分类」。伪分类会让检索、统计和分类治理都失真。
 
     def list(self) -> list[KnowledgeBaseRecord]:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
@@ -96,13 +87,7 @@ class PostgresKnowledgeBaseRepository:
                        VALUES (%s, %s, %s, %s, false, %s, %s) RETURNING *""",
                         (knowledge_base_id, name, name.casefold(), description, now, now),
                     ).fetchone()
-                    connection.execute(
-                        """INSERT INTO document_categories
-                           (category_id, knowledge_base_id, name, normalized_name, description,
-                            sort_order, active, is_system)
-                           VALUES (%s, %s, '未分类', '未分类', '尚未完成分类的资料', 0, true, true)""",
-                        (f"cat_{uuid4().hex[:16]}", knowledge_base_id),
-                    )
+                    # 新知识库不预置任何分类。关闭模板时分类列表为空是合法状态。
                     if apply_default_category_template:
                         items = connection.execute(
                             """SELECT i.name, i.normalized_name, i.description, i.sort_order
@@ -511,6 +496,18 @@ class PostgresDataSourceRepository:
         return result.rowcount > 0
 
 
+def _clean_category_name(name: str) -> str:
+    """分类名去空格后必须非空。
+
+    空名字过去能落库是因为「未分类」兜底：反正显示的时候会被替换掉。取消伪分类之后
+    空名字会直接出现在分类下拉里，成为一个点不动、说不清的选项。
+    """
+
+    if not (cleaned := name.strip()):
+        raise ValueError("category name is empty")
+    return cleaned
+
+
 class PostgresCategoryRepository:
     def __init__(self, database_url: str):
         self.database_url = database_url
@@ -525,7 +522,7 @@ class PostgresCategoryRepository:
                     AND d.metadata->>'category_id' = c.category_id
                    WHERE c.knowledge_base_id = %s
                    GROUP BY c.category_id
-                   ORDER BY c.is_system DESC, c.sort_order, c.normalized_name""",
+                   ORDER BY c.sort_order, c.normalized_name""",
                 (knowledge_base_id,),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -534,6 +531,7 @@ class PostgresCategoryRepository:
         self, knowledge_base_id: str, name: str, description: str, sort_order: int
     ) -> dict[str, object]:
         validate_knowledge_base_id(knowledge_base_id)
+        cleaned = _clean_category_name(name)
         try:
             with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
                 row = connection.execute(
@@ -544,8 +542,8 @@ class PostgresCategoryRepository:
                     (
                         f"cat_{uuid4().hex[:16]}",
                         knowledge_base_id,
-                        name,
-                        name.casefold(),
+                        cleaned,
+                        cleaned.casefold(),
                         description,
                         sort_order,
                     ),
@@ -575,10 +573,6 @@ class PostgresCategoryRepository:
                     ).fetchone()
                     if current is None:
                         return None
-                    if current["is_system"] and name != current["name"]:
-                        raise PermissionError("system category cannot be renamed")
-                    if current["is_system"] and not active:
-                        raise PermissionError("system category cannot be disabled")
                     row = connection.execute(
                         """UPDATE document_categories SET name=%s, normalized_name=%s,
                                   description=%s, sort_order=%s, active=%s, updated_at=now()
@@ -605,36 +599,76 @@ class PostgresCategoryRepository:
                                WHERE knowledge_base_id=%s AND metadata->>'category_id'=%s""",
                             (patch, knowledge_base_id, category_id),
                         )
+                    # 这个连接是 dict_row，取值必须按列名——[0] 会当成字典键去查。
                     count = connection.execute(
-                        """SELECT count(*) FROM documents WHERE knowledge_base_id=%s
+                        """SELECT count(*) AS total FROM documents WHERE knowledge_base_id=%s
                            AND metadata->>'category_id'=%s""",
                         (knowledge_base_id, category_id),
-                    ).fetchone()[0]
+                    ).fetchone()["total"]
         except errors.UniqueViolation as exc:
             raise ValueError("category name already exists") from exc
         return {**dict(row), "document_count": int(count)}
 
     def delete(self, knowledge_base_id: str, category_id: str) -> bool:
+        """删除分类，被它引用的资料退回「没有分类」。
+
+        **没有删不掉的分类。** 此前有资料引用就硬拦截（CATEGORY_IN_USE「请先批量迁移
+        资料」），那是伪分类时代的遗留：当时资料必须属于某个分类，删了分类它就无处可去。
+        V16 之后「没有分类」是一等状态，这条限制只剩下逼人先做一轮无意义的批量归类。
+
+        删分类不删资料：正文、分块、Embedding 全部保留，资料照常可检索，只是没有分类。
+        """
+
         validate_knowledge_base_id(knowledge_base_id)
-        with psycopg.connect(self.database_url) as connection, connection.transaction():
-            row = connection.execute(
-                """SELECT is_system FROM document_categories
-                   WHERE knowledge_base_id=%s AND category_id=%s FOR UPDATE""",
-                (knowledge_base_id, category_id),
-            ).fetchone()
-            if row is None:
-                return False
-            if row[0]:
-                raise PermissionError("system category cannot be deleted")
-            count = connection.execute(
-                """SELECT count(*) FROM documents WHERE knowledge_base_id=%s
-                   AND metadata->>'category_id'=%s""",
-                (knowledge_base_id, category_id),
-            ).fetchone()[0]
-            if count:
-                raise ValueError(str(count))
-            connection.execute("DELETE FROM document_categories WHERE category_id=%s", (category_id,))
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            with connection.transaction():
+                row = connection.execute(
+                    """SELECT category_id FROM document_categories
+                       WHERE knowledge_base_id=%s AND category_id=%s FOR UPDATE""",
+                    (knowledge_base_id, category_id),
+                ).fetchone()
+                if row is None:
+                    return False
+                affected = [
+                    str(item["document_id"])
+                    for item in connection.execute(
+                        """SELECT document_id FROM documents
+                           WHERE knowledge_base_id=%s AND metadata->>'category_id'=%s""",
+                        (knowledge_base_id, category_id),
+                    ).fetchall()
+                ]
+                if affected:
+                    # 与 clear() 同一套写入：Document 与当前版本 Chunk 必须同事务更新，
+                    # 否则检索过滤还会按这个已经不存在的分类走。
+                    self._apply_classification(
+                        connection,
+                        knowledge_base_id,
+                        affected,
+                        {
+                            "category_id": None,
+                            "category": None,
+                            "classification_status": "pending",
+                            "classification_confidence": None,
+                            "suggested_category_id": None,
+                            "classification_model": None,
+                            "classified_at": None,
+                            **self._CLEARED_FAILURE,
+                        },
+                    )
+                connection.execute(
+                    "DELETE FROM document_categories WHERE category_id=%s", (category_id,)
+                )
         return True
+
+    # 任何治理动作都要把失败信息一并清掉。留着的话页面会同时显示「已人工归类」和
+    # 「分类失败：模型超时」，看的人无从判断哪个是当前状态。
+    _CLEARED_FAILURE = {
+        "classification_failure_code": None,
+        "classification_failure_reason": None,
+        "classification_failed_at": None,
+        "classification_retry_count": 0,
+        "classification_next_retry_at": None,
+    }
 
     def assign(self, knowledge_base_id: str, document_ids: list[str], category_id: str) -> int | None:
         validate_knowledge_base_id(knowledge_base_id)
@@ -647,32 +681,132 @@ class PostgresCategoryRepository:
                 ).fetchone()
                 if category is None:
                     return None
-                patch = {
-                    "category_id": category_id,
-                    "category": str(category["name"]),
-                    "classification_status": "manual",
-                    "classification_confidence": None,
-                    "suggested_category_id": None,
-                    "classification_model": None,
-                    "classified_at": datetime.now(UTC).isoformat(),
-                }
-                updated = connection.execute(
-                    """UPDATE documents SET metadata=metadata || %s, updated_at=now()
-                       WHERE knowledge_base_id=%s AND document_id=ANY(%s)""",
-                    (Jsonb(patch), knowledge_base_id, document_ids),
-                ).rowcount
-                # 与 ACL 扩散同一条规则：覆盖所有非 retired 索引版本，回滚或切换后分类
-                # 元数据不会退回旧值；retired 与 failed 只等清理，写入无意义。
-                connection.execute(
-                    """UPDATE chunks c SET metadata=c.metadata || %s
-                       FROM documents d, index_versions iv
-                       WHERE d.knowledge_base_id=%s
-                        AND d.document_id=ANY(%s) AND c.knowledge_base_id=d.knowledge_base_id
-                        AND c.document_version_id=d.current_version_id
-                        AND iv.index_version_id=c.index_version_id
-                        AND iv.status IN ('active', 'previous', 'building')""",
-                    (Jsonb(patch), knowledge_base_id, document_ids),
+                return self._apply_classification(
+                    connection,
+                    knowledge_base_id,
+                    document_ids,
+                    {
+                        "category_id": category_id,
+                        "category": str(category["name"]),
+                        "classification_status": "manual",
+                        "classification_confidence": None,
+                        "suggested_category_id": None,
+                        "classification_model": None,
+                        "classified_at": datetime.now(UTC).isoformat(),
+                        **self._CLEARED_FAILURE,
+                    },
                 )
+
+    def clear(self, knowledge_base_id: str, document_ids: list[str]) -> int:
+        """把资料退回「没有分类」。
+
+        这不是归到一个叫「未分类」的分类里——那正是本次要消灭的东西。分类字段变成
+        null，状态回到 pending，表示它等待重新分类。
+        """
+
+        validate_knowledge_base_id(knowledge_base_id)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            with connection.transaction():
+                return self._apply_classification(
+                    connection,
+                    knowledge_base_id,
+                    document_ids,
+                    {
+                        "category_id": None,
+                        "category": None,
+                        "classification_status": "pending",
+                        "classification_confidence": None,
+                        "suggested_category_id": None,
+                        "classification_model": None,
+                        "classified_at": None,
+                        **self._CLEARED_FAILURE,
+                    },
+                )
+
+    def reclassify(self, knowledge_base_id: str, document_ids: list[str], max_attempts: int = 3) -> int:
+        """请求重新自动分类：回到 pending、清空失败信息，并入队一个分类任务。
+
+        入队这一步不能省。只把状态改回 pending 的话，没有任何东西会去分类它——分类
+        原本只在索引流程里跑一次——用户点了「重新分类」却什么也不会发生，资料永远停在
+        pending。任务走 index_jobs，退避、最大次数与租约恢复因此全部复用既有机制。
+
+        任务只跑分类，不碰正文、分块与 Embedding：分类失败是分类的问题，资料主体已经
+        处理好了，没有理由再付一次索引的代价。
+        """
+
+        validate_knowledge_base_id(knowledge_base_id)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            with connection.transaction():
+                updated = self._apply_classification(
+                    connection,
+                    knowledge_base_id,
+                    document_ids,
+                    {
+                        "category_id": None,
+                        "category": None,
+                        "classification_status": "pending",
+                        "classification_confidence": None,
+                        "suggested_category_id": None,
+                        "classification_model": None,
+                        "classified_at": None,
+                        **self._CLEARED_FAILURE,
+                    },
+                )
+                targets = connection.execute(
+                    """SELECT d.document_id, d.data_source_id, d.current_version_id
+                       FROM documents d
+                       WHERE d.knowledge_base_id = %s AND d.document_id = ANY(%s)
+                         AND d.current_version_id IS NOT NULL""",
+                    (knowledge_base_id, document_ids),
+                ).fetchall()
+                for target in targets:
+                    connection.execute(
+                        """INSERT INTO index_jobs
+                           (index_job_id, knowledge_base_id, data_source_id,
+                            document_version_id, idempotency_key, status, max_attempts, job_type)
+                           VALUES (%s, %s, %s, %s, %s, 'queued', %s, 'classify')
+                           ON CONFLICT DO NOTHING""",
+                        (
+                            f"job_{uuid4().hex[:20]}",
+                            knowledge_base_id,
+                            target["data_source_id"],
+                            target["current_version_id"],
+                            f"classify:{target['current_version_id']}:{uuid4().hex[:8]}",
+                            max_attempts,
+                        ),
+                    )
+        return updated
+
+    @staticmethod
+    def _apply_classification(
+        connection: psycopg.Connection, knowledge_base_id: str,
+        document_ids: list[str], patch: dict[str, object],
+    ) -> int:
+        """在同一事务里更新 Document 与当前活动版本的 Chunk。
+
+        分开写会漂移：文档列表显示已归类、检索过滤却按旧分类走，而这种不一致在页面上
+        完全看不出来。
+        """
+
+        payload = Jsonb(patch)
+        updated = connection.execute(
+            """UPDATE documents SET metadata=metadata || %s, updated_at=now()
+               WHERE knowledge_base_id=%s AND document_id=ANY(%s)""",
+            (payload, knowledge_base_id, document_ids),
+        ).rowcount
+        # 与 ACL 扩散同一条规则：覆盖所有非 retired 索引版本，回滚或切换后分类
+        # 元数据不会退回旧值；retired 与 failed 只等清理，写入无意义。
+        # 只写 current_version_id 对应的分块，历史版本保留当时的快照。
+        connection.execute(
+            """UPDATE chunks c SET metadata=c.metadata || %s
+               FROM documents d, index_versions iv
+               WHERE d.knowledge_base_id=%s
+                AND d.document_id=ANY(%s) AND c.knowledge_base_id=d.knowledge_base_id
+                AND c.document_version_id=d.current_version_id
+                AND iv.index_version_id=c.index_version_id
+                AND iv.status IN ('active', 'previous', 'building')""",
+            (payload, knowledge_base_id, document_ids),
+        )
         return updated
 
 
@@ -687,10 +821,9 @@ class PostgresCategoryTemplateRepository:
         cleaned = name.strip()
         if not cleaned:
             raise ValueError("category template item name is empty")
-        normalized = cleaned.casefold()
-        if normalized == "未分类":
-            raise PermissionError("reserved category name")
-        return cleaned, normalized
+        # 「未分类」不再是保留名。没有分类是 category_id IS NULL，与分类名无关，
+        # 所以这个词可以像任何普通名字一样被使用。
+        return cleaned, cleaned.casefold()
 
     def get_default(self) -> dict[str, object]:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
@@ -876,9 +1009,12 @@ class PostgresAuthRepository:
                 next_role = role or str(row["role"])
                 next_active = bool(row["active"]) if active is None else active
                 if row["role"] == "admin" and row["active"] and (next_role != "admin" or not next_active):
+                    # 这个连接是 dict_row，取值必须按列名——[0] 会当成字典键去查，抛
+                    # KeyError(0)。它落在保护分支里，于是改任何管理员的角色或启用状态
+                    # 都会 500，而 API 层只翻译 PermissionError，别的异常一律漏成 500。
                     count = connection.execute(
-                        "SELECT count(*) FROM users WHERE role = 'admin' AND active"
-                    ).fetchone()[0]
+                        "SELECT count(*) AS total FROM users WHERE role = 'admin' AND active"
+                    ).fetchone()["total"]
                     if count == 1:
                         raise PermissionError("last active admin cannot be disabled")
                 updated = connection.execute(

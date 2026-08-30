@@ -4,7 +4,8 @@ export interface DocumentInfo {
   filename: string;
   chunk_count: number;
   status: string;
-  category: string;
+  /** null 表示没有分类。它与 classification_status 是两回事：没有分类不等于分类失败。 */
+  category: string | null;
   category_id: string | null;
   tags: string[];
   source_type: string;
@@ -25,7 +26,22 @@ export interface DocumentInfo {
   suggested_category_id: string | null;
   classification_model: string | null;
   classified_at: string | null;
+  classification_failure_code: ClassificationFailureCode | null;
+  classification_failure_reason: string | null;
+  classification_failed_at: string | null;
+  classification_retry_count: number;
+  classification_next_retry_at: string | null;
 }
+
+/** 前三个可自动重试，后四个是配置或响应本身有问题，必须由人介入。 */
+export type ClassificationFailureCode =
+  | "MODEL_UNAVAILABLE"
+  | "MODEL_TIMEOUT"
+  | "UNKNOWN_ERROR"
+  | "INVALID_RESPONSE"
+  | "CATEGORY_NOT_FOUND"
+  | "CATEGORY_INACTIVE"
+  | "NO_ACTIVE_CATEGORY";
 
 export interface DocumentCategory {
   category_id: string;
@@ -164,6 +180,7 @@ export interface QueryResult {
     fused_candidate_count: number;
     returned_source_count: number;
     filter_match_count: number | null;
+    uncategorized_candidate_count?: number;
     applied_filters?: {
       category_ids: string[]; categories: string[]; tags: string[]; source_types: string[];
       created_from: string | null; created_to: string | null;
@@ -339,6 +356,7 @@ export interface AnswerRecord {
     fused_candidate_count: number;
     returned_source_count: number;
     filter_match_count: number | null;
+    uncategorized_candidate_count?: number;
     applied_filters?: {
       category_ids: string[]; categories: string[]; tags: string[]; source_types: string[];
       created_from: string | null; created_to: string | null;

@@ -25,6 +25,16 @@ from .store import RetrievedChunk
 # 完整 RAG 编排：入库、召回、精排、Prompt、生成
 
 
+def count_uncategorized(candidates: list[RetrievedChunk]) -> int:
+    """召回结果里没有分类的条数。
+
+    它进 query_metadata 供人解释「为什么引用了一份没有分类的资料」：无分类资料本就
+    应该出现在不带分类过滤的检索里，但看到它的人需要知道这是设计如此，而不是过滤失效。
+    """
+
+    return sum(1 for item in candidates if item.metadata.get("category_id") is None)
+
+
 def _filter_candidates(
     candidates: list[RetrievedChunk], filters: QueryMetadataFilter | None,
     access: RetrievalAccessContext | None = None,
@@ -157,6 +167,18 @@ class RAGService:
 
         return []
 
+    def _resolve_category_names(
+        self, knowledge_base_id: str, filters: QueryMetadataFilter | None
+    ) -> QueryMetadataFilter | None:
+        """把按名称的分类过滤换成按分类 ID。
+
+        基类没有分类字典，原样返回；pgvector 运行时覆盖为真实查询。名称匹配看起来
+        等价，实则不是：分类改名后资料 metadata 里还留着旧名字，于是新名字查不到、
+        旧名字反而查得到，而分类 ID 从不改变。
+        """
+
+        return filters
+
     def retrieve_candidates(
         self,
         question: str,
@@ -174,6 +196,7 @@ class RAGService:
         ``retrieval_score`` 会留在 0，被后续 ``rank_candidates`` 的归一化压到最低。
         """
 
+        filters = self._resolve_category_names(knowledge_base_id, filters)
         mode = retrieval_mode or self.settings.retrieval_mode
         if mode == "vector" or self.lexical is None:
             return _filter_candidates(self.store.query(
@@ -296,6 +319,7 @@ class RAGService:
                 "fused_candidate_count": 0,
                 "returned_source_count": 0,
                 "filter_match_count": 0 if filters else None,
+                "uncategorized_candidate_count": 0,
             }
             documents = self.store.list_documents(knowledge_base_id)
             indexed_documents = [
@@ -382,6 +406,7 @@ class RAGService:
                 "fused_candidate_count": len(candidates),
                 "returned_source_count": len(ranked),
                 "filter_match_count": len(candidates) if filters else None,
+                "uncategorized_candidate_count": count_uncategorized(candidates),
             },
             generation_governance={
                 "minimum_evidence_count": 1,

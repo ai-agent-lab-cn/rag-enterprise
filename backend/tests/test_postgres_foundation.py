@@ -17,6 +17,7 @@ from backend.app.database import apply_migrations, check_schema_version, migrati
 from backend.app.postgres_documents import IndexWorker, PostgresAsyncRAGService
 from backend.app.postgres_repositories import (
     PostgresAuthRepository,
+    PostgresCategoryRepository,
     PostgresCategoryTemplateRepository,
     PostgresDataSourceRepository,
     PostgresKnowledgeBaseRepository,
@@ -53,7 +54,240 @@ def test_migration_files_are_contiguous() -> None:
         "0013_evaluation_governance.sql",
         "0014_acceptance_runs.sql",
         "0015_default_category_template.sql",
+        "0016_nullable_document_category.sql",
+        "0017_classification_jobs.sql",
     ]
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_schema_sixteen_allows_null_category_and_records_failures() -> None:
+    """「没有分类」与「分类处理状态」必须能分开表达。
+
+    V15 之前两者被挤在同一个字段里：分类为空就写系统「未分类」，于是「模型超时了」
+    和「管理员就是没给它分类」在库里长得一模一样，谁也没法按状态治理。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    assert apply_migrations(database_url) == 17
+
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO knowledge_bases
+               (knowledge_base_id, name, name_normalized, description, is_default,
+                created_at, updated_at)
+               VALUES ('kb_null', '无分类库', '无分类库', '', false, now(), now())"""
+        )
+        connection.execute(
+            """INSERT INTO data_sources
+               (data_source_id, knowledge_base_id, source_type, name, configuration,
+                created_at, updated_at)
+               VALUES ('ds_manual', 'kb_null', 'file', '手工', '{}'::jsonb, now(), now())"""
+        )
+        # 分类为空必须能直接落库，不需要借一个伪分类占位。
+        connection.execute(
+            """INSERT INTO documents
+               (knowledge_base_id, document_id, data_source_id, filename,
+                metadata, created_at, updated_at)
+               VALUES ('kb_null', 'doc_nullcat', 'ds_manual', 'a.md',
+                       %s::jsonb, now(), now())""",
+            (
+                json.dumps(
+                    {
+                        "category": None,
+                        "category_id": None,
+                        "classification_status": "failed",
+                        "classification_failure_code": "MODEL_TIMEOUT",
+                        "classification_failure_reason": "模型 30 秒未响应",
+                        "classification_retry_count": 2,
+                    }
+                ),
+            ),
+        )
+        # 不给 metadata 时走列默认值，它同样不得造出伪分类。
+        connection.execute(
+            """INSERT INTO documents
+               (knowledge_base_id, document_id, data_source_id, filename,
+                created_at, updated_at)
+               VALUES ('kb_null', 'doc_default', 'ds_manual', 'b.md', now(), now())"""
+        )
+
+    with psycopg.connect(database_url) as connection:
+        row = connection.execute(
+            "SELECT metadata FROM documents WHERE document_id = 'doc_nullcat'"
+        ).fetchone()[0]
+        fallback = connection.execute(
+            "SELECT metadata FROM documents WHERE document_id = 'doc_default'"
+        ).fetchone()[0]
+    assert row["category"] is None and row["category_id"] is None
+    assert row["classification_failure_code"] == "MODEL_TIMEOUT"
+    assert fallback["category"] is None, "列默认值不得再写死「未分类」"
+    assert fallback["classification_status"] == "pending"
+    assert fallback["classification_retry_count"] == 0
+
+    # 模板不再把「未分类」当保留名：它恢复成一个普通分类名，管理员想用就能用。
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO category_template_items
+               (template_item_id, template_id, name, normalized_name, sort_order,
+                created_at, updated_at)
+               VALUES ('cti_plain_uncategorized', 'category_template_default',
+                       '未分类', '未分类', 900, now(), now())"""
+        )
+
+
+def _migrations_up_to_fifteen(tmp_path: Path) -> Path:
+    """造一个只含 0001–0015 的迁移目录，用来模拟升级前的真实库。"""
+
+    directory = tmp_path / "migrations_v15"
+    directory.mkdir()
+    for path in migration_files():
+        if not path.name.startswith(("0016_", "0017_")):
+            shutil.copy(path, directory / path.name)
+    return directory
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_schema_fifteen_data_upgrades_to_sixteen(tmp_path: Path) -> None:
+    """V15 的系统「未分类」要被拆掉，但只拆真的那一个。
+
+    判定依据是 is_system 而不是名字：管理员完全可能自己建过一个同名的普通分类，
+    那是他的业务分类，按名字删会把它一并误伤。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    assert apply_migrations(database_url, _migrations_up_to_fifteen(tmp_path)) == 15
+
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO knowledge_bases
+               (knowledge_base_id, name, name_normalized, description, is_default,
+                created_at, updated_at)
+               VALUES ('kb_legacy', '历史库', '历史库', '', false, now(), now())"""
+        )
+        connection.execute(
+            """INSERT INTO data_sources
+               (data_source_id, knowledge_base_id, source_type, name, configuration,
+                created_at, updated_at)
+               VALUES ('ds_legacy', 'kb_legacy', 'file', '手工', '{}'::jsonb, now(), now())"""
+        )
+        connection.execute(
+            """INSERT INTO document_categories
+               (category_id, knowledge_base_id, name, normalized_name, description,
+                sort_order, active, is_system)
+               VALUES ('cat_aaaaaaaaaaaaaaaa', 'kb_legacy', '未分类', '未分类',
+                       '尚未完成分类的资料', 0, true, true),
+                      ('cat_bbbbbbbbbbbbbbbb', 'kb_legacy', '归档', '归档', '', 100, true, false)"""
+        )
+        # 三份资料：挂在系统「未分类」上的普通资料、挂在系统「未分类」上的失败资料、
+        # 以及一份真正归入业务分类的资料。
+        for document_id, category_id, category, status in (
+            ("doc_pending", "cat_aaaaaaaaaaaaaaaa", "未分类", "pending"),
+            ("doc_failed", "cat_aaaaaaaaaaaaaaaa", "未分类", "failed"),
+            ("doc_sorted", "cat_bbbbbbbbbbbbbbbb", "归档", "manual"),
+        ):
+            connection.execute(
+                """INSERT INTO documents
+                   (knowledge_base_id, document_id, data_source_id, filename,
+                    metadata, created_at, updated_at)
+                   VALUES ('kb_legacy', %s, 'ds_legacy', %s, %s::jsonb, now(), now())""",
+                (
+                    document_id,
+                    f"{document_id}.md",
+                    json.dumps(
+                        {
+                            "category_id": category_id,
+                            "category": category,
+                            "classification_status": status,
+                        }
+                    ),
+                ),
+            )
+
+    assert apply_migrations(database_url) == 17
+
+    with psycopg.connect(database_url) as connection:
+        remaining = [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM document_categories WHERE knowledge_base_id='kb_legacy'"
+            ).fetchall()
+        ]
+        documents = {
+            str(row[0]): row[1]
+            for row in connection.execute(
+                "SELECT document_id, metadata FROM documents WHERE knowledge_base_id='kb_legacy'"
+            ).fetchall()
+        }
+
+    assert remaining == ["归档"], "系统「未分类」要被删掉，普通分类不受影响"
+    assert documents["doc_pending"]["category_id"] is None
+    assert documents["doc_pending"]["category"] is None
+    assert documents["doc_pending"]["classification_status"] == "pending"
+    # 失败状态是排查线索，不能在迁移里被抹平成「待分类」。
+    assert documents["doc_failed"]["classification_status"] == "failed"
+    assert documents["doc_failed"]["category_id"] is None
+    assert documents["doc_sorted"]["category_id"] == "cat_bbbbbbbbbbbbbbbb"
+    assert documents["doc_sorted"]["category"] == "归档"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_user_created_category_named_uncategorized_survives_migration(tmp_path: Path) -> None:
+    """管理员自建的普通「未分类」不得被迁移删掉——按 is_system 判定，不按名字。"""
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    assert apply_migrations(database_url, _migrations_up_to_fifteen(tmp_path)) == 15
+
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO knowledge_bases
+               (knowledge_base_id, name, name_normalized, description, is_default,
+                created_at, updated_at)
+               VALUES ('kb_plain', '普通库', '普通库', '', false, now(), now())"""
+        )
+        connection.execute(
+            """INSERT INTO document_categories
+               (category_id, knowledge_base_id, name, normalized_name, description,
+                sort_order, active, is_system)
+               VALUES ('cat_cccccccccccccccc', 'kb_plain', '未分类', '未分类',
+                       '业务上就叫这个名字', 100, true, false)"""
+        )
+
+    assert apply_migrations(database_url) == 17
+
+    with psycopg.connect(database_url) as connection:
+        survived = connection.execute(
+            "SELECT description FROM document_categories WHERE category_id='cat_cccccccccccccccc'"
+        ).fetchone()
+    assert survived is not None and survived[0] == "业务上就叫这个名字"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_schema_sixteen_migration_is_idempotent() -> None:
+    """重复执行不得产生新分类、不得改写正文与 Embedding。"""
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    assert apply_migrations(database_url) == 17
+
+    with psycopg.connect(database_url) as connection:
+        before = connection.execute("SELECT count(*) FROM document_categories").fetchone()[0]
+
+    assert apply_migrations(database_url) == 17
+
+    with psycopg.connect(database_url) as connection:
+        after = connection.execute("SELECT count(*) FROM document_categories").fetchone()[0]
+    assert after == before
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -62,7 +296,7 @@ def test_schema_thirteen_adds_evaluation_and_bad_case_governance() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-        assert apply_migrations(database_url) == 15
+        assert apply_migrations(database_url) == 17
 
     with psycopg.connect(database_url) as connection:
         tables = {
@@ -81,7 +315,7 @@ def test_schema_fourteen_adds_acceptance_runs() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 15
+    assert apply_migrations(database_url) == 17
 
     with psycopg.connect(database_url) as connection:
         assert connection.execute(
@@ -95,7 +329,7 @@ def test_schema_fifteen_adds_seeded_default_category_template() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 15
+    assert apply_migrations(database_url) == 17
 
     with psycopg.connect(database_url) as connection:
         template = connection.execute(
@@ -117,7 +351,7 @@ def test_new_knowledge_base_copies_active_template_as_independent_categories() -
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 15
+    assert apply_migrations(database_url) == 17
 
     templates = PostgresCategoryTemplateRepository(database_url)
     disabled = templates.create_item("停用分类", "不会复制", 700)
@@ -138,12 +372,59 @@ def test_new_knowledge_base_copies_active_template_as_independent_categories() -
             "SELECT name, is_system FROM document_categories WHERE knowledge_base_id=%s",
             (second.knowledge_base_id,),
         ).fetchall()
-    assert default_categories == [("未分类", True)]
-    assert first_categories[0] == ("未分类", True)
-    assert [item[0] for item in first_categories[1:]] == [
+    assert default_categories == [], "默认知识库不得再自动生成系统分类"
+    assert [item[0] for item in first_categories] == [
         "产品资料", "技术文档", "操作手册", "运维文档", "制度规范", "常见问题"
     ]
-    assert second_categories == [("未分类", True)]
+    assert all(item[1] is False for item in first_categories), "模板分类都是普通分类"
+    assert second_categories == [], "关闭模板时分类列表允许为空"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_uncategorized_becomes_an_ordinary_category_name() -> None:
+    """「未分类」不再是保留名：管理员能像其他分类一样创建、改名、停用、删除它。
+
+    此前它是 is_system 特权行，改名和停用都被 PermissionError 挡下，而资料一旦没分类
+    就被塞进这一行——于是「没有分类」在库里表现为「属于某个分类」，检索和统计都被污染。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    assert apply_migrations(database_url) == 17
+
+    repository = PostgresKnowledgeBaseRepository(database_url)
+    knowledge_base = repository.create("普通库", "", False)
+    categories = PostgresCategoryRepository(database_url)
+
+    created = categories.create(knowledge_base.knowledge_base_id, "未分类", "普通分类", 100)
+    assert created["is_system"] is False
+
+    renamed = categories.update(
+        knowledge_base.knowledge_base_id, str(created["category_id"]), "归档中", "", 100, True
+    )
+    assert renamed is not None and renamed["name"] == "归档中"
+
+    assert categories.delete(knowledge_base.knowledge_base_id, str(created["category_id"])) is True
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_category_name_must_be_non_empty_and_unique_ignoring_case() -> None:
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    assert apply_migrations(database_url) == 17
+
+    knowledge_base = PostgresKnowledgeBaseRepository(database_url).create("校验库", "", False)
+    categories = PostgresCategoryRepository(database_url)
+    categories.create(knowledge_base.knowledge_base_id, "Runbook", "", 100)
+
+    with pytest.raises(ValueError):
+        categories.create(knowledge_base.knowledge_base_id, "   ", "", 100)
+    with pytest.raises(ValueError):
+        categories.create(knowledge_base.knowledge_base_id, "runbook", "", 100)
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -152,7 +433,7 @@ def test_schema_twelve_adds_sync_run_governance() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 15
+    assert apply_migrations(database_url) == 17
 
     with psycopg.connect(database_url) as connection:
         columns = {
@@ -242,8 +523,8 @@ def test_schema_two_with_existing_data_upgrades_to_schema_three(tmp_path: Path) 
             (now, now),
         )
 
-    assert apply_migrations(database_url) == 15
-    check_schema_version(database_url, 13)
+    assert apply_migrations(database_url) == 17
+    check_schema_version(database_url, 17)
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
             "SELECT status, chunking_version FROM document_versions WHERE document_version_id = 'ver_legacy'"
@@ -288,6 +569,44 @@ def test_postgres_backup_manifest_and_tamper_detection(
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_postgres_update_user_matches_the_json_implementation() -> None:
+    """成员的角色与启用状态必须真的能改，且最后一名管理员要被拦住。
+
+    这两条在 JSON 版 ``AuthRepository`` 上有测试并且通过，但生产跑的是 Postgres 版，
+    而它的 ``update_user`` 从来没被测过——「同一份规则两个实现，只测了不上生产的那个」。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    apply_migrations(database_url)
+
+    repository = PostgresAuthRepository(database_url)
+    repository.bootstrap_admin("admin-a", "long-enough-password", "甲")
+    second = repository.create_user("admin-b", "long-enough-password", "乙", "admin")
+    first = next(item for item in repository.list_users() if item.username == "admin-a")
+
+    # 还有另一名启用的管理员时，降级必须成功。
+    demoted = repository.update_user(
+        second.user_id, display_name=None, role="member", active=None, password=None
+    )
+    assert demoted is not None and demoted.role == "member"
+
+    # 现在只剩一名管理员，停用与降级都要被拦住，且要是 PermissionError 而不是别的异常
+    # ——API 层只把 PermissionError 翻译成 LAST_ADMIN_REQUIRED，其余一律变成 500。
+    for role, active in (("admin", False), ("member", None)):
+        with pytest.raises(PermissionError, match="last active admin"):
+            repository.update_user(
+                first.user_id, display_name=None, role=role, active=active, password=None
+            )
+
+    assert next(
+        item for item in repository.list_users() if item.username == "admin-a"
+    ).role == "admin", "被拦住的操作不得留下部分写入"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
 def test_postgres_runtime_covers_auth_indexing_and_backup(tmp_path: Path) -> None:
     """PostgreSQL 运行时的端到端覆盖：认证与授权、异步索引、版本升级、失败隔离与备份恢复。
 
@@ -300,8 +619,8 @@ def test_postgres_runtime_covers_auth_indexing_and_backup(tmp_path: Path) -> Non
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 15
-    check_schema_version(database_url, 13)
+    assert apply_migrations(database_url) == 17
+    check_schema_version(database_url, 17)
 
     now = datetime.now(UTC)
     with psycopg.connect(database_url) as connection, connection.transaction():
@@ -500,8 +819,8 @@ def test_schema_nine_with_existing_chunks_upgrades_to_schema_ten(tmp_path: Path)
             (json.dumps({"document_id": "doc_legacy"}), now),
         )
 
-    assert apply_migrations(database_url) == 15
-    check_schema_version(database_url, 13)
+    assert apply_migrations(database_url) == 17
+    check_schema_version(database_url, 17)
 
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
@@ -539,7 +858,7 @@ def test_schema_ten_on_empty_database_keeps_embedding_unconstrained(tmp_path: Pa
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 15
+    assert apply_migrations(database_url) == 17
     with psycopg.connect(database_url) as connection:
         assert (
             connection.execute(
@@ -603,8 +922,8 @@ def test_schema_eleven_allows_sync_jobs_and_local_directory_sources(tmp_path: Pa
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 15
-    check_schema_version(database_url, 13)
+    assert apply_migrations(database_url) == 17
+    check_schema_version(database_url, 17)
 
     now = datetime.now(UTC)
     with psycopg.connect(database_url) as connection, connection.transaction():

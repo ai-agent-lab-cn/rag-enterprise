@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { api } from "../api";
 import type { Citation, Source } from "../types";
-import { Modal } from "./Modal";
+import { Button } from "./ui/Button";
+import { Dialog } from "./ui/Dialog";
 
 interface SourceCardProps { source: Source; index: number; defaultOpen?: boolean }
 
@@ -34,11 +35,12 @@ export function SourceCard({ source, index, defaultOpen = false }: SourceCardPro
         </span>
       </summary>
       <p>{source.text}</p>
-      <button className="source-original-action" disabled={loading} onClick={() => void openOriginal()}>{loading ? "定位中…" : `查看 ${source.filename} 原文`}</button>
+      {/* 内边距接原来的 .source-original-action：卡片本体没有 padding，不给就贴边。 */}
+      <Button className="mx-3.5 mb-3" variant="ghost" size="sm" loading={loading} onClick={() => void openOriginal()}>查看 {source.filename} 原文</Button>
       {error ? <small className="source-error" role="alert">{error}</small> : null}
     </details>
-    {citation ? <Modal title="可信引用原文" description={`${citation.filename} · ${originalLocation}`} onClose={() => setCitation(null)}>
+    {citation ? <Dialog open size="md" title="可信引用原文" description={`${citation.filename} · ${originalLocation}`} onClose={() => setCitation(null)}>
       <div className="citation-original"><p>{citation.text}</p><dl><div><dt>文档版本</dt><dd>{citation.document_version_id}</dd></div><div><dt>内容哈希</dt><dd title={citation.content_sha256}>{citation.content_sha256.slice(0, 16)}…</dd></div>{citation.external_resource_id ? <div><dt>外部资源</dt><dd>{citation.external_resource_id}</dd></div> : null}</dl>{citation.source_url ? <a href={citation.source_url} target="_blank" rel="noreferrer">打开外部原文</a> : null}</div>
-    </Modal> : null}
+    </Dialog> : null}
   </>;
 }

@@ -2,8 +2,11 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Plus, Shield, UserRound } from "lucide-react";
 import { api } from "../api";
 import type { KnowledgeBase, User } from "../types";
-import { Modal } from "./Modal";
 import { TopbarPortal } from "./TopbarPortal";
+import { Button } from "./ui/Button";
+import { Dialog, DialogActions } from "./ui/Dialog";
+import { Input } from "./ui/Input";
+import { Select } from "./ui/Select";
 
 type ConfirmAction = {
   member: User;
@@ -119,12 +122,13 @@ export function MembersPage({ currentUser }: { currentUser: User }) {
   return (
     <section className="admin-page" aria-label="成员与权限">
       <TopbarPortal>
-        <button className="primary-action topbar-primary-action" onClick={() => setCreating(true)}>
+        <Button onClick={() => setCreating(true)}>
           <Plus size={16} />
           新建成员
-        </button>
+        </Button>
       </TopbarPortal>
-      {error ? (
+      {/* 弹层打开时错误必须显示在弹层内，否则它躺在 Radix 加了 aria-hidden 的背景里。 */}
+      {error && !creating && !confirm ? (
         <div className="error-banner" role="alert">
           {error}
         </div>
@@ -132,13 +136,19 @@ export function MembersPage({ currentUser }: { currentUser: User }) {
       <section className="permission-toolbar">
         <label>
           授权知识库
-          <select value={selectedBase} onChange={(event) => setSelectedBase(event.target.value)}>
+          <Select
+            size="sm"
+            className="w-56"
+            blockedReason={bases.length ? undefined : "还没有知识库"}
+            value={selectedBase}
+            onChange={(event) => setSelectedBase(event.target.value)}
+          >
             {bases.map((base) => (
               <option key={base.knowledge_base_id} value={base.knowledge_base_id}>
                 {base.name}
               </option>
             ))}
-          </select>
+          </Select>
         </label>
         <p>管理员可访问全部知识库；下方开关只管理普通成员。</p>
       </section>
@@ -185,16 +195,34 @@ export function MembersPage({ currentUser }: { currentUser: User }) {
                   {member.role === "admin" ? "管理员" : "普通成员"}
                 </span>
                 <span className={`status-pill ${member.active ? "is-success" : "is-muted"}`}>{member.active ? "已启用" : "已停用"}</span>
-                <button className="permission-toggle" disabled={member.role === "admin" || !selectedBase || busy !== ""} aria-pressed={Boolean(granted)} onClick={() => void toggleGrant(member)}>
-                  {granted ? "已授权" : "未授权"}
-                </button>
+                {/* 管理员天然有全部权限，这里给一个永远点不动的开关只是噪音——
+                    不可用的控件不如不给控件。原因由工具栏那句说明承担。 */}
+                {member.role === "admin" ? (
+                  <span className="text-xs text-ink-faint">全部知识库</span>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    reasonHidden
+                    // w-fit：它直接是 .member-row 这个 grid 的子项，不加会被拉满整列。
+                    className={granted ? "w-fit border-brand/35 bg-brand-subtle text-brand" : "w-fit"}
+                    blockedReason={selectedBase ? undefined : "请先选择知识库"}
+                    loading={busy === `grant-${member.user_id}`}
+                    aria-pressed={Boolean(granted)}
+                    onClick={() => void toggleGrant(member)}
+                  >
+                    {granted ? "已授权" : "未授权"}
+                  </Button>
+                )}
                 <div className="row-actions">
-                  <button disabled={isSelf || busy !== ""} onClick={() => setConfirm({ member, kind: "role" })}>
+                  {/* reasonHidden：同一行的名字后面已经标了「（当前账号）」，
+                      再逐行补一句会把 72px 的行撑高。 */}
+                  <Button variant="ghost" size="sm" reasonHidden blockedReason={isSelf ? "不能修改自己的账号" : undefined} loading={busy === member.user_id} onClick={() => setConfirm({ member, kind: "role" })}>
                     {member.role === "admin" ? "设为成员" : "设为管理员"}
-                  </button>
-                  <button disabled={isSelf || busy !== ""} className={member.active ? "danger-text" : ""} onClick={() => setConfirm({ member, kind: "toggle" })}>
+                  </Button>
+                  <Button variant="ghost" size="sm" reasonHidden className={member.active ? "text-danger-text hover:bg-danger-subtle" : undefined} blockedReason={isSelf ? "不能修改自己的账号" : undefined} loading={busy === member.user_id} onClick={() => setConfirm({ member, kind: "toggle" })}>
                     {member.active ? "停用" : "启用"}
-                  </button>
+                  </Button>
                 </div>
               </div>
             );
@@ -202,49 +230,50 @@ export function MembersPage({ currentUser }: { currentUser: User }) {
         </div>
       ) : null}
       {creating ? (
-        <Modal title="新建成员" description="创建后可为普通成员分配知识库权限。" onClose={() => setCreating(false)}>
+        <Dialog open title="新建成员" description="创建后可为普通成员分配知识库权限。" onClose={() => { if (busy !== "create") setCreating(false); }}>
           <form className="modal-form" onSubmit={submitCreate}>
+            {error ? <div className="error-banner" role="alert">{error}</div> : null}
             <label>
               显示名称
-              <input name="display_name" required maxLength={80} />
+              <Input name="display_name" required maxLength={80} />
             </label>
             <label>
               用户名
-              <input name="username" required minLength={3} maxLength={64} pattern="[A-Za-z0-9._-]+" />
+              <Input name="username" required minLength={3} maxLength={64} pattern="[A-Za-z0-9._\-]+" />
             </label>
             <label>
               初始密码
-              <input name="password" type="password" required minLength={12} maxLength={128} />
+              <Input name="password" type="password" required minLength={12} maxLength={128} />
             </label>
             <label>
               角色
-              <select name="role" defaultValue="member">
+              <Select name="role" defaultValue="member">
                 <option value="member">普通成员</option>
                 <option value="admin">管理员</option>
-              </select>
+              </Select>
             </label>
-            <div className="modal-actions">
-              <button type="button" className="secondary-action" onClick={() => setCreating(false)}>
-                取消
-              </button>
-              <button className="primary-action" disabled={busy === "create"}>
-                {busy === "create" ? "创建中…" : "确认创建"}
-              </button>
-            </div>
+            <DialogActions>
+              <Button variant="secondary" loading={busy === "create"} onClick={() => setCreating(false)}>取消</Button>
+              <Button type="submit" loading={busy === "create"}>确认创建</Button>
+            </DialogActions>
           </form>
-        </Modal>
+        </Dialog>
       ) : null}
       {confirm ? (
-        <Modal title={confirm.kind === "revoke" ? "撤销知识库权限" : confirm.kind === "toggle" ? `${confirm.member.active ? "停用" : "启用"}成员` : "变更成员角色"} description={`即将修改 ${confirm.member.display_name} 的访问权限，会话可能随之失效。`} onClose={() => setConfirm(null)}>
-          <div className="modal-actions">
-            <button className="secondary-action" onClick={() => setConfirm(null)}>
-              取消
-            </button>
-            <button className={confirm.kind === "revoke" || (confirm.kind === "toggle" && confirm.member.active) ? "danger-action" : "primary-action"} onClick={() => void applyConfirm()} disabled={busy !== ""}>
+        <Dialog open title={confirm.kind === "revoke" ? "撤销知识库权限" : confirm.kind === "toggle" ? `${confirm.member.active ? "停用" : "启用"}成员` : "变更成员角色"} description={`即将修改 ${confirm.member.display_name} 的访问权限，会话可能随之失效。`} onClose={() => { if (!busy) setConfirm(null); }}>
+          {error ? <div className="error-banner" role="alert">{error}</div> : null}
+          <DialogActions>
+            <Button variant="secondary" loading={busy !== ""} onClick={() => setConfirm(null)}>取消</Button>
+            <Button
+              variant={confirm.kind === "revoke" || (confirm.kind === "toggle" && confirm.member.active) ? "destructive" : "primary"}
+              autoFocus
+              loading={busy !== ""}
+              onClick={() => void applyConfirm()}
+            >
               确认变更
-            </button>
-          </div>
-        </Modal>
+            </Button>
+          </DialogActions>
+        </Dialog>
       ) : null}
     </section>
   );

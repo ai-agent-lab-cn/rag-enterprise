@@ -77,13 +77,31 @@ class MemberUpdate(BaseModel):
         return normalized
 
 
+# 分类失败的稳定错误码。前三个是外部环境问题、可自动重试；后四个是配置或响应本身
+# 有问题，重试只会重复失败，必须由人介入。
+ClassificationFailureCode = Literal[
+    "MODEL_UNAVAILABLE",
+    "MODEL_TIMEOUT",
+    "UNKNOWN_ERROR",
+    "INVALID_RESPONSE",
+    "CATEGORY_NOT_FOUND",
+    "CATEGORY_INACTIVE",
+    "NO_ACTIVE_CATEGORY",
+]
+RETRYABLE_CLASSIFICATION_FAILURES: frozenset[str] = frozenset(
+    {"MODEL_UNAVAILABLE", "MODEL_TIMEOUT", "UNKNOWN_ERROR"}
+)
+
+
 class DocumentInfo(BaseModel):
     knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
     document_id: str
     filename: str
     chunk_count: int
     status: str = "ready"
-    category: str = "未分类"
+    # 没有分类就是 None。此前这里默认「未分类」，把「模型超时了」和「管理员就是
+    # 没给它分类」压成了同一个值，导致分类失败无法按状态治理。
+    category: str | None = None
     category_id: str | None = None
     tags: list[str] = Field(default_factory=list)
     source_type: str = "file"
@@ -106,6 +124,11 @@ class DocumentInfo(BaseModel):
     suggested_category_id: str | None = None
     classification_model: str | None = None
     classified_at: datetime | None = None
+    classification_failure_code: ClassificationFailureCode | None = None
+    classification_failure_reason: str | None = Field(default=None, max_length=500)
+    classification_failed_at: datetime | None = None
+    classification_retry_count: int = Field(default=0, ge=0)
+    classification_next_retry_at: datetime | None = None
 
 
 class CategoryCreate(BaseModel):
@@ -177,14 +200,21 @@ class BatchCategoryUpdate(BaseModel):
 
 class ClassificationUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    category_id: str = Field(pattern=r"^cat_[a-f0-9]{16}$")
+    # None 表示把资料退回「没有分类」。它是一个显式动作，不是「归到未分类那一类」。
+    category_id: str | None = Field(default=None, pattern=r"^cat_[a-f0-9]{16}$")
+
+
+class BatchReclassifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    document_ids: list[str] = Field(min_length=1, max_length=500)
 
 
 class DocumentMetadata(BaseModel):
     """文档级治理属性；版本与分块只能继承，不能自行扩大范围。"""
 
     model_config = ConfigDict(extra="forbid")
-    category: str = Field(default="未分类", min_length=1, max_length=64)
+    # None 表示「没有分类」；空字符串不是有效取值，分类名去空格后必须非空。
+    category: str | None = Field(default=None, min_length=1, max_length=64)
     tags: list[str] = Field(default_factory=list, max_length=20)
     source_system: str = Field(default="upload", min_length=1, max_length=80)
     external_resource_id: str | None = Field(default=None, max_length=200)
@@ -200,9 +230,17 @@ class DocumentMetadata(BaseModel):
 
     @field_validator("category")
     @classmethod
-    def normalize_category(cls, value: str) -> str:
+    def normalize_category(cls, value: str | None) -> str | None:
+        """None 表示没有分类，是合法取值；空白字符串不是。
+
+        两者的区别是有意的：不给分类字段，和给一个由空格组成的分类名，是两种不同的
+        意图，后者只会在分类下拉里造出一个点不动、说不清的选项。
+        """
+
+        if value is None:
+            return None
         if not (normalized := value.strip()):
-            raise ValueError("文档分类不能为空")
+            raise ValueError("文档分类不能为空白字符")
         return normalized
 
     @field_validator("tags")
@@ -574,6 +612,9 @@ class QueryExecutionMetadata(BaseModel):
     fused_candidate_count: int = Field(default=0, ge=0)
     returned_source_count: int = Field(default=0, ge=0)
     filter_match_count: int | None = Field(default=None, ge=0)
+    # 本次召回里没有分类的条数。无分类资料本就该出现在不带分类过滤的检索里，但看到它
+    # 被引用的人需要知道这是设计如此，而不是过滤失效。
+    uncategorized_candidate_count: int = Field(default=0, ge=0)
 
 
 class GenerationGovernance(BaseModel):

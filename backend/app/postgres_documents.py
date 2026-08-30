@@ -33,6 +33,14 @@ from .security import write_private_file
 from .service import RAGService
 from .store import RetrievedChunk
 
+# 任务失败后的退避间隔。索引与分类共用同一个值：两者的失败原因同源（外部依赖
+# 暂时不可用），没有理由给它们两套节奏。
+RETRY_BACKOFF_SECONDS = 5
+
+
+class _RetryableClassification(RuntimeError):
+    """分类遇到了值得重试的外部故障，交回队列按既有退避重来。"""
+
 
 def _stable_id(prefix: str, *parts: str) -> str:
     value = hashlib.sha256("\0".join(parts).encode()).hexdigest()[:20]
@@ -281,7 +289,9 @@ class PostgresVectorStore:
                 "filename": row["filename"],
                 "chunk_count": int(row["chunk_count"]),
                 "status": row["pending_status"] or row["current_status"] or "pending",
-                "category": dict(row["metadata"] or {}).get("category", "未分类"),
+                # 没有分类就是 None。默认「未分类」会把一份没跑成分类的资料显示成
+                # 「已归入某分类」，正是这次要消灭的混淆。
+                "category": dict(row["metadata"] or {}).get("category"),
                 "category_id": dict(row["metadata"] or {}).get("category_id"),
                 "tags": dict(row["metadata"] or {}).get("tags", []),
                 "source_type": row["source_type"],
@@ -302,6 +312,21 @@ class PostgresVectorStore:
                 "suggested_category_id": dict(row["metadata"] or {}).get("suggested_category_id"),
                 "classification_model": dict(row["metadata"] or {}).get("classification_model"),
                 "classified_at": dict(row["metadata"] or {}).get("classified_at"),
+                "classification_failure_code": dict(row["metadata"] or {}).get(
+                    "classification_failure_code"
+                ),
+                "classification_failure_reason": dict(row["metadata"] or {}).get(
+                    "classification_failure_reason"
+                ),
+                "classification_failed_at": dict(row["metadata"] or {}).get(
+                    "classification_failed_at"
+                ),
+                "classification_retry_count": dict(row["metadata"] or {}).get(
+                    "classification_retry_count"
+                ) or 0,
+                "classification_next_retry_at": dict(row["metadata"] or {}).get(
+                    "classification_next_retry_at"
+                ),
             }
             for row in rows
         ]
@@ -468,6 +493,26 @@ class PostgresAsyncRAGService(RAGService):
                 store.chunk_fingerprint,
             ),
         )
+
+    def _resolve_category_names(
+        self, knowledge_base_id: str, filters: QueryMetadataFilter | None
+    ) -> QueryMetadataFilter | None:
+        validate_knowledge_base_id(knowledge_base_id)
+        if filters is None or not filters.categories:
+            return filters
+        with psycopg.connect(self.database_url) as connection:
+            resolved = [
+                row[0]
+                for row in connection.execute(
+                    """SELECT category_id FROM document_categories
+                       WHERE knowledge_base_id = %s AND normalized_name = ANY(%s)""",
+                    (knowledge_base_id, [name.strip().casefold() for name in filters.categories]),
+                ).fetchall()
+            ]
+        # 一个名字都解析不出来时给一个不可能命中的 ID，而不是放行。放行等于把「按不存在
+        # 的分类过滤」变成「不过滤」，用户划定的范围会被悄悄取消。状态文案走的正是这条路。
+        merged = [*filters.category_ids, *resolved] or ["cat_" + "0" * 16]
+        return filters.model_copy(update={"categories": [], "category_ids": merged})
 
     def list_index_versions(
         self,
@@ -964,7 +1009,112 @@ class IndexWorker:
             raise RuntimeError(f"rebuild batch has no index version: {rebuild_batch_id}")
         return str(row[0])
 
+    def _classify(self, version: dict[str, Any]) -> None:
+        """跑一次自动分类并把结果写进 documents.metadata。
+
+        只有高置信才写分类归属。可重试的失败会抛 ``_RetryableClassification``，由队列
+        按既有的退避与最大次数重来；不可重试的失败原地记录，不占用重试次数——重试多少
+        次都是同样的结果，让它把次数耗光只会掩盖「这需要人来处理」。
+        """
+
+        classifier = DocumentClassifier(self.generator)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            categories = [
+                dict(row)
+                for row in connection.execute(
+                    """SELECT category_id, name, description, active
+                       FROM document_categories WHERE knowledge_base_id=%s""",
+                    (version["knowledge_base_id"],),
+                ).fetchall()
+            ]
+        summary = self._classification_summary(version)
+        classification = classifier.classify(str(version["filename"]), summary, categories)
+        # 只有高置信才写分类归属。其余情况一律保持为空——没有伪分类可以兜底了，
+        # 而这正是本次改造的目的：没有分类就诚实地表示成没有分类。
+        selected = next(
+            (
+                item
+                for item in categories
+                if classification.status == "auto_assigned"
+                and item["category_id"] == classification.category_id
+            ),
+            None,
+        )
+        failed = classification.status == "failed"
+        now = datetime.now(UTC)
+        previous = dict(version["document_metadata"] or {})
+        retry_count = int(previous.get("classification_retry_count") or 0)
+        retrying = failed and classification.retryable
+        patch = {
+            "category_id": selected["category_id"] if selected else None,
+            "category": selected["name"] if selected else None,
+            "classification_status": classification.status,
+            "classification_confidence": classification.confidence,
+            "suggested_category_id": (
+                classification.category_id if classification.status == "review_required" else None
+            ),
+            "classification_model": self.generator.model_name if self.generator else None,
+            "classification_reason": classification.reason,
+            "classified_at": now.isoformat(),
+            "classification_failure_code": classification.failure_code,
+            "classification_failure_reason": classification.reason if failed else None,
+            "classification_failed_at": now.isoformat() if failed else None,
+            # 只有可重试的失败才累加计数，成功则归零。
+            "classification_retry_count": retry_count + 1 if retrying else 0,
+            "classification_next_retry_at": (
+                (now + timedelta(seconds=RETRY_BACKOFF_SECONDS)).isoformat()
+                if retrying
+                else None
+            ),
+        }
+        with psycopg.connect(self.database_url) as connection:
+            connection.execute(
+                """UPDATE documents SET metadata=metadata || %s, updated_at=now()
+                   WHERE knowledge_base_id=%s AND document_id=%s""",
+                (Jsonb(patch), version["knowledge_base_id"], version["document_id"]),
+            )
+        version["document_metadata"] = {**previous, **patch}
+        if retrying:
+            raise _RetryableClassification(
+                f"{classification.failure_code}: {classification.reason}"
+            )
+
+    def _classification_summary(self, version: dict[str, Any]) -> str:
+        """给分类器看的摘要。
+
+        重新分类时不重新解析原文——那要重跑解析器、可能几十 MB 的 PDF 也要再读一遍，
+        而分类只需要开头几段。直接取当前版本已经切好的分块。
+        """
+
+        with psycopg.connect(self.database_url) as connection:
+            rows = connection.execute(
+                """SELECT content FROM chunks
+                   WHERE document_version_id = %s ORDER BY chunk_index LIMIT 4""",
+                (version["document_version_id"],),
+            ).fetchall()
+        return "\n".join(str(row[0])[:500] for row in rows)
+
+    def _process_classification(self, job: dict[str, Any]) -> None:
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            version = connection.execute(
+                """SELECT v.*, d.filename, d.metadata AS document_metadata
+                   FROM document_versions v
+                   JOIN documents d ON d.knowledge_base_id = v.knowledge_base_id
+                                   AND d.document_id = v.document_id
+                   WHERE v.document_version_id = %s""",
+                (job["document_version_id"],),
+            ).fetchone()
+        if version is None:
+            raise RuntimeError("document version not found")
+        self._classify(dict(version))
+
     def _process(self, job: dict[str, Any]) -> None:
+        if str(job.get("job_type", "index")) == "classify":
+            # 分类任务不碰正文、分块与 Embedding：分类失败是分类的问题，资料主体
+            # 已经处理好了，没有理由再付一次索引的代价。
+            self._process_classification(job)
+            self._succeed(str(job["index_job_id"]))
+            return
         if str(job.get("job_type", "index")) == "sync":
             # 同步任务针对整个数据源，没有 document_version_id，不能走下面的版本查询。
             from .data_source_sync import run_sync
@@ -1004,50 +1154,8 @@ class IndexWorker:
             )
         parsed = parse_structured_document(str(version["filename"]), content)
         sections = parsed.sections
-        classifier = DocumentClassifier(self.generator)
-        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
-            categories = [
-                dict(row)
-                for row in connection.execute(
-                    """SELECT category_id, name, description, active, is_system
-                       FROM document_categories WHERE knowledge_base_id=%s""",
-                    (version["knowledge_base_id"],),
-                ).fetchall()
-            ]
-            uncategorized = next((item for item in categories if item["is_system"]), None)
-        summary = "\n".join(section.text[:500] for section in sections[:4])
-        classification = classifier.classify(str(version["filename"]), summary, categories)
-        selected = next(
-            (
-                item
-                for item in categories
-                if classification.status == "auto_assigned"
-                and item["category_id"] == classification.category_id
-            ),
-            uncategorized,
-        )
-        classification_patch = {
-            "category_id": selected["category_id"] if selected else None,
-            "category": selected["name"] if selected else "未分类",
-            "classification_status": classification.status,
-            "classification_confidence": classification.confidence,
-            "suggested_category_id": (
-                classification.category_id if classification.status == "review_required" else None
-            ),
-            "classification_model": self.generator.model_name,
-            "classification_reason": classification.reason,
-            "classified_at": datetime.now(UTC).isoformat(),
-        }
-        with psycopg.connect(self.database_url) as connection:
-            connection.execute(
-                """UPDATE documents SET metadata=metadata || %s, updated_at=now()
-                   WHERE knowledge_base_id=%s AND document_id=%s""",
-                (Jsonb(classification_patch), version["knowledge_base_id"], version["document_id"]),
-            )
-        version["document_metadata"] = {
-            **dict(version["document_metadata"] or {}),
-            **classification_patch,
-        }
+        # 分类抽成独立方法：重新分类任务要在不重新解析、不重新切分的情况下再跑一次。
+        self._classify(version)
         with psycopg.connect(self.database_url) as connection:
             connection.execute(
                 "UPDATE document_versions SET parse_status='chunking' WHERE document_version_id=%s",
@@ -1204,13 +1312,14 @@ class IndexWorker:
             status = "failed" if terminal else "queued"
             connection.execute(
                 """UPDATE index_jobs SET status = %s, failure_reason = %s,
-                          available_at = now() + interval '5 seconds', locked_at = NULL,
+                          available_at = now() + make_interval(secs => %s), locked_at = NULL,
                           locked_by = NULL, finished_at = CASE WHEN %s THEN now() ELSE NULL END,
                           updated_at = now() WHERE index_job_id = %s""",
-                (status, reason[:1000], terminal, job_id),
+                (status, reason[:1000], RETRY_BACKOFF_SECONDS, terminal, job_id),
             )
-            if str(job[3]) == "rebuild":
-                # 重建失败时上一批 chunks 仍然完好，文档必须保持可检索，只由任务记录失败。
+            if str(job[3]) in {"rebuild", "classify"}:
+                # 重建失败时上一批 chunks 仍然完好；分类失败更是与正文无关——两者都
+                # 不得把文档版本标成 failed，文档必须保持可检索。
                 return
             connection.execute(
                 """UPDATE document_versions SET status=%s, failure_reason=%s,

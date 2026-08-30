@@ -160,6 +160,8 @@ export const api = {
     request<void>(`/api/knowledge-bases/${id}/categories/${categoryId}`, { method: "DELETE" }),
   batchAssignDocumentCategory: (id: string, documentIds: string[], categoryId: string) =>
     request<{ updated: number }>(`/api/knowledge-bases/${id}/documents/categories`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ document_ids: documentIds, category_id: categoryId }) }),
+  reclassifyDocuments: (id: string, documentIds: string[]) =>
+    request<{ updated: number }>(`/api/knowledge-bases/${id}/documents/reclassify`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ document_ids: documentIds }) }),
   listKnowledgeBaseDocumentVersions: (id: string) => request<DocumentVersion[]>(`/api/knowledge-bases/${id}/document-versions?offset=0&limit=100`),
   listKnowledgeBaseIndexVersions: (id: string) => request<IndexVersion[]>(`/api/knowledge-bases/${id}/index-versions`),
   getDocumentParsingPreview: (id: string, versionId: string) => request<ParsingPreview>(`/api/knowledge-bases/${id}/document-versions/${versionId}/parsing`),

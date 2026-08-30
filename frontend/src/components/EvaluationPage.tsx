@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { EvaluationMetric, EvaluationReport, EvaluationReportSummary } from "../types";
-import { TopbarPortal } from "./TopbarPortal";
+import { Select } from "./ui/Select";
 
 const METRIC_ROWS: Array<{
   key: "recall_at_5" | "vector_mrr" | "hybrid_mrr" | "rerank_mrr";
@@ -69,7 +69,8 @@ export function EvaluationPage() {
 
   return (
     <section className="evaluation-page" aria-label="检索评测">
-      <TopbarPortal>{report ? <span className={report.passed ? "release-badge" : "release-badge is-failed"}>{report.passed ? "质量门已通过" : "质量门未通过"}</span> : null}</TopbarPortal>
+      {/* 曾经是页面级徽章放顶栏；改成 Section 后，顶栏只留统一质量门，分项结论回到各自小节。 */}
+      {report ? <span className={report.passed ? "release-badge" : "release-badge is-failed"}>{report.passed ? "质量门已通过" : "质量门未通过"}</span> : null}
 
       {error ? (
         <div className="error-banner" role="alert">
@@ -79,7 +80,7 @@ export function EvaluationPage() {
       {reports === null && !error ? <div className="evaluation-state pulse">正在读取正式评测报告…</div> : null}
       {reports?.length === 0 ? (
         <div className="evaluation-state">
-          <h2>还没有正式评测报告</h2>
+          <h3>还没有正式评测报告</h3>
           <p>报告需要由离线真实模型评测生成，页面不会启动重量评测任务。</p>
         </div>
       ) : null}
@@ -88,7 +89,9 @@ export function EvaluationPage() {
         <>
           <label className="report-picker">
             评测运行
-            <select
+            <Select
+            size="sm"
+            className="w-90"
               value={selectedId}
               onChange={(event) => {
                 setReport(null);
@@ -101,7 +104,7 @@ export function EvaluationPage() {
                   {new Date(item.run_at).toLocaleString("zh-CN")} · {item.dataset_version}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
           {!report && !error ? <div className="evaluation-state pulse">正在读取指标详情…</div> : null}
         </>

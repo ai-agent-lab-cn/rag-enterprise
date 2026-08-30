@@ -53,6 +53,7 @@ from .schemas import (
     AuthTokenResponse,
     BadCaseResponse,
     BatchCategoryUpdate,
+    BatchReclassifyRequest,
     CategoryCreate,
     CategoryResponse,
     CategoryTemplateItemCreate,
@@ -794,8 +795,6 @@ def create_app() -> FastAPI:
             row = await run_in_threadpool(
                 templates.create_item, payload.name, payload.description, payload.sort_order
             )
-        except PermissionError as exc:
-            raise AppError("CATEGORY_TEMPLATE_RESERVED_NAME", "“未分类”为系统保留名称。", 409) from exc
         except ValueError as exc:
             raise AppError("CATEGORY_TEMPLATE_NAME_CONFLICT", "模板分类名称已存在。", 409) from exc
         await _record_audit(
@@ -823,8 +822,6 @@ def create_app() -> FastAPI:
                 templates.update_item, template_item_id, payload.name, payload.description,
                 payload.sort_order, payload.active,
             )
-        except PermissionError as exc:
-            raise AppError("CATEGORY_TEMPLATE_RESERVED_NAME", "“未分类”为系统保留名称。", 409) from exc
         except ValueError as exc:
             raise AppError("CATEGORY_TEMPLATE_NAME_CONFLICT", "模板分类名称已存在。", 409) from exc
         if row is None:
@@ -878,13 +875,8 @@ def create_app() -> FastAPI:
             raise AppError("KNOWLEDGE_BASE_NAME_CONFLICT", "知识库名称已存在。", 409) from exc
         copied_count = 0
         if categories is not None:
-            copied_count = len(
-                [
-                    item
-                    for item in await run_in_threadpool(categories.list, record.knowledge_base_id)
-                    if not item["is_system"]
-                ]
-            )
+            # 没有系统分类要排除了：新知识库的分类全部来自模板复制。
+            copied_count = len(await run_in_threadpool(categories.list, record.knowledge_base_id))
         await _record_audit(
             audit,
             "knowledge_base.create",
@@ -984,8 +976,6 @@ def create_app() -> FastAPI:
                 payload.sort_order,
                 payload.active,
             )
-        except PermissionError as exc:
-            raise AppError("SYSTEM_CATEGORY_PROTECTED", "系统分类不可重命名或停用。", 409) from exc
         except ValueError as exc:
             raise AppError("CATEGORY_NAME_CONFLICT", "分类名称已存在。", 409) from exc
         if row is None:
@@ -1004,17 +994,9 @@ def create_app() -> FastAPI:
         _require_admin(current.user)
         if categories is None:
             raise AppError("POSTGRES_REQUIRED", "分类治理需要 PostgreSQL 运行时。", 503)
-        try:
-            deleted = await run_in_threadpool(categories.delete, knowledge_base_id, category_id)
-        except PermissionError as exc:
-            raise AppError("SYSTEM_CATEGORY_PROTECTED", "系统分类不可删除。", 409) from exc
-        except ValueError as exc:
-            raise AppError(
-                "CATEGORY_IN_USE",
-                "分类仍被资料引用，请先批量迁移资料。",
-                409,
-                {"document_count": int(str(exc))},
-            ) from exc
+        # 删除不再因「仍被资料引用」而失败：引用它的资料会退回「没有分类」，
+        # 正文与分块保留、照常可检索。CATEGORY_IN_USE 因此不再可能发生。
+        deleted = await run_in_threadpool(categories.delete, knowledge_base_id, category_id)
         if not deleted:
             raise AppError("CATEGORY_NOT_FOUND", "未找到该分类。", 404)
         await _record_audit(audit, "category.delete", current.user, "category", category_id)
@@ -1063,14 +1045,51 @@ def create_app() -> FastAPI:
         _require_admin(current.user)
         if categories is None:
             raise AppError("POSTGRES_REQUIRED", "分类治理需要 PostgreSQL 运行时。", 503)
-        updated = await run_in_threadpool(
-            categories.assign, knowledge_base_id, [document_id], payload.category_id
-        )
+        # category_id 为空表示显式退回「没有分类」，不是归到某个伪分类里。
+        if payload.category_id is None:
+            updated = await run_in_threadpool(
+                categories.clear, knowledge_base_id, [document_id]
+            )
+        else:
+            updated = await run_in_threadpool(
+                categories.assign, knowledge_base_id, [document_id], payload.category_id
+            )
         if updated is None:
             raise AppError("CATEGORY_NOT_FOUND", "分类不存在或已停用。", 404)
         if updated == 0:
             raise AppError("DOCUMENT_NOT_FOUND", "未找到该文档。", 404)
         await _record_audit(audit, "document.classification.confirm", current.user, "document", document_id)
+        return {"updated": updated}
+
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/documents/reclassify",
+        response_model=dict[str, int],
+    )
+    async def reclassify_documents(
+        knowledge_base_id: str,
+        payload: BatchReclassifyRequest,
+        categories: CategoriesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> dict[str, int]:
+        """请求重新自动分类：回到 pending 并清空失败信息。
+
+        只改分类状态，不重新解析、切分或 embedding——分类失败是分类的问题，资料主体
+        已经处理好了，没有理由再付一次索引的代价。
+        """
+
+        _require_admin(current.user)
+        if categories is None:
+            raise AppError("POSTGRES_REQUIRED", "分类治理需要 PostgreSQL 运行时。", 503)
+        updated = await run_in_threadpool(
+            categories.reclassify, knowledge_base_id, payload.document_ids
+        )
+        if updated == 0:
+            raise AppError("DOCUMENT_NOT_FOUND", "未找到可重新分类的文档。", 404)
+        await _record_audit(
+            audit, "document.classification.retry", current.user,
+            "knowledge_base", knowledge_base_id, metadata={"updated": updated},
+        )
         return {"updated": updated}
 
     @app.get(
@@ -1218,7 +1237,9 @@ def create_app() -> FastAPI:
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
         audit: AuditRepositoryDependency,
-        category: Annotated[str, Form()] = "未分类",
+        # 不传就是没有分类，交给自动分类去填；此前默认「未分类」，让每份上传的资料
+        # 一进库就带着一个假的分类归属。
+        category: Annotated[str | None, Form()] = None,
         tags: Annotated[list[str] | None, Form()] = None,
     ) -> DocumentInfo:
         await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)

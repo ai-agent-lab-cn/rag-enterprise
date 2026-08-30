@@ -2,6 +2,8 @@ import { useState, type FormEvent } from "react";
 import { Bot, Eye, EyeOff, KeyRound, LoaderCircle, ShieldCheck } from "lucide-react";
 import { api, setAccessToken } from "../api";
 import type { User } from "../types";
+import { Button } from "./ui/Button";
+import { Input } from "./ui/Input";
 
 interface AuthGateProps {
   bootstrapRequired: boolean;
@@ -47,17 +49,19 @@ export function AuthGate({ bootstrapRequired, checking = false, onAuthenticated 
         <h1 id="auth-title">{bootstrapRequired ? "创建首位管理员" : "登录 RAG 工作台"}</h1>
         <p className="auth-description">{bootstrapRequired ? "初始化只能完成一次。管理员可管理成员、知识库和评测权限。" : "使用管理员或已获授权的成员账号继续访问知识库。"}</p>
         <form className="auth-form" onSubmit={submit}>
-          {bootstrapRequired ? <label>显示名称<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} minLength={1} maxLength={80} autoComplete="name" required placeholder="例如：项目管理员"/></label> : null}
-          <label>用户名<input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={64} pattern="[A-Za-z0-9._-]+" autoCapitalize="none" autoComplete="username" required placeholder="3–64 位字母、数字或 . _ -"/></label>
+          {bootstrapRequired ? <label>显示名称<Input value={displayName} onChange={(event) => setDisplayName(event.target.value)} minLength={1} maxLength={80} autoComplete="name" required placeholder="例如：项目管理员"/></label> : null}
+          {/* pattern 里的 `-` 必须转义：Chrome 125+ 用 `v` flag 解析它，字符类里未转义的
+              `-` 是语法错误，整个 pattern 会被静默丢弃。见 CLAUDE.md 第七条。 */}
+          <label>用户名<Input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={64} pattern="[A-Za-z0-9._\-]+" autoCapitalize="none" autoComplete="username" required placeholder="3–64 位字母、数字或 . _ -"/></label>
           <label htmlFor="auth-password">密码</label>
           <div className="auth-password-field">
-            <input id="auth-password" type={passwordVisible ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} minLength={bootstrapRequired ? 12 : 1} maxLength={128} autoComplete={bootstrapRequired ? "new-password" : "current-password"} required placeholder={bootstrapRequired ? "至少 12 位" : "输入密码"}/>
-            <button type="button" className="auth-password-toggle" aria-label={passwordVisible ? "隐藏密码" : "显示密码"} aria-pressed={passwordVisible} onClick={() => setPasswordVisible((visible) => !visible)}>
-              {passwordVisible ? <EyeOff size={18}/> : <Eye size={18}/>}
-            </button>
+            <Input id="auth-password" className="pr-10" type={passwordVisible ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} minLength={bootstrapRequired ? 12 : 1} maxLength={128} autoComplete={bootstrapRequired ? "new-password" : "current-password"} required placeholder={bootstrapRequired ? "至少 12 位" : "输入密码"}/>
+            <Button variant="ghost" size="icon" className="absolute right-0.5 top-0.5 text-ink-faint hover:text-brand" aria-label={passwordVisible ? "隐藏密码" : "显示密码"} aria-pressed={passwordVisible} onClick={() => setPasswordVisible((visible) => !visible)}>
+              {passwordVisible ? <EyeOff size={16}/> : <Eye size={16}/>}
+            </Button>
           </div>
           {error ? <div className="auth-error" role="alert">{error}</div> : null}
-          <button type="submit" disabled={submitting}>{submitting ? <><span className="auth-spinner" aria-hidden="true"><LoaderCircle size={16}/></span>处理中…</> : bootstrapRequired ? "创建管理员并进入" : "登录"}</button>
+          <Button type="submit" className="mt-0.5 w-full" loading={submitting}>{submitting ? <><span className="auth-spinner" aria-hidden="true"><LoaderCircle size={16}/></span>处理中…</> : bootstrapRequired ? "创建管理员并进入" : "登录"}</Button>
         </form>
         <p className="auth-note">会话令牌只保存在当前页面内存中，刷新页面后需要重新登录。</p>
       </section>

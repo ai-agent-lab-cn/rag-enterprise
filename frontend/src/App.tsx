@@ -5,6 +5,8 @@ import { AuditPage } from "./components/AuditPage";
 import { AppNavigation, type AppPage } from "./components/AppNavigation";
 import { AuthGate } from "./components/AuthGate";
 import { ChatPage } from "./components/ChatPage";
+import { AcceptancePage } from "./components/AcceptancePage";
+import { BadCasePage } from "./components/BadCasePage";
 import { EvaluationCenterPage } from "./components/EvaluationCenterPage";
 import { DataSourcesPage } from "./components/DataSourcesPage";
 import { KnowledgeBaseDetailPage } from "./components/KnowledgeBaseDetailPage";
@@ -13,13 +15,16 @@ import { MembersPage } from "./components/MembersPage";
 import { OverviewPage } from "./components/OverviewPage";
 import { PermissionDeniedPage } from "./components/PermissionDeniedPage";
 import { SystemPage } from "./components/SystemPage";
+import { Button } from "./components/ui/Button";
 import type { User } from "./types";
-import "./styles.css";
+import "./tailwind.css";
 
 function pageFromPath(path: string): AppPage {
   // 路由状态只由 URL 派生，保证刷新、前进/后退和可分享链接行为一致。
   if (path.startsWith("/knowledge-bases")) return "knowledge-bases";
   if (path === "/data-sources") return "data-sources";
+  if (path.startsWith("/evaluation/bad-cases")) return "bad-cases";
+  if (path.startsWith("/evaluation/acceptance")) return "acceptance";
   if (path.startsWith("/evaluation")) return "evaluation-center";
   if (path.startsWith("/chat")) return "chat";
   if (path === "/system") return "system";
@@ -75,10 +80,19 @@ export default function App() {
     };
   }, []);
   const navigate = (path: string) => {
-    if (path !== window.location.pathname + window.location.search) window.history.pushState({}, "", path);
+    if (path !== window.location.pathname + window.location.search + window.location.hash) {
+      window.history.pushState({}, "", path);
+    }
     setLocation(window.location.pathname + window.location.search);
     if (window.location.pathname !== "/knowledge-bases") setShowKnowledgeBaseCreate(false);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    // 带锚点的目标滚到对应小节，否则回到顶部。锚点所在的 Section 可能还在加载数据，
+    // 所以推迟一帧再找它——直接 scrollIntoView 会因为元素尚未挂载而落空。
+    const hash = window.location.hash;
+    if (hash) {
+      requestAnimationFrame(() => document.querySelector(hash)?.scrollIntoView({ behavior: "smooth" }));
+    } else {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
   };
   const logout = async () => {
     try {
@@ -101,7 +115,9 @@ export default function App() {
   else if (detailMatch) content = <KnowledgeBaseDetailPage id={detailMatch[1]} onOpen={navigate} />;
   else if (pathname === "/knowledge-bases") content = <KnowledgeBasesPage isAdmin={auth.user.role === "admin"} onOpen={navigate} showCreate={showKnowledgeBaseCreate} onCloseCreate={() => setShowKnowledgeBaseCreate(false)} />;
   else if (pathname === "/data-sources") content = <DataSourcesPage onOpen={navigate} />;
-  else if (pathname.startsWith("/evaluation")) content = <EvaluationCenterPage isAdmin={auth.user.role === "admin"} initialTab={pathname === "/evaluation/retrieval" ? "retrieval" : pathname === "/evaluation/answers" ? "answer" : "overview"} />;
+  else if (pathname.startsWith("/evaluation/bad-cases")) content = <BadCasePage isAdmin={auth.user.role === "admin"} />;
+  else if (pathname.startsWith("/evaluation/acceptance")) content = <AcceptancePage isAdmin={auth.user.role === "admin"} />;
+  else if (pathname.startsWith("/evaluation")) content = <EvaluationCenterPage />;
   else if (pathname.startsWith("/chat")) content = <ChatPage conversationId={conversationMatch?.[1]} onOpen={navigate} />;
   else content = <OverviewPage onOpen={navigate} onLogout={() => void logout()} user={auth.user} />;
   const pageLabel: Record<AppPage, string> = {
@@ -110,6 +126,8 @@ export default function App() {
     "data-sources": "数据源管理",
     chat: "对话助手",
     "evaluation-center": "评测中心",
+    "bad-cases": "Bad Case",
+    acceptance: "链路验收",
     system: "系统状态",
     members: "成员与权限",
     audit: "审计记录",
@@ -141,9 +159,7 @@ export default function App() {
               </h1>
               <div className="topbar-context" id="topbar-context" />
               {pathname === "/knowledge-bases" ? (
-                <button className="page-action" type="button" onClick={() => setShowKnowledgeBaseCreate(true)}>
-                  ＋ 新建知识库
-                </button>
+                <Button onClick={() => setShowKnowledgeBaseCreate(true)}>＋ 新建知识库</Button>
               ) : null}
             </div>
             <div className="topbar-actions">
