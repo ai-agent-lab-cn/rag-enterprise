@@ -157,6 +157,7 @@ class CategoryResponse(BaseModel):
     sort_order: int
     active: bool
     is_system: bool
+    origin_type: Literal["template_copy", "manual", "migration"]
     document_count: int = 0
     created_at: datetime
     updated_at: datetime

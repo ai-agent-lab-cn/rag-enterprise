@@ -1,5 +1,6 @@
 import { useRef, type ReactNode } from "react";
 import { Button, type ButtonProps } from "./Button";
+import { normalizeBlockedReason } from "./blockedReason";
 
 /**
  * 触发文件选择的按钮。
@@ -37,7 +38,8 @@ export function FileButton({
   ...rest
 }: FileButtonProps) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const disabled = Boolean(rest.blockedReason) || Boolean(rest.loading);
+  const reasons = normalizeBlockedReason(rest.blockedReason);
+  const disabled = reasons.length > 0 || Boolean(rest.loading);
 
   return (
     <>
@@ -55,7 +57,7 @@ export function FileButton({
         multiple={multiple}
         disabled={disabled}
         aria-label={inputLabel ?? label(children)}
-        title={rest.blockedReason}
+        title={reasons.length > 0 ? reasons.join("、") : undefined}
         onChange={(event) => {
           const files = Array.from(event.target.files ?? []);
           // 先清空再回调：不清的话连选两次同一个文件不会触发 change。

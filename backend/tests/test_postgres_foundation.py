@@ -56,7 +56,58 @@ def test_migration_files_are_contiguous() -> None:
         "0015_default_category_template.sql",
         "0016_nullable_document_category.sql",
         "0017_classification_jobs.sql",
+        "0018_backfill_default_categories.sql",
+        "0019_category_origin.sql",
+        "0020_backfill_proven_template_category_origin.sql",
+        "0021_backfill_transactional_template_category_origin.sql",
     ]
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_schema_nineteen_records_category_origin_without_guessing_history(tmp_path: Path) -> None:
+    database_url = os.environ["TEST_DATABASE_URL"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")
+    assert apply_migrations(database_url, _migrations_up_to(18, tmp_path)) == 18
+
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO knowledge_bases
+               (knowledge_base_id, name, name_normalized, description, is_default,
+                created_at, updated_at)
+               VALUES ('kb_history', '历史库', '历史库', '', false, now(), now())"""
+        )
+        connection.execute(
+            """INSERT INTO document_categories
+               (category_id, knowledge_base_id, name, normalized_name, description, sort_order)
+               VALUES ('cat_history', 'kb_history', '产品资料', '产品资料', '', 100)"""
+        )
+    assert apply_migrations(database_url) == 21
+
+    with psycopg.connect(database_url) as connection:
+        origin = connection.execute(
+            "SELECT origin_type FROM document_categories WHERE category_id='cat_history'"
+        ).fetchone()
+        check = connection.execute(
+            """SELECT check_clause FROM information_schema.check_constraints
+               WHERE constraint_name='document_categories_origin_type_check'"""
+        ).fetchone()
+
+    assert origin == ("migration",), "历史分类不按名称猜测是否来自模板"
+    assert check is not None
+
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO document_categories
+               (category_id, knowledge_base_id, name, normalized_name, description, sort_order)
+               VALUES ('cat_manual_after_upgrade', 'kb_history', '人工分类', '人工分类', '', 200)"""
+        )
+        connection.execute(migration_files()[-2].read_text(encoding="utf-8"))
+        manual_origin = connection.execute(
+            "SELECT origin_type FROM document_categories WHERE category_id='cat_manual_after_upgrade'"
+        ).fetchone()
+    assert manual_origin == ("manual",), "重复执行迁移不能改写升级后创建的来源"
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -71,7 +122,7 @@ def test_schema_sixteen_allows_null_category_and_records_failures() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 17
+    assert apply_migrations(database_url) == 21
 
     with psycopg.connect(database_url) as connection, connection.transaction():
         connection.execute(
@@ -138,15 +189,19 @@ def test_schema_sixteen_allows_null_category_and_records_failures() -> None:
         )
 
 
+def _migrations_up_to(version: int, tmp_path: Path) -> Path:
+    directory = tmp_path / f"migrations_v{version}"
+    directory.mkdir()
+    for path in migration_files():
+        if int(path.name.split("_", maxsplit=1)[0]) <= version:
+            shutil.copy(path, directory / path.name)
+    return directory
+
+
 def _migrations_up_to_fifteen(tmp_path: Path) -> Path:
     """造一个只含 0001–0015 的迁移目录，用来模拟升级前的真实库。"""
 
-    directory = tmp_path / "migrations_v15"
-    directory.mkdir()
-    for path in migration_files():
-        if not path.name.startswith(("0016_", "0017_")):
-            shutil.copy(path, directory / path.name)
-    return directory
+    return _migrations_up_to(15, tmp_path)
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -209,7 +264,7 @@ def test_schema_fifteen_data_upgrades_to_sixteen(tmp_path: Path) -> None:
                 ),
             )
 
-    assert apply_migrations(database_url) == 17
+    assert apply_migrations(database_url) == 21
 
     with psycopg.connect(database_url) as connection:
         remaining = [
@@ -261,7 +316,7 @@ def test_user_created_category_named_uncategorized_survives_migration(tmp_path: 
                        '业务上就叫这个名字', 100, true, false)"""
         )
 
-    assert apply_migrations(database_url) == 17
+    assert apply_migrations(database_url) == 21
 
     with psycopg.connect(database_url) as connection:
         survived = connection.execute(
@@ -278,12 +333,12 @@ def test_schema_sixteen_migration_is_idempotent() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 17
+    assert apply_migrations(database_url) == 21
 
     with psycopg.connect(database_url) as connection:
         before = connection.execute("SELECT count(*) FROM document_categories").fetchone()[0]
 
-    assert apply_migrations(database_url) == 17
+    assert apply_migrations(database_url) == 21
 
     with psycopg.connect(database_url) as connection:
         after = connection.execute("SELECT count(*) FROM document_categories").fetchone()[0]
@@ -296,7 +351,7 @@ def test_schema_thirteen_adds_evaluation_and_bad_case_governance() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-        assert apply_migrations(database_url) == 17
+        assert apply_migrations(database_url) == 21
 
     with psycopg.connect(database_url) as connection:
         tables = {
@@ -315,7 +370,7 @@ def test_schema_fourteen_adds_acceptance_runs() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 17
+    assert apply_migrations(database_url) == 21
 
     with psycopg.connect(database_url) as connection:
         assert connection.execute(
@@ -329,7 +384,7 @@ def test_schema_fifteen_adds_seeded_default_category_template() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 17
+    assert apply_migrations(database_url) == 21
 
     with psycopg.connect(database_url) as connection:
         template = connection.execute(
@@ -351,7 +406,7 @@ def test_new_knowledge_base_copies_active_template_as_independent_categories() -
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 17
+    assert apply_migrations(database_url) == 21
 
     templates = PostgresCategoryTemplateRepository(database_url)
     disabled = templates.create_item("停用分类", "不会复制", 700)
@@ -362,22 +417,41 @@ def test_new_knowledge_base_copies_active_template_as_independent_categories() -
 
     with psycopg.connect(database_url) as connection:
         default_categories = connection.execute(
-            "SELECT name, is_system FROM document_categories WHERE knowledge_base_id='kb_default'"
+            """SELECT name, is_system, origin_type
+               FROM document_categories WHERE knowledge_base_id='kb_default'"""
         ).fetchall()
         first_categories = connection.execute(
-            "SELECT name, is_system FROM document_categories WHERE knowledge_base_id=%s ORDER BY sort_order",
+            """SELECT name, is_system, origin_type FROM document_categories
+               WHERE knowledge_base_id=%s ORDER BY sort_order""",
             (first.knowledge_base_id,),
         ).fetchall()
         second_categories = connection.execute(
             "SELECT name, is_system FROM document_categories WHERE knowledge_base_id=%s",
             (second.knowledge_base_id,),
         ).fetchall()
-    assert default_categories == [], "默认知识库不得再自动生成系统分类"
+    assert [item[0] for item in default_categories] == [
+        "产品资料", "技术文档", "操作手册", "运维文档", "制度规范", "常见问题"
+    ], "升级后仅为原本没有分类的默认知识库补齐模板分类"
+    assert all(item[1] is False for item in default_categories), "回填项不是系统分类"
+    assert {item[2] for item in default_categories} == {"template_copy"}, "默认库补齐明确来自模板"
     assert [item[0] for item in first_categories] == [
         "产品资料", "技术文档", "操作手册", "运维文档", "制度规范", "常见问题"
     ]
     assert all(item[1] is False for item in first_categories), "模板分类都是普通分类"
+    assert {item[2] for item in first_categories} == {"template_copy"}
     assert second_categories == [], "关闭模板时分类列表允许为空"
+
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute("DELETE FROM document_categories WHERE knowledge_base_id='kb_default'")
+    PostgresKnowledgeBaseRepository(database_url)
+    with psycopg.connect(database_url) as connection:
+        backfilled_origins = {
+            row[0]
+            for row in connection.execute(
+                "SELECT origin_type FROM document_categories WHERE knowledge_base_id='kb_default'"
+            ).fetchall()
+        }
+    assert backfilled_origins == {"template_copy"}, "运行时补齐明确来自默认模板"
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -392,7 +466,7 @@ def test_uncategorized_becomes_an_ordinary_category_name() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 17
+    assert apply_migrations(database_url) == 21
 
     repository = PostgresKnowledgeBaseRepository(database_url)
     knowledge_base = repository.create("普通库", "", False)
@@ -400,11 +474,13 @@ def test_uncategorized_becomes_an_ordinary_category_name() -> None:
 
     created = categories.create(knowledge_base.knowledge_base_id, "未分类", "普通分类", 100)
     assert created["is_system"] is False
+    assert created["origin_type"] == "manual"
 
     renamed = categories.update(
         knowledge_base.knowledge_base_id, str(created["category_id"]), "归档中", "", 100, True
     )
     assert renamed is not None and renamed["name"] == "归档中"
+    assert renamed["origin_type"] == "manual", "编辑分类不能改变初始来源"
 
     assert categories.delete(knowledge_base.knowledge_base_id, str(created["category_id"])) is True
 
@@ -415,7 +491,7 @@ def test_category_name_must_be_non_empty_and_unique_ignoring_case() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 17
+    assert apply_migrations(database_url) == 21
 
     knowledge_base = PostgresKnowledgeBaseRepository(database_url).create("校验库", "", False)
     categories = PostgresCategoryRepository(database_url)
@@ -433,7 +509,7 @@ def test_schema_twelve_adds_sync_run_governance() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 17
+    assert apply_migrations(database_url) == 21
 
     with psycopg.connect(database_url) as connection:
         columns = {
@@ -523,8 +599,8 @@ def test_schema_two_with_existing_data_upgrades_to_schema_three(tmp_path: Path) 
             (now, now),
         )
 
-    assert apply_migrations(database_url) == 17
-    check_schema_version(database_url, 17)
+    assert apply_migrations(database_url) == 21
+    check_schema_version(database_url, 21)
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
             "SELECT status, chunking_version FROM document_versions WHERE document_version_id = 'ver_legacy'"
@@ -619,8 +695,8 @@ def test_postgres_runtime_covers_auth_indexing_and_backup(tmp_path: Path) -> Non
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 17
-    check_schema_version(database_url, 17)
+    assert apply_migrations(database_url) == 21
+    check_schema_version(database_url, 21)
 
     now = datetime.now(UTC)
     with psycopg.connect(database_url) as connection, connection.transaction():
@@ -819,8 +895,8 @@ def test_schema_nine_with_existing_chunks_upgrades_to_schema_ten(tmp_path: Path)
             (json.dumps({"document_id": "doc_legacy"}), now),
         )
 
-    assert apply_migrations(database_url) == 17
-    check_schema_version(database_url, 17)
+    assert apply_migrations(database_url) == 21
+    check_schema_version(database_url, 21)
 
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
@@ -858,7 +934,7 @@ def test_schema_ten_on_empty_database_keeps_embedding_unconstrained(tmp_path: Pa
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 17
+    assert apply_migrations(database_url) == 21
     with psycopg.connect(database_url) as connection:
         assert (
             connection.execute(
@@ -922,8 +998,8 @@ def test_schema_eleven_allows_sync_jobs_and_local_directory_sources(tmp_path: Pa
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 17
-    check_schema_version(database_url, 17)
+    assert apply_migrations(database_url) == 21
+    check_schema_version(database_url, 21)
 
     now = datetime.now(UTC)
     with psycopg.connect(database_url) as connection, connection.transaction():

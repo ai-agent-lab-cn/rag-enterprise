@@ -58,6 +58,7 @@ const dataSource = {
 const category = {
   category_id: "cat_1234567890abcdef", knowledge_base_id: "kb_default", name: "安全",
   description: "安全资料", sort_order: 100, active: true, is_system: false,
+  origin_type: "migration" as const,
   document_count: 1, created_at: "2026-08-12T00:00:00Z", updated_at: "2026-08-12T00:00:00Z",
 };
 const categoryTemplate = {
@@ -166,7 +167,7 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
     );
   if (url === "/api/members?offset=0&limit=100") return Promise.resolve(json([admin, member]));
   if (url === "/api/knowledge-bases/kb_default/members?offset=0&limit=100") return Promise.resolve(json([member]));
-  if (url === "/api/audit/events?offset=0&limit=100")
+  if (url === "/api/audit/events?offset=0&limit=51")
     return Promise.resolve(
       json([
         {
@@ -321,7 +322,9 @@ test("文件数据源使用更新文件创建新版本", async () => {
   window.history.replaceState({}, "", "/data-sources");
   render(<App />);
   expect(screen.queryByRole("button", { name: "同步" })).not.toBeInTheDocument();
-  await userEvent.upload(await screen.findByLabelText("更新 profile.md"), new File(["updated"], "profile.md", { type: "text/markdown" }));
+  // RowActions 统一了可访问名格式为「{rowLabel} 的{action.label}」（见 ui/RowActions.tsx），
+  // 不再是页面自己拼的「更新 {name}」。
+  await userEvent.upload(await screen.findByLabelText("profile.md 的更新文件"), new File(["updated"], "profile.md", { type: "text/markdown" }));
   expect(await screen.findByRole("status")).toHaveTextContent("新版本已上传并加入索引队列");
   expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/documents", expect.objectContaining({ method: "POST" }));
 });
@@ -337,8 +340,14 @@ test("索引处理中自动刷新数据源状态", async () => {
   });
   window.history.replaceState({}, "", "/data-sources");
   render(<App />);
-  expect(await screen.findByText("等待索引")).toHaveClass("index-loading");
-  expect(screen.getByText("等待索引")).toHaveAttribute("aria-busy", "true");
+  // Badge 不透传任意 DOM 属性，aria-busy 挂在包装它的 span 上（见 DataSourcesPage.tsx
+  // 索引状态列的注释），不再和旋转动画的 class 落在同一个节点。
+  // .index-loading 已在 UI Foundation 阶段 5 Task 4 收口为内联 utility class（不再是
+  // 具名 class），断言改为检查旋转动画本身的 utility（对应 ::before 的 animation），
+  // 意图不变：只有「加载中」态才应该带这个旋转指示器。
+  const indexBadge = await screen.findByText("等待索引");
+  expect(indexBadge).toHaveClass("before:[animation:spin_0.7s_linear_infinite]");
+  expect(indexBadge.closest("[aria-busy]")).toHaveAttribute("aria-busy", "true");
   expect(await screen.findByText("索引完成", {}, { timeout: 2_000 })).toBeInTheDocument();
   expect(sourceRequests).toBe(2);
 });
@@ -348,19 +357,24 @@ test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
   window.history.replaceState({}, "", "/knowledge-bases");
   render(<App />);
   expect(await screen.findByRole("region", { name: "知识库管理" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "＋ 新建知识库" }).closest(".topbar")).not.toBeNull();
+  expect(screen.getByRole("button", { name: "＋ 新建知识库" }).closest("header")).not.toBeNull();
   expect(globalThis.document.querySelector(".page-heading.bases-toolbar")).toBeNull();
   expect(screen.queryByText("为不同项目建立隔离的资料、索引与会话空间。")).not.toBeInTheDocument();
   expect(globalThis.document.querySelector(".base-icon")).toBeNull();
   expect(await screen.findByRole("columnheader", { name: "知识库名称" })).toBeInTheDocument();
   expect(screen.getByRole("columnheader", { name: "存储空间" })).toBeInTheDocument();
   expect(screen.getByRole("columnheader", { name: "状态" })).toBeInTheDocument();
-  expect(screen.getByText("默认知识库", { selector: ".base-type-tag" })).toHaveClass("is-default");
-  await userEvent.click(await screen.findByRole("button", { name: "详情" }));
+  // DataTable 的表头是同步渲染的（不等数据），不能再靠等表头来间接等到数据加载完成——
+  // 这里必须直接等行内容出现（含 250ms 防抖 + 请求往返）。
+  expect(await screen.findByText("默认知识库", { selector: "span" })).toHaveClass("bg-brand-subtle");
+  // 行操作直接展示，不再需要先打开「更多操作」菜单。
+  const baseRow = screen.getByRole("button", { name: "默认知识库" }).closest("tr") as HTMLElement;
+  await userEvent.click(within(baseRow).getByRole("button", { name: "详情" }));
   expect(await screen.findByText("profile.md")).toBeInTheDocument();
   expect(screen.queryByText("正在读取知识库详情…")).not.toBeInTheDocument();
   expect(screen.getByRole("tab", { name: /资料/ })).toHaveAttribute("aria-selected", "true");
-  await userEvent.click(screen.getByRole("button", { name: "编辑 profile.md 元数据" }));
+  // profile.md 分类状态是 manual，只有「编辑/删除」两个操作，走平铺而非菜单。
+  await userEvent.click(screen.getByRole("button", { name: "编辑" }));
   expect(screen.getByRole("dialog", { name: "编辑资料元数据" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "取消" }));
   await userEvent.click(screen.getByRole("tab", { name: /版本治理/ }));
@@ -385,6 +399,45 @@ test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
     expect.objectContaining({ method: "PUT" }),
   ));
   expect(window.location.pathname).toBe("/knowledge-bases/kb_default");
+});
+
+test("编辑资料元数据时按分类 ID 选择并保存分类", async () => {
+  const productCategory = {
+    ...category,
+    category_id: "cat_product",
+    name: "产品资料",
+    description: "产品介绍、规格与方案资料",
+    document_count: 0,
+  };
+  const requests: Array<{ url: string; body: unknown }> = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const url = String(input);
+    if (url === "/api/knowledge-bases/kb_default/categories") {
+      return Promise.resolve(json([category, productCategory]));
+    }
+    if (url === "/api/knowledge-bases/kb_default/documents/categories" && init?.method === "PUT") {
+      requests.push({ url, body: JSON.parse(String(init.body)) });
+      return Promise.resolve(json({ updated: 1 }));
+    }
+    if (url === "/api/knowledge-bases/kb_default/documents/doc_1/metadata" && init?.method === "PATCH") {
+      return Promise.resolve(json({ ...document, category: "产品资料", category_id: "cat_product" }));
+    }
+    return commonFetch(input, init);
+  });
+
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default");
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", { name: "编辑" }));
+  const metadataDialog = screen.getByRole("dialog", { name: "编辑资料元数据" });
+  const categorySelect = within(metadataDialog).getByLabelText("分类");
+  await userEvent.selectOptions(categorySelect, "cat_product");
+  expect(categorySelect).toHaveValue("cat_product");
+  await userEvent.click(within(metadataDialog).getByRole("button", { name: "保存" }));
+
+  await waitFor(() => expect(requests).toContainEqual({
+    url: "/api/knowledge-bases/kb_default/documents/categories",
+    body: { document_ids: ["doc_1"], category_id: "cat_product" },
+  }));
 });
 
 test("知识库详情提供数据源同步治理 Tab", async () => {
@@ -439,7 +492,7 @@ test("管理员可在知识库列表治理默认分类模板", async () => {
 
   expect(screen.getByRole("dialog", { name: "默认分类模板" })).toBeInTheDocument();
   expect(screen.queryByText(/个分类 · 更新于/)).not.toBeInTheDocument();
-  expect(screen.getByText("模板只在创建知识库时复制，修改模板不会影响已有知识库。")).toBeInTheDocument();
+  expect(screen.getByText("此处管理新知识库的初始分类模板，不会修改已有知识库分类。")).toBeInTheDocument();
   expect(screen.getAllByText("产品资料").length).toBeGreaterThan(0);
   expect(screen.getByText("运维文档")).toBeInTheDocument();
   expect(screen.getByText(/已停用/)).toBeInTheDocument();
@@ -518,7 +571,7 @@ test("分类失败展示原因并提供重新分类入口", async () => {
   expect(within(row).getByText(/分类失败/)).toBeTruthy();
   expect(within(row).getByText(/模型 30 秒未响应/)).toBeTruthy();
 
-  await userEvent.click(within(row).getByRole("button", { name: /重新分类/ }));
+  await userEvent.click(within(row).getByRole("button", { name: "重新分类" }));
 
   await waitFor(() =>
     expect(fetchMock).toHaveBeenCalledWith(
@@ -561,18 +614,23 @@ test("分类字典为空时给出明确空态而不是凭空造一个分类", as
 
   await userEvent.click(await screen.findByRole("tab", { name: /分类管理/ }));
 
-  expect(await screen.findByText("暂无分类")).toBeTruthy();
+  expect(await screen.findByText("暂无知识库独立分类")).toBeTruthy();
 });
 
 test("删除资料使用站内确认弹框", async () => {
   const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
   window.history.replaceState({}, "", "/knowledge-bases/kb_default");
   render(<App />);
-  await userEvent.click(await screen.findByRole("button", { name: "删除 profile.md" }));
+  // profile.md 分类状态是 manual，只有「编辑/删除」两个操作，走平铺而非菜单。
+  await userEvent.click(await screen.findByRole("button", { name: "删除" }));
   // 弹层打开时 Radix 会给背景内容加 aria-hidden，所以要显式查隐藏元素。断言的意图
   // 不变：这是站内弹框，页面内容仍在（而不是浏览器原生 confirm）。
+  // .detail-toolbar 已随 KnowledgeBaseDetailPage 迁移到基座被删除（见 UI Foundation
+  // 阶段 3 Task 5），改为锚定页面外层容器，断言意图不变：弹层打开后背景内容仍在渲染。
+  // .product-page 已在 UI Foundation 阶段 5 Task 4 收口为 utility class，改为锚定
+  // 最近的 <section> 容器（页面顶层唯一祖先 section），断言意图不变。
   expect(
-    screen.getByRole("button", { name: "在此知识库提问 →", hidden: true }).closest(".detail-toolbar"),
+    screen.getByRole("button", { name: "在此知识库提问 →", hidden: true }).closest("section"),
   ).not.toBeNull();
   expect(screen.getByText("V2 迁移资料")).toBeInTheDocument();
   expect(screen.getByRole("dialog", { name: "删除资料" })).toHaveTextContent("profile.md");
@@ -585,7 +643,9 @@ test("问答工作台使用所选知识库接口并渲染来源", async () => {
   window.history.replaceState({}, "", "/chat?knowledge_base_id=kb_default");
   render(<App />);
   const basePicker = await screen.findByLabelText("当前知识库");
-  expect(basePicker.closest(".question-box")).not.toBeNull();
+  // 断言的是"知识库选择器在提问表单内"这件事，不是某个 legacy class 是否存在——
+  // 迁移后 question-box 类被移除，用语义标签 <form> 重新表达同一个断言意图。
+  expect(basePicker.closest("form")).not.toBeNull();
   expect(screen.getByRole("tab", { name: /引用来源/ })).toHaveAttribute("aria-selected", "true");
   expect(screen.queryByRole("tab", { name: /资料库/ })).not.toBeInTheDocument();
   await screen.findByRole("option", { name: "安全" });
@@ -677,8 +737,8 @@ test("回答评测页只读展示正式指标", async () => {
   // 顶栏只留评测中心的统一质量门结论：三个 Section 各塞一个徽章会并排堆在一起，
   // 既重复又说不清哪个是哪个。分项结论回到各自小节内部。
   expect(await screen.findByText("回答质量门已通过")).toBeInTheDocument();
-  expect(screen.getByText("回答质量门已通过").closest(".topbar")).toBeNull();
-  expect(screen.getByText("回答质量门已通过").closest(".answer-evaluation-page")).not.toBeNull();
+  expect(screen.getByText("回答质量门已通过").closest("header")).toBeNull();
+  expect(screen.getByText("回答质量门已通过").closest('[aria-label="回答评测"]')).not.toBeNull();
   expect(screen.queryByText("只读质量证据")).not.toBeInTheDocument();
   expect(screen.queryByText("正确性、引用准确性、幻觉风险与失败策略的正式基线。")).not.toBeInTheDocument();
   expect(screen.getByText("回答正确性")).toBeInTheDocument();
@@ -833,7 +893,7 @@ test("管理员可查看系统状态、模型和恢复边界", async () => {
   render(<App />);
   expect(await screen.findByRole("heading", { name: "系统状态" })).toBeInTheDocument();
   expect(await screen.findByText("服务已就绪")).toBeInTheDocument();
-  expect(screen.getByText("服务已就绪").closest(".topbar")).not.toBeNull();
+  expect(screen.getByText("服务已就绪").closest("header")).not.toBeNull();
   expect(screen.queryByText("查看服务健康、模型配置、运行指标与恢复边界。")).not.toBeInTheDocument();
   expect(screen.getByText("隔离恢复")).toBeInTheDocument();
   expect(screen.getAllByText("embedding-test")).toHaveLength(2);
@@ -845,7 +905,7 @@ test("管理员可查看成员授权并对敏感变更二次确认", async () =>
   render(<App />);
   expect(await screen.findByRole("heading", { name: "成员与权限" })).toBeInTheDocument();
   expect(await screen.findByText("资料成员")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "新建成员" }).closest(".topbar")).not.toBeNull();
+  expect(screen.getByRole("button", { name: "新建成员" }).closest("header")).not.toBeNull();
   await userEvent.click(screen.getAllByRole("button", { name: "停用" }).find((button) => !button.hasAttribute("disabled"))!);
   expect(screen.getByRole("dialog", { name: "停用成员" })).toBeInTheDocument();
 });
@@ -856,7 +916,7 @@ test("审计页展示哈希链事件且不展示业务正文", async () => {
   render(<App />);
   expect(await screen.findByRole("heading", { name: "审计记录" })).toBeInTheDocument();
   expect(await screen.findByText("更新成员")).toBeInTheDocument();
-  expect(screen.getByText("哈希链由服务端校验").closest(".topbar")).not.toBeNull();
+  expect(screen.getByText("哈希链由服务端校验").closest("header")).not.toBeNull();
   expect(screen.getByText("bbbbbbbbbbbbbbbb")).toBeInTheDocument();
 });
 
@@ -929,12 +989,13 @@ test("知识库删除走确认弹层，不能删的原因在弹层里讲清楚",
   window.history.replaceState({}, "", "/knowledge-bases");
   render(<App />);
 
+  // 每行操作直接平铺，删除仍走原确认弹层。
   const rowOf = async (name: string) =>
-    (await screen.findByText(name, { selector: ".table-primary-link" })).closest("tr") as HTMLElement;
+    (await screen.findByRole("button", { name })).closest("tr") as HTMLElement;
 
-  // 所有删除按钮都可点，列表里没有占位小字。
+  // 所有删除项都直接可见且可点，行内没有占位小字。
   for (const name of ["默认知识库", "有资料的库", "空库"]) {
-    expect(within(await rowOf(name)).getByRole("button", { name: "删除" })).toBeEnabled();
+    expect(within(await rowOf(name)).getByRole("button", { name: "删除" })).not.toBeDisabled();
   }
   expect(screen.queryByText(/请先删除/)).toBeNull();
 
@@ -1000,6 +1061,54 @@ test("新建分类复用编辑弹层：三个字段一次填完，排序默认�
       sort_order: 200,
     });
   });
+});
+
+test("分类管理复用知识库管理的数据表格结构", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default");
+  render(<App />);
+  await userEvent.click(await screen.findByRole("tab", { name: /分类管理/ }));
+
+  const table = screen.getByRole("table", { name: "分类管理列表" });
+  expect(within(table).getByRole("columnheader", { name: "分类名称" })).toBeVisible();
+  expect(within(table).getByRole("columnheader", { name: "描述" })).toBeVisible();
+  expect(within(table).getByRole("columnheader", { name: "资料数量" })).toBeVisible();
+  expect(within(table).getByRole("columnheader", { name: "排序" })).toBeVisible();
+  expect(within(table).getByRole("columnheader", { name: "初始来源" })).toBeVisible();
+  expect(within(table).getByRole("columnheader", { name: "状态" })).toBeVisible();
+  expect(within(table).getByRole("columnheader", { name: "操作" })).toBeVisible();
+  expect(within(table).getByText("安全资料")).toBeVisible();
+  expect(within(table).getByText("1")).toBeVisible();
+  expect(within(table).getByText("100")).toBeVisible();
+  expect(within(table).getByText("历史迁移")).toBeVisible();
+  expect(within(table).getByText("启用")).toBeVisible();
+  expect(screen.getByText("以下是本知识库独立维护的分类，不会同步到默认模板。")).toBeVisible();
+});
+
+test("分类管理将模板复制分类移出表格并保持只读", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/knowledge-bases/kb_default/categories") {
+      return Promise.resolve(json([
+        { ...category, category_id: "cat_template", name: "产品资料", origin_type: "template_copy" },
+        { ...category, category_id: "cat_manual", name: "项目约定", origin_type: "manual" },
+        category,
+      ]));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default");
+  render(<App />);
+  await userEvent.click(await screen.findByRole("tab", { name: /分类管理/ }));
+
+  const templateRegion = screen.getByRole("region", { name: "默认模板分类" });
+  const table = screen.getByRole("table", { name: "分类管理列表" });
+  expect(within(templateRegion).getByText("产品资料")).toBeVisible();
+  expect(within(templateRegion).queryByRole("button", { name: /编辑|停用|删除/ })).toBeNull();
+  expect(within(table).queryByText("产品资料")).toBeNull();
+  expect(within(table).getByText("项目约定")).toBeVisible();
+  expect(within(table).getByText("安全")).toBeVisible();
+  expect(within(table).getByText("手动创建")).toBeVisible();
+  expect(within(table).getByText("历史迁移")).toBeVisible();
 });
 
 test("新建分类的空名称：按钮可点击并报错，与模板弹框一致", async () => {

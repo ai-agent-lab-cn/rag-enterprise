@@ -90,6 +90,27 @@ async function freeze(page: Page) {
 test.describe("视觉基线", () => {
   test.skip(!username || !password, "需要管理员凭据；见文件头的生成命令");
 
+  // 登录页此前完全不在基线覆盖内：signIn() 是每个截图点的第一步，17 张里没有一张是
+  // 登录页。阶段 4 迁移 AuthGate 时，`bg-[radial-gradient(...),#fafbfe]` 被 Tailwind
+  // 编译成非法的 background-color 值，浏览器整条丢弃——径向光晕整个消失，基线全绿，
+  // 是人工审查而非自动化抓到的。这个测试不登录，也不消耗登录限流配额。
+  test("登录页视觉", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "登录 RAG 工作台" })).toBeVisible();
+    await freeze(page);
+    await expect.soft(page).toHaveScreenshot("auth-login.png", { fullPage: true });
+
+    // bootstrapRequired（首次建管理员）分支：拦截 bootstrap 状态接口构造出这个状态，
+    // 不清空真实后端 auth store——这个环境已经有管理员，清空是破坏性操作。
+    await page.route("**/api/auth/bootstrap", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ required: true }) }),
+    );
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "创建首位管理员" })).toBeVisible();
+    await freeze(page);
+    await expect.soft(page).toHaveScreenshot("auth-bootstrap.png", { fullPage: true });
+  });
+
   // 用 expect.soft：一次跑完能看到全部差异，而不是第一处不同就中断——迁移后对比时
   // 需要的是「哪些页面变了」的完整清单。
   // 全部页面共用一次登录：令牌只存在页面内存里，storageState 存不下，而后端登录限流
@@ -107,6 +128,53 @@ test.describe("视觉基线", () => {
       await freeze(page);
       await expect.soft(page).toHaveScreenshot(`${item.name}.png`, { fullPage: true });
     }
+
+    // Overview 的加载 / 错误 / 空三态。此前 13 个截图点全是登录后的正常态：阶段 5 新建
+    // ErrorBanner 收口 23 处错误横幅时，17 张零差异——没有一个截图点触发过错误态，改动
+    // 根本没进入任何截图的 DOM。全部用 page.route() 拦截构造，不触发真实写操作；每一态
+    // 之间先切到「问答工作台」再切回「概览」，让组件重新挂载、重新发起请求——上一态挂起
+    // 或拦截的请求不会自愈。
+    await page.route("**/api/knowledge-bases", async () => {
+      // 故意不 resolve：模拟请求一直挂起，用于验证加载态。
+      await new Promise(() => {});
+    });
+    await page.getByRole("button", { name: "概览", exact: true }).first().click();
+    await expect(page.getByText("正在汇总项目数据…")).toBeVisible();
+    await freeze(page);
+    await expect.soft(page).toHaveScreenshot("overview-loading.png", { fullPage: true });
+    await page.unroute("**/api/knowledge-bases");
+
+    await page.getByRole("button", { name: "问答工作台", exact: true }).first().click();
+    await expect(page.getByRole("heading", { name: "对话助手" }).first()).toBeVisible();
+
+    await page.route("**/api/knowledge-bases", (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { message: "知识库服务暂时不可用，请稍后重试。" } }),
+      }),
+    );
+    await page.getByRole("button", { name: "概览", exact: true }).first().click();
+    await expect(page.getByRole("alert")).toBeVisible();
+    await freeze(page);
+    await expect.soft(page).toHaveScreenshot("overview-error.png", { fullPage: true });
+    await page.unroute("**/api/knowledge-bases");
+
+    await page.getByRole("button", { name: "问答工作台", exact: true }).first().click();
+    await expect(page.getByRole("heading", { name: "对话助手" }).first()).toBeVisible();
+
+    await page.route("**/api/knowledge-bases", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+    );
+    await page.route("**/api/evaluations/answers/reports", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+    );
+    await page.getByRole("button", { name: "概览", exact: true }).first().click();
+    await expect(page.getByText("还没有知识库。")).toBeVisible();
+    await freeze(page);
+    await expect.soft(page).toHaveScreenshot("overview-empty.png", { fullPage: true });
+    await page.unroute("**/api/knowledge-bases");
+    await page.unroute("**/api/evaluations/answers/reports");
 
     // 知识库详情的全部 7 个 Tab。这个页面横跨四个组件文件（详情页本体 + DocumentPanel
     // + KnowledgeBaseDataSourcesPanel + ParsingPanel），只拍其中两个 Tab 的话，

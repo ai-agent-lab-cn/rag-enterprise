@@ -53,16 +53,63 @@ test("只有该有边框的 variant 才有边框", () => {
   expect(classOf("outline")).not.toContain("border-0");
 });
 
-test("给了原因才禁用，且原因可见", async () => {
+test("给了原因才禁用，原因由 title 与独立的 ⓘ 双重呈现", async () => {
   // CLAUDE.md 第一条的编码化：组件不暴露 disabled，禁用只能通过 blockedReason 表达，
   // 于是「点不动又不解释自己的按钮」在类型层面就不存在。
   render(<Button blockedReason="默认知识库不能删除">删除</Button>);
 
-  const button = screen.getByRole("button", { name: /删除/ });
+  // 精确匹配按钮文案：正则 /删除/ 会连带匹配到 ⓘ 的 aria-label（其中含有
+  // 「不能删除」），两个可用元素同名会让查询直接抛错。
+  const button = screen.getByRole("button", { name: "删除" });
   expect(button).toBeDisabled();
-  expect(screen.getByText("默认知识库不能删除")).toBeVisible();
-  // 同时保留 title：鼠标用户悬停也能看到，两条路都通。
+  // 鼠标用户悬停主按钮也能看到，两条路都通。
   expect(button).toHaveAttribute("title", "默认知识库不能删除");
+});
+
+test("禁用原因由独立的 ⓘ 承载，不占据行高", async () => {
+  render(<Button blockedReason="默认知识库不能删除">删除</Button>);
+
+  const action = screen.getByRole("button", { name: "删除" });
+  expect(action).toBeDisabled();
+
+  // 原因不再是按钮下方的块级小字——那会把表格行撑高。
+  expect(screen.queryByText("默认知识库不能删除")).toBeNull();
+
+  // 取而代之的是一个独立的、**可用的** ⓘ。它必须自己可聚焦：
+  // 真实浏览器里 disabled 的 button 不派发 pointerenter，把 Tooltip 包在
+  // 禁用按钮外面在 jsdom 里会绿，在浏览器里永远弹不出来。
+  const hint = screen.getByRole("button", { name: /默认知识库不能删除/ });
+  expect(hint).not.toBe(action);
+  expect(hint).toBeEnabled();
+});
+
+test("ⓘ 悬停后弹出原因", async () => {
+  render(<Button blockedReason="默认知识库不能删除">删除</Button>);
+
+  await userEvent.hover(screen.getByRole("button", { name: /默认知识库不能删除/ }));
+  const shown = await screen.findAllByText("默认知识库不能删除");
+  expect(shown.length).toBeGreaterThan(0);
+});
+
+test("多个原因合并进同一个 ⓘ", async () => {
+  render(<Button blockedReason={["请先勾选资料", "请先选择目标分类"]}>应用到 0 份</Button>);
+
+  const hint = screen.getByRole("button", { name: /请先勾选资料、请先选择目标分类/ });
+  await userEvent.hover(hint);
+  expect((await screen.findAllByText(/请先勾选资料、请先选择目标分类/)).length).toBeGreaterThan(0);
+});
+
+test("没有原因时不渲染 ⓘ", () => {
+  render(<Button>删除</Button>);
+
+  expect(screen.getAllByRole("button")).toHaveLength(1);
+});
+
+test("loading 期间不渲染 ⓘ", () => {
+  // loading 是短暂状态，组件自己用 title 解释，不必多挂一个图标。
+  render(<Button loading>保存</Button>);
+
+  expect(screen.getAllByRole("button")).toHaveLength(1);
 });
 
 test("loading 期间禁止重复提交", async () => {
@@ -113,12 +160,39 @@ test("外部 className 能覆盖内部同类样式而不是叠加冲突", () => 
   expect(cls).not.toContain("bg-brand");
 });
 
-test("reasonHidden 只藏可见小字，禁用与 title 都还在", () => {
-  // 用于「应用到 0 份」这类文案自带原因的按钮：再补一句提示只是重复，还撑开布局。
-  render(<Button reasonHidden blockedReason="请先勾选资料">应用到 0 份</Button>);
+test("多个原因全部列出，不再只显示第一个", () => {
+  // DocumentPanel 的「应用到 N 份」有两个禁用条件，三元表达式只能显示第一个。
+  // 勾了 3 份没选分类时，文案里的 3 已经不解释任何事了。
+  render(<Button blockedReason={["请先勾选资料", "请先选择目标分类"]}>应用到 0 份</Button>);
 
-  const button = screen.getByRole("button", { name: /应用到/ });
+  expect(screen.getByRole("button", { name: /应用到/ })).toBeDisabled();
+  const hint = screen.getByRole("button", { name: /为什么不可用/ });
+  expect(hint).toHaveAccessibleName(/请先勾选资料/);
+  expect(hint).toHaveAccessibleName(/请先选择目标分类/);
+});
+
+test("多个原因在 title 里用顿号连接", () => {
+  render(<Button blockedReason={["请先勾选资料", "请先选择目标分类"]}>应用到 0 份</Button>);
+
+  expect(screen.getByRole("button", { name: /应用到/ })).toHaveAttribute(
+    "title",
+    "请先勾选资料、请先选择目标分类",
+  );
+});
+
+test("空数组等于没有原因，按钮可用", () => {
+  // 调用方常写 `blockedReason={reasons}`，而 reasons 是 filter 出来的。
+  // 空数组必须等价于 undefined，否则「条件都满足了按钮还是灰的」。
+  render(<Button blockedReason={[]}>提交</Button>);
+
+  expect(screen.getByRole("button", { name: "提交" })).toBeEnabled();
+});
+
+test("单字符串行为完全不变", () => {
+  render(<Button blockedReason="默认知识库不能删除">删除</Button>);
+
+  const button = screen.getByRole("button", { name: "删除" });
   expect(button).toBeDisabled();
-  expect(button).toHaveAttribute("title", "请先勾选资料");
-  expect(screen.queryByText("请先勾选资料")).toBeNull();
+  expect(button).toHaveAttribute("title", "默认知识库不能删除");
+  expect(screen.getByRole("button", { name: /默认知识库不能删除/ })).toBeEnabled();
 });

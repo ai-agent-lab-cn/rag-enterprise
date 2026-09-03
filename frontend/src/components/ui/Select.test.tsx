@@ -51,7 +51,39 @@ test("禁用时必须给出可见原因", () => {
   );
 
   expect(screen.getByLabelText("目标分类")).toBeDisabled();
-  expect(screen.getByText("请先建立分类")).toBeVisible();
+  expect(screen.getByRole("button", { name: /请先建立分类/ })).toBeVisible();
+});
+
+test("禁用原因由独立的 ⓘ 承载，不占据行高", async () => {
+  render(
+    <Select aria-label="目标分类" blockedReason="请先建立分类">
+      <option>a</option>
+    </Select>,
+  );
+
+  const select = screen.getByLabelText("目标分类");
+  expect(select).toBeDisabled();
+
+  // 原因不再是控件下方的块级小字——那会把表格行撑高。
+  expect(screen.queryByText("请先建立分类")).toBeNull();
+
+  // 取而代之的是一个独立的、**可用的** ⓘ：原生 disabled 的表单控件不派发
+  // pointerenter，把 Tooltip 包在禁用控件外面在 jsdom 里会绿，浏览器里永远弹不出来。
+  const hint = screen.getByRole("button", { name: /请先建立分类/ });
+  expect(hint).toBeEnabled();
+
+  await userEvent.hover(hint);
+  expect((await screen.findAllByText("请先建立分类")).length).toBeGreaterThan(0);
+});
+
+test("没有原因时不渲染 ⓘ", () => {
+  render(
+    <Select aria-label="目标分类">
+      <option>a</option>
+    </Select>,
+  );
+
+  expect(screen.queryAllByRole("button")).toHaveLength(0);
 });
 
 test("外部 className 能覆盖内部同类样式", () => {
@@ -60,6 +92,33 @@ test("外部 className 能覆盖内部同类样式", () => {
   const cls = screen.getByLabelText("宽").className.split(/\s+/);
   expect(cls).toContain("h-11");
   expect(cls).not.toContain("h-9");
+});
+
+test("blockedReason 为空数组时等价于没有原因，不禁用", () => {
+  // Boolean([]) 在 JS 里是 true，Select 必须像 Button 一样用 normalizeBlockedReason
+  // 特殊处理，否则会出现「条件都满足了下拉还是灰的」。
+  render(
+    <Select aria-label="目标分类" blockedReason={[]}>
+      <option>a</option>
+    </Select>,
+  );
+
+  expect(screen.getByLabelText("目标分类")).not.toBeDisabled();
+});
+
+test("blockedReason 传数组时，多个原因全部可见，title 用顿号连接", () => {
+  render(
+    <Select aria-label="目标分类" blockedReason={["请先勾选资料", "请先选择目标分类"]}>
+      <option>a</option>
+    </Select>,
+  );
+
+  const select = screen.getByLabelText("目标分类");
+  expect(select).toBeDisabled();
+  expect(select).toHaveAttribute("title", "请先勾选资料、请先选择目标分类");
+  const hint = screen.getByRole("button", { name: /为什么不可用/ });
+  expect(hint).toHaveAccessibleName(/请先勾选资料/);
+  expect(hint).toHaveAccessibleName(/请先选择目标分类/);
 });
 
 test("appearance-none 之后必须给回一个下拉箭头", () => {

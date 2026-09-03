@@ -51,6 +51,7 @@ export interface DocumentCategory {
   sort_order: number;
   active: boolean;
   is_system: boolean;
+  origin_type: "template_copy" | "manual" | "migration";
   document_count: number;
   created_at: string;
   updated_at: string;

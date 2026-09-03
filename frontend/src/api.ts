@@ -87,10 +87,10 @@ export const api = {
   listKnowledgeBaseMembers: (id: string) => request<User[]>(`/api/knowledge-bases/${id}/members?offset=0&limit=100`),
   grantKnowledgeBaseMember: (id: string, userId: string) => request<void>(`/api/knowledge-bases/${id}/members/${userId}`, { method: "PUT" }),
   revokeKnowledgeBaseMember: (id: string, userId: string) => request<void>(`/api/knowledge-bases/${id}/members/${userId}`, { method: "DELETE" }),
-  listAuditEvents: (result = "", action = "") => {
-    const params = new URLSearchParams({ offset: "0", limit: "100" });
-    if (result) params.set("result", result);
-    if (action) params.set("action", action);
+  listAuditEvents: (options: { result?: string; action?: string; offset?: number; limit?: number } = {}) => {
+    const params = new URLSearchParams({ offset: String(options.offset ?? 0), limit: String(options.limit ?? 50) });
+    if (options.result) params.set("result", options.result);
+    if (options.action) params.set("action", options.action);
     return request<AuditEvent[]>(`/api/audit/events?${params}`);
   },
   listDocuments: () => request<DocumentInfo[]>("/api/documents"),

@@ -1,6 +1,9 @@
 import { cva, type VariantProps } from "class-variance-authority";
+import { Info } from "lucide-react";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { cn } from "./cn";
+import { normalizeBlockedReason } from "./blockedReason";
+import { Tooltip } from "./Tooltip";
 
 /**
  * 统一按钮。规格见 docs/design/ui-foundation-tokens.md 第 3 节。
@@ -52,18 +55,15 @@ export type ButtonProps = NativeProps &
      * 为什么点不了。**给了就禁用，没给就可用**——不存在「禁用但没有原因」这种状态。
      *
      * 真实代码里的禁用条件几乎都是动态的（`count > 0 ? "请先迁移资料" : undefined`），
-     * 所以做成一个可选字符串而不是 `disabled` + `reason` 的联合类型：后者只接受字面量
+     * 所以做成可选字符串而不是 `disabled` + `reason` 的联合类型：后者只接受字面量
      * `true`，遇到 `disabled={a || b}` 这种表达式直接编译不过。
-     */
-    blockedReason?: string;
-    /**
-     * 不把原因渲染成可见小字，只留 title。
      *
-     * **仅当按钮文案本身已经说明了原因时才用**，例如「应用到 0 份」——那个 0 就是
-     * 「还没勾选」。此时再补一句「请先勾选资料」只是重复，还会撑开工具栏布局。
-     * 默认必须可见，见 CLAUDE.md 第一条。
+     * 接受数组是因为一个按钮可能同时被多个条件挡住——「应用到 N 份」既要求勾选资料
+     * 又要求选中目标分类，三元表达式只能说出第一个。**空数组等价于 undefined**：
+     * 调用方常写 `blockedReason={reasons}` 而 reasons 是 filter 出来的，
+     * 不这么定义就会出现「条件都满足了按钮还是灰的」。
      */
-    reasonHidden?: boolean;
+    blockedReason?: string | string[];
     /** 处理中：自动禁用并阻止重复提交，无需另给原因。 */
     loading?: boolean;
   };
@@ -73,12 +73,13 @@ export function Button({
   size,
   className,
   blockedReason,
-  reasonHidden = false,
   loading = false,
   children,
   ...rest
 }: ButtonProps) {
-  const reason = loading ? "处理中…" : blockedReason;
+  const reasons = normalizeBlockedReason(blockedReason);
+  const blocked = reasons.length > 0;
+  const title = loading ? "处理中…" : blocked ? reasons.join("、") : undefined;
 
   return (
     <>
@@ -86,15 +87,34 @@ export function Button({
         type="button"
         {...rest}
         className={cn(button({ variant, size }), className)}
-        disabled={Boolean(blockedReason) || loading}
+        disabled={blocked || loading}
         aria-busy={loading || undefined}
-        title={reason}
+        title={title}
       >
         {children}
       </button>
-      {/* 原因要看得见，不能只躺在 title 里。loading 是短暂状态，不额外占位。 */}
-      {!loading && blockedReason && !reasonHidden ? (
-        <small className="block text-xs text-ink-faint">{blockedReason}</small>
+      {/* 原因由独立的 ⓘ 承载，不再是块级小字——小字会把表格行撑高，
+          而消灭行高不一致正是 DataTable 存在的理由之一。
+          ⓘ 自己是可用的按钮：真实浏览器里 disabled 的 button 不派发
+          pointerenter，把 Tooltip 包在禁用按钮外面在 jsdom 里会绿，
+          在浏览器里永远弹不出来。 */}
+      {!loading && blocked ? (
+        <Tooltip content={reasons.join("、")} delay={0}>
+          <button
+            type="button"
+            aria-label={`为什么不可用：${reasons.join("、")}`}
+            // min-w-0 / bg-none 不是多余的：legacy CSS 里有
+            // `.question-footer button { width/min-width/height: 34px; background:
+            // linear-gradient(...) }` 这类标签选择器，会连带命中这个 ⓘ。同名属性 utilities
+            // 层能压过 legacy 层，但 legacy 用的是简写属性，utilities 这边必须每个子属性都
+            // 单独给一份才压得住：min-width 对应 min-w-0，background 简写里的
+            // background-image 对应 bg-none（bg-transparent 只压 background-color，
+            // 两者是不同属性）。迁移期内 legacy 层还在，同类规则可能不止这一条。
+            className="inline-grid h-4 w-4 min-w-0 shrink-0 place-items-center rounded-full border-0 bg-transparent bg-none p-0 text-ink-faint hover:text-ink-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-brand/20"
+          >
+            <Info size={13} />
+          </button>
+        </Tooltip>
       ) : null}
     </>
   );

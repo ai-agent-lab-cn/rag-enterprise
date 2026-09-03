@@ -70,3 +70,56 @@ test("表格行内可以覆盖无障碍名称，区分操作对象", () => {
 
   expect(screen.getByLabelText("更新 报销制度.md")).toBeInstanceOf(HTMLInputElement);
 });
+
+test("空数组等于没有原因，按钮可用", () => {
+  // 与 Button 同一套语义（normalizeBlockedReason）。两个控件的禁用逻辑一旦漂移，
+  // 页面上就会出现「同样的条件，一个点得动一个点不动」。
+  render(<FileButton blockedReason={[]} onSelect={() => {}}>上传</FileButton>);
+
+  expect(screen.getByRole("button", { name: /上传/ })).toBeEnabled();
+});
+
+test("多个原因全部列出，且隐藏输入也一并禁用", () => {
+  render(
+    <FileButton blockedReason={["请先选择知识库", "请先选择分类"]} onSelect={() => {}}>
+      上传
+    </FileButton>,
+  );
+
+  const button = screen.getByRole("button", { name: "上传" });
+  expect(button).toBeDisabled();
+  const hint = screen.getByRole("button", { name: /为什么不可用/ });
+  expect(hint).toHaveAccessibleName(/请先选择知识库/);
+  expect(hint).toHaveAccessibleName(/请先选择分类/);
+  // 输入框也必须禁用：它虽然不可见，但仍在无障碍树里，只禁按钮等于留了一条后门。
+  expect(screen.getByLabelText("上传")).toBeDisabled();
+});
+
+test("禁用原因由独立的 ⓘ 承载，不占据行高", () => {
+  render(<FileButton blockedReason="索引进行中" onSelect={() => {}}>更新文件</FileButton>);
+
+  const action = screen.getByRole("button", { name: "更新文件" });
+  expect(action).toBeDisabled();
+
+  // 原因不再是按钮下方的块级小字——那会把表格行撑高。
+  expect(screen.queryByText("索引进行中")).toBeNull();
+
+  // 取而代之的是一个独立的、**可用的** ⓘ：真实浏览器里 disabled 的 button 不派发
+  // pointerenter，把 Tooltip 包在禁用按钮外面在 jsdom 里会绿，浏览器里永远弹不出来。
+  const hint = screen.getByRole("button", { name: /索引进行中/ });
+  expect(hint).not.toBe(action);
+  expect(hint).toBeEnabled();
+});
+
+test("ⓘ 悬停后弹出原因", async () => {
+  render(<FileButton blockedReason="索引进行中" onSelect={() => {}}>更新文件</FileButton>);
+
+  await userEvent.hover(screen.getByRole("button", { name: /索引进行中/ }));
+  expect((await screen.findAllByText("索引进行中")).length).toBeGreaterThan(0);
+});
+
+test("没有原因时不渲染 ⓘ", () => {
+  render(<FileButton onSelect={() => {}}>上传</FileButton>);
+
+  expect(screen.getAllByRole("button")).toHaveLength(1);
+});

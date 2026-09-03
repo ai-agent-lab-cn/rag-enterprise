@@ -1,29 +1,36 @@
-/* 字体必须留在最前：CSS 规范要求 @import url() 先于其它规则，而 styles.css 被包进
-   layer 之后，它内部的 @import 会失效。 */
+/* 字体必须留在最前：CSS 规范要求 @import url() 先于其它规则。 */
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
 
 /* Layer 顺序决定谁能覆盖谁：后声明的优先级更高。
-   把 3137 条旧声明关进 legacy 层，是为了让新写的 utility 类能盖住它们——不在任何
-   layer 里的样式优先级高于所有 layer，不这么做的话迁移期新旧同时存在时旧的永远赢。 */
-@layer legacy, theme, base, components, utilities;
+   迁移期还有第五个层 legacy（排在最前、优先级最低），用来关住 styles.css 那 3137 条
+   旧声明，好让新写的 utility 类盖得住它们。styles.css 已于 2026-09-02 删除，legacy
+   随之取消。 */
+@layer theme, base, components, utilities;
 
-@import "./styles.css" layer(legacy);
 @import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
 @import "tailwindcss/utilities.css" layer(utilities);
 
-/* preflight（Tailwind 的 CSS reset）**暂不引入**。
-       @import "tailwindcss/preflight.css" layer(base);
-   这不是谨慎起见，是实测结论：2026-08-30 临时打开跑了一遍视觉基线，**17 张图全红**，
-   多个页面高度剧变——评测中心 2745px → 1491px（几乎腰斩）、概览 1000px → 826px。
-   形态是卡片边框与内边距塌陷、标题字号变小、整体散架。
+/* preflight（Tailwind 的 CSS reset）于 2026-09-02 启用。
+   注意本文件下方的 `@layer base { … }` 必须留在这个 @import 之后：同层内相同特异性
+   比位置，靠后者胜——`body`/`button` 这些规则要盖住 preflight 才生效。
 
-   原因是 legacy 层剩下的 2720 条声明大量建立在浏览器默认样式之上：h1/h2/p/dl 的
-   margin 与字号、table 的 border-spacing、ul 的 list-style。preflight 把这些清零，
-   而 legacy 里没有对应的显式声明去接住。
+   历史：2026-08-30 第一次试开时是 17 张基线全红、多页「整体散架」（评测中心
+   2745px → 1491px 几乎腰斩、概览 1000px → 826px），因为当时 legacy 还剩 2720 条建立在
+   浏览器默认样式之上的声明。**当时列的前置条件是「布局迁完」——.chat-layout、
+   .member-row、.management-table、.evidence-panel 这些页面骨架改写成 utility 类——
+   阶段 2–4 已全部完成。** 现在 legacy 归零，实测破坏范围：
 
-   所以它的前置条件不是「控件迁完」，而是「**布局**迁完」：.chat-layout、.member-row、
-   .management-table、.evidence-panel 这些页面骨架都得改写成 utility 类。控件治理
-   （Button/Select/Input/Dialog）不解锁这一步。 */
+   | 指标 | 结果 |
+   | --- | --- |
+   | npm test | 189/189 全绿 |
+   | 视觉基线 | 17 张有差异，高度变化 >50px 的 **0 张**，高度完全不变 9 张 |
+   | 最大高度变化 | dialog-create-member −46px、evaluation-center +40px |
+   | 差异像素占比 | 最高 6.72%（弹层），其余 0.5–2.5% |
+
+   主要来源是 preflight 给 html 加的 `line-height: 1.5`（浏览器默认 normal ≈1.2）
+   与 `h1–h6 { font-size: inherit; font-weight: inherit }`。剩下的是细节位移，
+   不是重构——将来若某页高度剧变，先怀疑 @layer base 里的搬迁值，不是 preflight。 */
 
 /* Token 定义见 docs/design/ui-foundation-tokens.md。取值全部来自现有最高频值，
    目的是收敛而不是重新设计——迁移后的视觉位移应当很小。 */
@@ -68,4 +75,71 @@
   --shadow-pop: 0 4px 12px rgb(29 41 81 / 0.08);
   --shadow-modal: 0 16px 40px rgb(29 41 81 / 0.10);
   --shadow-focus: 0 0 0 3px rgb(87 68 221 / 0.18);
+
+  /* 焦点环。值沿用 legacy 的 #6356d9 而不是并到 --color-brand(#5744dd)：搬迁这一步
+     不允许改任何计算值，两者差 6 个色阶，合并要单独作为设计决策提。 */
+  --color-focus-ring: #6356d9;
+}
+
+/* keyframes 必须留在 @theme 外面。@theme 里的 @keyframes 只有对应的 --animate-* 被
+   工具类引用时才会 emit，而这个仓库用的是 arbitrary value
+   `[animation:spin_0.7s_linear_infinite]`（AuthGate/ChatPage/DataSourcesPage/
+   KnowledgeBaseDataSourcesPanel 共 5 处），不走 animate-* ——放进 @theme 会被丢掉。 */
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { 50% { opacity: .5; } }
+
+/* 元素级全局规则。原先在 styles.css 的 legacy 层，2026-09-02 搬到 base。
+   取值一律取搬迁前**级联后的最终值**，不是第一条声明：
+   - body background 在 legacy 里被声明两次（#f6f7fb → var(--canvas)），最终是 #fafbfe
+   - :root 被声明两次（字体族那条 + 8 个变量那条）
+   - --brand/--ink/--surface/--canvas 与 @theme 同名 token 完全同值，已删；
+     --muted(#70798f)/--line(#e6e9f1) 与 @theme 的 --color-ink-muted/--color-line 不同值，
+     但全仓无任何引用（只有 styles.css 自己用 --ink/--canvas），一并删。
+   层级从 legacy 升到 base：utilities 仍在最后，所以不会盖住任何 utility 类。 */
+@layer base {
+  :root {
+    font-family: "DM Sans", "Noto Sans SC", sans-serif;
+    color: #182033;
+    background: #f6f7fb;
+    font-synthesis: none;
+    color-scheme: light;
+  }
+
+  body {
+    min-width: 320px;
+    min-height: 100vh;
+    font-size: 14px;
+    color: var(--color-ink);
+    background: var(--color-canvas);
+  }
+
+  /* v4 的 preflight 不给 button 加 cursor: pointer，必须自己声明。 */
+  button { cursor: pointer; }
+
+  button:focus-visible,
+  textarea:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  a:focus-visible,
+  summary:focus-visible {
+    outline: 2px solid var(--color-focus-ring);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: .01ms !important;
+      transition-duration: .01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* .pulse 放 components 而不是 base：它是 class 不是元素 reset，且要能被 animate-* 覆盖。
+   时长 1.5s/ease-in-out 与 Tailwind 自带的 animate-pulse(2s/cubic-bezier) 不同，
+   换过去会改动画节奏，属于组件改动，不在本任务范围。 */
+@layer components {
+  .pulse { animation: pulse 1.5s ease-in-out infinite; }
 }

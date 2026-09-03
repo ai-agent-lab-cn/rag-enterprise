@@ -52,8 +52,27 @@ class PostgresKnowledgeBaseRepository:
                           now(), now()
                    WHERE NOT EXISTS (SELECT 1 FROM knowledge_bases)"""
             )
-            # 不再自动创建系统「未分类」：资料可以没有分类，那是 category_id IS NULL，
-            # 不是「属于某个叫未分类的分类」。伪分类会让检索、统计和分类治理都失真。
+            # 默认库早于分类模板存在，V15 的“创建时复制”不会覆盖它。只在默认库的分类
+            # 字典完全为空时复制有效模板；已有治理数据一律不覆盖，也不恢复系统“未分类”。
+            connection.execute(
+                """INSERT INTO document_categories
+                   (category_id, knowledge_base_id, name, normalized_name, description,
+                    sort_order, active, is_system, origin_type)
+                   SELECT %s || substr(md5(kb.knowledge_base_id || ':' || i.template_item_id), 1, 16),
+                          kb.knowledge_base_id, i.name, i.normalized_name, i.description,
+                          i.sort_order, true, false, 'template_copy'
+                   FROM knowledge_bases kb
+                   JOIN category_templates t ON t.is_default AND t.active
+                   JOIN category_template_items i
+                     ON i.template_id=t.template_id AND i.active
+                   WHERE kb.is_default
+                     AND NOT EXISTS (
+                         SELECT 1 FROM document_categories c
+                         WHERE c.knowledge_base_id=kb.knowledge_base_id
+                     )
+                   ON CONFLICT (knowledge_base_id, normalized_name) DO NOTHING""",
+                ("cat_",),
+            )
 
     def list(self) -> list[KnowledgeBaseRecord]:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
@@ -100,8 +119,9 @@ class PostgresKnowledgeBaseRepository:
                             connection.execute(
                                 """INSERT INTO document_categories
                                    (category_id, knowledge_base_id, name, normalized_name,
-                                    description, sort_order, active, is_system)
-                                   VALUES (%s, %s, %s, %s, %s, %s, true, false)""",
+                                    description, sort_order, active, is_system, origin_type)
+                                   VALUES (%s, %s, %s, %s, %s, %s, true, false,
+                                           'template_copy')""",
                                 (
                                     f"cat_{uuid4().hex[:16]}", knowledge_base_id,
                                     item["name"], item["normalized_name"], item["description"],
@@ -537,8 +557,8 @@ class PostgresCategoryRepository:
                 row = connection.execute(
                     """INSERT INTO document_categories
                        (category_id, knowledge_base_id, name, normalized_name,
-                        description, sort_order)
-                       VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
+                        description, sort_order, origin_type)
+                       VALUES (%s, %s, %s, %s, %s, %s, 'manual') RETURNING *""",
                     (
                         f"cat_{uuid4().hex[:16]}",
                         knowledge_base_id,

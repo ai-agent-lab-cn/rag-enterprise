@@ -1,3 +1,4 @@
+import { Badge } from "./ui/Badge";
 import type { QueryResult, Source } from "../types";
 
 interface TechnicalDrawerProps {
@@ -51,39 +52,48 @@ export function TechnicalDrawer({ result }: TechnicalDrawerProps) {
       ? "查询规范化"
       : "原始查询";
   return (
-    <details className="technical-drawer">
-      <summary>查看技术细节 <span aria-hidden="true">＋</span></summary>
-      <div className="technical-grid">
-        <section>
-          <span className="section-kicker">检索过程</span>
-          <h3>{hybrid ? "向量 + 词法 → 精排 → 生成" : "召回 → 精排 → 生成"}</h3>
-          <p>返回 {result.sources.length} 条来源，并按融合排序结果展示。</p>
+    <details className="mt-4 rounded-md border border-line">
+      <summary className="flex list-none cursor-pointer items-center justify-between px-3.5 py-3 text-sm font-semibold text-ink-muted">
+        查看技术细节 <span aria-hidden="true">＋</span>
+      </summary>
+      <div className="grid grid-cols-1 border-t border-divider md:grid-cols-3">
+        <section className="min-w-0 border-b border-divider p-3.5 last:border-b-0 md:border-r md:border-b-0 md:last:border-r-0">
+          <span className="text-[12px] text-[#7165d8] tracking-[0.04em] font-semibold">检索过程</span>
+          <h3 className="mt-[7px] mb-[7px] overflow-hidden text-ellipsis whitespace-nowrap text-sm text-ink">{hybrid ? "向量 + 词法 → 精排 → 生成" : "召回 → 精排 → 生成"}</h3>
+          <p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">返回 {result.sources.length} 条来源，并按融合排序结果展示。</p>
           {hybrid ? (
-            <p>
+            <p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">
               命中通路：双路 {breakdown.both} 条 / 仅向量 {breakdown.vectorOnly} 条 / 仅词法{" "}
               {breakdown.lexicalOnly} 条
             </p>
           ) : null}
           {queryMetadata ? (
-            <p>{queryStrategy} · {queryMetadata.query_count} 路查询{queryMetadata.fallback_used ? " · 已降级" : ""}</p>
+            <p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">{queryStrategy} · {queryMetadata.query_count} 路查询{queryMetadata.fallback_used ? " · 已降级" : ""}</p>
           ) : null}
-          {filterLabels.length ? <div className="applied-filters" aria-label="实际生效的过滤条件">{filterLabels.map((item) => <span key={item}>{item}</span>)}</div> : null}
-          {queryMetadata ? <p className="retrieval-diagnostics">候选：召回 {queryMetadata.retrieved_candidate_count} / 融合 {queryMetadata.fused_candidate_count} / 返回 {queryMetadata.returned_source_count}{queryMetadata.filter_match_count !== null ? ` · 过滤命中 ${queryMetadata.filter_match_count}` : ""}</p> : null}
+          {filterLabels.length ? (
+            <div className="mt-2 flex flex-wrap gap-1.5" aria-label="实际生效的过滤条件">
+              {filterLabels.map((item) => <Badge key={item} tone="brand">{item}</Badge>)}
+            </div>
+          ) : null}
+          {queryMetadata ? <p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">候选：召回 {queryMetadata.retrieved_candidate_count} / 融合 {queryMetadata.fused_candidate_count} / 返回 {queryMetadata.returned_source_count}{queryMetadata.filter_match_count !== null ? ` · 过滤命中 ${queryMetadata.filter_match_count}` : ""}</p> : null}
           {firstSource ? (
-            <p>最高来源分数：召回 {firstSource.retrieval_score.toFixed(3)} / 精排 {firstSource.rerank_score.toFixed(3)}</p>
+            <p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">最高来源分数：召回 {firstSource.retrieval_score.toFixed(3)} / 精排 {firstSource.rerank_score.toFixed(3)}</p>
           ) : null}
         </section>
-        <section>
-          <span className="section-kicker">模型与参数</span>
-          <h3 title={result.model}>{result.model}</h3>
-          <p>默认召回 10 条候选，精排后返回 5 条来源。</p>
-          {governance ? <><p>证据：{governance.evidence_count} 条 / 最低 {governance.minimum_evidence_count} 条</p><p>引用校验：{governance.citation_valid ? "通过" : "失败"} · 声明覆盖：{governance.claim_citation_coverage ? "通过" : "失败"}</p><p>权限、当前版本、检索状态：{governance.acl_revalidated && governance.current_version_revalidated && governance.retrieval_status_revalidated ? "已复核" : "未通过"}</p></> : null}
+        <section className="min-w-0 border-b border-divider p-3.5 last:border-b-0 md:border-r md:border-b-0 md:last:border-r-0">
+          <span className="text-[12px] text-[#7165d8] tracking-[0.04em] font-semibold">模型与参数</span>
+          <h3 className="mt-[7px] mb-[7px] overflow-hidden text-ellipsis whitespace-nowrap text-sm text-ink" title={result.model}>{result.model}</h3>
+          <p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">默认召回 10 条候选，精排后返回 5 条来源。</p>
+          {governance ? <><p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">证据：{governance.evidence_count} 条 / 最低 {governance.minimum_evidence_count} 条</p><p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">引用校验：{governance.citation_valid ? "通过" : "失败"} · 声明覆盖：{governance.claim_citation_coverage ? "通过" : "失败"}</p><p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">权限、当前版本、检索状态：{governance.acl_revalidated && governance.current_version_revalidated && governance.retrieval_status_revalidated ? "已复核" : "未通过"}</p></> : null}
         </section>
-        <section>
-          <span className="section-kicker">性能耗时</span>
-          <dl>
+        <section className="min-w-0 p-3.5 last:border-b-0 md:border-r md:border-b-0 md:last:border-r-0">
+          <span className="text-[12px] text-[#7165d8] tracking-[0.04em] font-semibold">性能耗时</span>
+          <dl className="mt-[7px] mb-0">
             {Object.entries(result.latency_ms).map(([key, value]) => (
-              <div key={key}><dt>{LATENCY_LABELS[key] ?? key}</dt><dd>{value.toFixed(0)} ms</dd></div>
+              <div key={key} className="flex justify-between gap-2.5 py-1">
+                <dt className="m-0 text-xs text-ink-faint">{LATENCY_LABELS[key] ?? key}</dt>
+                <dd className="m-0 text-xs text-ink-faint">{value.toFixed(0)} ms</dd>
+              </div>
             ))}
           </dl>
         </section>

@@ -15,7 +15,8 @@ import { cn } from "./cn";
 const field = cva(
   // min-w-0 与 w-full 是一对：flex 子项的默认 min-width 是 auto，光有 w-full 时
   // 它不肯收缩，会把同一行的 label 文字挤到换行（问答工作台的「标签」就断成了两行）。
-  "w-full min-w-0 rounded-md border bg-surface text-ink placeholder:text-ink-faint " +
+  // font-normal 同 Select：控件不声明字重就会继承容器的（见 Select.tsx 的注释）。
+  "w-full min-w-0 rounded-md border bg-surface text-ink font-normal placeholder:text-ink-faint " +
     "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-brand/20 " +
     "disabled:cursor-not-allowed disabled:bg-canvas disabled:opacity-55",
   {
