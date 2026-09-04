@@ -79,6 +79,10 @@ spec:
               valueFrom: {secretKeyRef: {name: rag-enterprise-secrets, key: DATABASE_URL}}
             - name: GEMINI_API_KEY
               valueFrom: {secretKeyRef: {name: rag-enterprise-secrets, key: GEMINI_API_KEY, optional: true}}
+            - name: DEEPSEEK_API_KEY
+              valueFrom: {secretKeyRef: {name: rag-enterprise-secrets, key: DEEPSEEK_API_KEY, optional: true}}
+            - name: KIMI_API_KEY
+              valueFrom: {secretKeyRef: {name: rag-enterprise-secrets, key: KIMI_API_KEY, optional: true}}
           startupProbe:
             httpGet: {path: /api/health/live, port: http}
             periodSeconds: 5

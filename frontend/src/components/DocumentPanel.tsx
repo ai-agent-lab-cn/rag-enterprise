@@ -1,5 +1,6 @@
 import { useState } from "react";
-import type { DocumentCategory, DocumentInfo } from "../types";
+import type { DataSource, DocumentCategory, DocumentInfo, DocumentVersion } from "../types";
+import { ParsingPanel } from "./ParsingPanel";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
 import { Column, DataTable } from "./ui/DataTable";
@@ -29,9 +30,28 @@ const STATUS_LABEL: Record<DocumentInfo["classification_status"], string> = {
   failed: "分类失败",
 };
 
+const STATUS_TONE: Record<DocumentInfo["classification_status"], "neutral" | "brand" | "success" | "danger"> = {
+  pending: "neutral",
+  auto_assigned: "success",
+  review_required: "brand",
+  manual: "brand",
+  failed: "danger",
+};
+
+const SOURCE_TYPE_LABEL: Record<string, string> = {
+  file: "文件上传",
+  object_storage: "S3 对象存储",
+  local_directory: "本地目录",
+  web: "网页",
+  connector: "连接器",
+};
+
 interface DocumentPanelProps {
+  knowledgeBaseId: string;
   documents: DocumentInfo[];
+  versions: DocumentVersion[];
   categories: DocumentCategory[];
+  dataSources?: DataSource[];
   loading: boolean;
   uploadProgress?: { completed: number; total: number } | null;
   onUpload: (files: File[]) => Promise<void>;
@@ -39,9 +59,10 @@ interface DocumentPanelProps {
   onUpdateMetadata: (documentId: string, category: string, tags: string[]) => Promise<void>;
   onBatchCategory: (documentIds: string[], categoryId: string) => Promise<void>;
   onReclassify: (documentIds: string[]) => Promise<void>;
+  canManage?: boolean;
 }
 
-export function DocumentPanel({ documents, categories, loading, uploadProgress, onUpload, onDelete, onUpdateMetadata, onBatchCategory, onReclassify }: DocumentPanelProps) {
+export function DocumentPanel({ knowledgeBaseId, documents, versions, categories, dataSources = [], loading, uploadProgress, onUpload, onDelete, onUpdateMetadata, onBatchCategory, onReclassify, canManage = true }: DocumentPanelProps) {
   const [dragging, setDragging] = useState(false);
   const [editing, setEditing] = useState<DocumentInfo | null>(null);
   const [category, setCategory] = useState("");
@@ -50,17 +71,25 @@ export function DocumentPanel({ documents, categories, loading, uploadProgress, 
   const [selected, setSelected] = useState<string[]>([]);
   const [categoryFilter, setCategoryFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [sourceTypeFilter, setSourceTypeFilter] = useState("");
+  const [dataSourceFilter, setDataSourceFilter] = useState("");
   const [batchCategory, setBatchCategory] = useState("");
   // 行级进度：重新分类只影响这一份资料，整页 Loading 会让其他行也变得不可用。
   const [retrying, setRetrying] = useState<string[]>([]);
+  const [viewing, setViewing] = useState<DocumentInfo | null>(null);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const toast = useToast();
 
   const matchesCategory = (item: DocumentInfo) =>
     !categoryFilter
     || (categoryFilter === UNCATEGORIZED ? item.category_id === null : item.category_id === categoryFilter);
-  const visibleDocuments = documents.filter((item) => matchesCategory(item) && (!statusFilter || item.classification_status === statusFilter));
-  const filtered = Boolean(categoryFilter || statusFilter);
+  const visibleDocuments = documents.filter((item) =>
+    matchesCategory(item)
+    && (!statusFilter || item.classification_status === statusFilter)
+    && (!sourceTypeFilter || item.source_type === sourceTypeFilter)
+    && (!dataSourceFilter || item.data_source_id === dataSourceFilter));
+  const filtered = Boolean(categoryFilter || statusFilter || sourceTypeFilter || dataSourceFilter);
+  const sourceById = new Map(dataSources.map((item) => [item.data_source_id, item]));
 
   // 供行级与批量重新分类共用。返回是否成功，调用方据此决定要不要清空勾选。
   const reclassify = async (documentIds: string[]) => {
@@ -134,6 +163,7 @@ export function DocumentPanel({ documents, categories, loading, uploadProgress, 
   };
 
   const rowActions = (document: DocumentInfo): RowAction[] => {
+    if (!canManage) return [];
     const actions: RowAction[] = [];
     if (document.classification_status === "pending" || document.classification_status === "failed") {
       actions.push({
@@ -157,25 +187,36 @@ export function DocumentPanel({ documents, categories, loading, uploadProgress, 
   const columns: Column<DocumentInfo>[] = [
     {
       key: "filename", header: "文件名", width: "26%", truncate: false,
-      render: (document) => <strong className="block truncate font-medium text-ink" title={document.filename}>{document.filename}</strong>,
+      render: (document) => (
+        <button
+          type="button"
+          className="block max-w-full truncate border-0 bg-transparent p-0 text-left font-medium text-brand hover:underline"
+          title={`打开 ${document.filename}`}
+          onClick={() => setViewing(document)}
+        >
+          {document.filename}
+        </button>
+      ),
+    },
+    {
+      key: "source", header: "来源", width: "150px", truncate: false,
+      render: (document) => {
+        const source = document.data_source_id ? sourceById.get(document.data_source_id) : undefined;
+        return <span className="block truncate">{source?.name ?? (document.data_source_id ? "来源已删除" : "直接上传")}</span>;
+      },
     },
     {
       key: "category", header: "分类", width: "170px", truncate: false,
       render: (document) => (
         // 分类列只放真实分类名；没有分类就是「—」。状态是另一件事，单独一行显示——
         // 把「待分类」显示成分类，正是这次要消灭的那种混淆。
-        <div className="grid gap-0.5 py-1">
+        <div className="flex min-w-0 items-center gap-2 py-1">
           <span className="truncate">{document.category ?? "—"}</span>
-          <small className="truncate text-sm text-ink-faint">
+          <Badge shape="status" tone={STATUS_TONE[document.classification_status]} className="shrink-0">
             {document.classification_status === "review_required"
               ? `${STATUS_LABEL.review_required} ${Math.round((document.classification_confidence || 0) * 100)}%`
               : STATUS_LABEL[document.classification_status]}
-          </small>
-          {document.classification_status === "failed" && document.classification_failure_reason ? (
-            <small className="truncate text-sm text-danger-text" title={document.classification_failure_code ?? undefined}>
-              {document.classification_failure_reason}
-            </small>
-          ) : null}
+          </Badge>
         </div>
       ),
     },
@@ -189,18 +230,23 @@ export function DocumentPanel({ documents, categories, loading, uploadProgress, 
     },
     { key: "chunk_count", header: "切片数", width: "80px", numeric: true, render: (document) => document.chunk_count },
     {
-      key: "status", header: "状态", width: "90px",
-      render: () => <Badge shape="status" tone="success">已索引</Badge>,
+      key: "version", header: "当前版本", width: "90px",
+      render: (document) => {
+        const current = versions.find((item) => item.document_id === document.document_id && item.is_current);
+        return current ? `V${current.version_number}` : "—";
+      },
     },
     {
+      key: "status", header: "索引状态", width: "100px",
+      render: (document) => <Badge shape="status" tone={document.status === "ready" ? "success" : document.status === "failed" ? "danger" : "brand"}>{document.status === "ready" ? "已索引" : document.status === "failed" ? "失败" : "处理中"}</Badge>,
+    },
+    ...(canManage ? [{
       key: "actions", header: "操作", width: "210px", align: "right", truncate: false,
       render: (document) => <RowActions rowLabel={document.filename} actions={rowActions(document)} />,
-    },
+    } as Column<DocumentInfo>] : []),
   ];
 
-  return (
-    <section aria-label="知识库文档" className="grid gap-3">
-      <FileButton
+  const uploadControl = <FileButton
         variant="outline"
         className={`h-auto min-h-28 w-full flex-col items-center justify-center gap-1.5 whitespace-normal border-dashed p-4 text-center normal-case ${dragging ? "border-brand bg-brand-subtle" : "border-line-firm bg-canvas"}`}
         accept=".md,.txt,.pdf,.html,.htm,.docx,.xlsx,.csv"
@@ -218,7 +264,11 @@ export function DocumentPanel({ documents, categories, loading, uploadProgress, 
         </strong>
         <small className="text-sm text-ink-faint">拖入或多选 MD、TXT、PDF、HTML、DOCX、XLSX、CSV · 单文件最大 15 MB</small>
         {uploadProgress ? <progress aria-label="批量上传进度" className="w-60 max-w-full" max={uploadProgress.total} value={uploadProgress.completed} /> : null}
-      </FileButton>
+      </FileButton>;
+
+  return (
+    <section aria-label="知识库文档" className="grid gap-3">
+      {canManage ? uploadControl : null}
 
       <Toolbar
         filters={<>
@@ -235,8 +285,20 @@ export function DocumentPanel({ documents, categories, loading, uploadProgress, 
               {(Object.keys(STATUS_LABEL) as Array<keyof typeof STATUS_LABEL>).map((key) => <option key={key} value={key}>{STATUS_LABEL[key]}</option>)}
             </Select>
           </label>
+          <label className="flex items-center gap-2 text-md">来源类型
+            <Select size="sm" className="w-32" aria-label="来源类型筛选" value={sourceTypeFilter} onChange={(event) => setSourceTypeFilter(event.target.value)}>
+              <option value="">全部类型</option>
+              {[...new Set(documents.map((item) => item.source_type))].map((value) => <option key={value} value={value}>{SOURCE_TYPE_LABEL[value] ?? value}</option>)}
+            </Select>
+          </label>
+          <label className="flex items-center gap-2 text-md">数据源
+            <Select size="sm" className="w-36" aria-label="所属数据源筛选" value={dataSourceFilter} onChange={(event) => setDataSourceFilter(event.target.value)}>
+              <option value="">全部数据源</option>
+              {dataSources.map((item) => <option key={item.data_source_id} value={item.data_source_id}>{item.name}</option>)}
+            </Select>
+          </label>
         </>}
-        batch={{
+        batch={canManage ? {
           count: selected.length,
           children: <>
             <Select size="sm" className="w-32" aria-label="批量归类目标" value={batchCategory} onChange={(event) => setBatchCategory(event.target.value)}>
@@ -264,7 +326,7 @@ export function DocumentPanel({ documents, categories, loading, uploadProgress, 
               重新分类 {selected.length} 份
             </Button>
           </>,
-        }}
+        } : undefined}
       />
 
       <DataTable
@@ -272,9 +334,9 @@ export function DocumentPanel({ documents, categories, loading, uploadProgress, 
         columns={columns}
         rowKey={(document) => document.document_id}
         label="资料列表"
-        selection={{ selected, onChange: setSelected, rowLabel: (document) => document.filename }}
+        selection={canManage ? { selected, onChange: setSelected, rowLabel: (document) => document.filename } : undefined}
         emptyState={filtered
-          ? { kind: "filtered", title: "没有符合条件的资料", description: "调整分类或状态筛选后重试。" }
+          ? { kind: "filtered", title: "没有符合条件的资料", description: "调整来源、分类或状态筛选后重试。" }
           : { kind: "empty", title: "还没有资料", description: "先上传一份你亲自编写的项目文档。" }}
       />
 
@@ -295,6 +357,30 @@ export function DocumentPanel({ documents, categories, loading, uploadProgress, 
               <Button type="submit" loading={saving}>保存</Button>
             </DialogActions>
           </form>
+        </Dialog>
+      ) : null}
+      {viewing ? (
+        <Dialog
+          open
+          size="lg"
+          title="资料详情"
+          description={viewing.filename}
+          onClose={() => setViewing(null)}
+        >
+          <div className="max-h-[72vh] overflow-y-auto pr-1">
+            <dl className="mb-3 grid grid-cols-2 gap-x-5 gap-y-2 border-b border-line pb-3 text-sm md:grid-cols-4">
+              <div><dt className="text-ink-faint">格式</dt><dd className="m-0 mt-1 text-ink">{viewing.filename.split(".").pop()?.toUpperCase() || "—"}</dd></div>
+              <div><dt className="text-ink-faint">分类</dt><dd className="m-0 mt-1 text-ink">{viewing.category || "无分类"}</dd></div>
+              <div><dt className="text-ink-faint">切片数</dt><dd className="m-0 mt-1 text-ink">{viewing.chunk_count}</dd></div>
+              <div><dt className="text-ink-faint">检索状态</dt><dd className="m-0 mt-1 text-ink">{viewing.retrieval_status === "searchable" ? "可检索" : viewing.retrieval_status === "expired" ? "已失效" : "已删除"}</dd></div>
+            </dl>
+            <ParsingPanel
+              knowledgeBaseId={knowledgeBaseId}
+              versions={versions.filter((item) => item.document_id === viewing.document_id)}
+              canManage={false}
+              onRefresh={async () => undefined}
+            />
+          </div>
         </Dialog>
       ) : null}
       {confirmDialog}

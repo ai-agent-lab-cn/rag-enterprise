@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { DataSource, DocumentCategory, SyncRun } from "../types";
+import type { DataSource, SyncRun } from "../types";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
 import { Checkbox } from "./ui/Checkbox";
-import { Column, DataTable } from "./ui/DataTable";
+import { type Column, DataTable } from "./ui/DataTable";
 import { Dialog, DialogActions } from "./ui/Dialog";
 import { ErrorBanner } from "./ui/ErrorBanner";
 import { Input } from "./ui/Input";
@@ -30,9 +30,9 @@ const SYNC_TONE: Record<DataSource["sync_status"], "neutral" | "brand" | "succes
 /** 与 DataSourcesPage 的 UPLOAD_ACCEPT 同一份，避免两处漂移。 */
 const UPLOAD_ACCEPT = ".pdf,.docx,.txt,.md,.html,.htm,.xlsx,.csv";
 const EMPTY_DRAFT = { name: "", endpoint: "", bucket: "", prefix: "", region: "", credentialEnv: "", secure: true, categoryId: "", department: "" };
-type Props = { knowledgeBaseId: string; items: DataSource[]; categories: DocumentCategory[]; onRefresh: () => Promise<void> };
+type Props = { knowledgeBaseId: string; items: DataSource[]; onRefresh: () => Promise<void> };
 
-export function KnowledgeBaseDataSourcesPanel({ knowledgeBaseId, items, categories, onRefresh }: Props) {
+export function KnowledgeBaseDataSourcesPanel({ knowledgeBaseId, items, onRefresh }: Props) {
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<DataSource | null>(null);
   const [formError, setFormError] = useState("");
@@ -40,6 +40,8 @@ export function KnowledgeBaseDataSourcesPanel({ knowledgeBaseId, items, categori
   const [runs, setRuns] = useState<SyncRun[]>([]);
   const [historyError, setHistoryError] = useState("");
   const [busyId, setBusyId] = useState("");
+  const [sourceTypeFilter, setSourceTypeFilter] = useState("");
+  const [syncStatusFilter, setSyncStatusFilter] = useState("");
   const [draft, setDraft] = useState(EMPTY_DRAFT);
   const toast = useToast();
   const { confirm, dialog: confirmDialog } = useConfirm();
@@ -159,53 +161,45 @@ export function KnowledgeBaseDataSourcesPanel({ knowledgeBaseId, items, categori
     return actions;
   };
 
+  const visibleItems = items.filter((item) =>
+    (!sourceTypeFilter || item.source_type === sourceTypeFilter)
+    && (!syncStatusFilter || item.sync_status === syncStatusFilter));
+
   const columns: Column<DataSource>[] = [
     {
-      key: "name", header: "数据源", width: "180px", truncate: false,
-      render: (item) => (
-        <span className="flex min-w-0 items-center gap-2">
-          <strong className="min-w-0 truncate font-medium text-ink" title={item.name}>{item.name}</strong>
-          {!item.enabled ? <Badge shape="type" className="shrink-0">已停用</Badge> : null}
-        </span>
-      ),
+      key: "name", header: "数据源", width: "190px", truncate: false,
+      render: (item) => <span className="flex min-w-0 items-center gap-2"><strong className="min-w-0 truncate font-medium text-ink" title={item.name}>{item.name}</strong>{!item.enabled ? <Badge shape="type" className="shrink-0">已停用</Badge> : null}</span>,
     },
     {
-      key: "source_type", header: "类型", width: "110px",
-      render: (item) => (item.source_type === "object_storage" ? "S3 对象存储" : item.source_type === "local_directory" ? "本地目录" : "文件"),
+      key: "type", header: "类型", width: "120px",
+      render: (item) => item.source_type === "object_storage" ? "S3 对象存储" : item.source_type === "local_directory" ? "本地目录" : item.source_type === "web" ? "网页" : item.source_type === "connector" ? "连接器" : "文件上传",
     },
     {
-      key: "sync_status", header: "同步状态", width: "150px", truncate: false,
+      key: "sync", header: "同步状态", width: "150px", truncate: false,
       render: (item) => {
         const syncing = item.sync_status === "queued" || item.sync_status === "running";
-        return (
-          <>
-            {/* Badge 不透传任意 DOM 属性（见 ui/Badge.tsx），aria-busy 挂不到它自己的
-                <span> 上，用一层不带样式的包装 span 承载，与 DataSourcesPage 的
-                index_status 列同一处理方式。 */}
-            <span aria-busy={syncing || undefined}>
-              <Badge shape="status" tone={SYNC_TONE[item.sync_status]} className={syncing ? "before:content-[''] before:w-[9px] before:h-[9px] before:border-[1.5px] before:border-solid before:border-current before:border-r-transparent before:rounded-full before:[animation:spin_0.7s_linear_infinite]" : undefined}>
-                {SYNC_LABEL[item.sync_status]}
-              </Badge>
-            </span>
-            {syncing ? <progress aria-label={`${item.name} 同步进度`} className="mt-[5px] block h-1 w-[110px] accent-brand" /> : null}
-          </>
-        );
+        return <span aria-busy={syncing || undefined}><Badge shape="status" tone={SYNC_TONE[item.sync_status]}>{SYNC_LABEL[item.sync_status]}</Badge>{syncing ? <progress aria-label={`${item.name} 同步进度`} className="mt-1 block h-1 w-24 accent-brand" /> : null}</span>;
       },
     },
-    { key: "document_count", header: "资料数", width: "65px", numeric: true, render: (item) => item.document_count },
-    { key: "last_synced_at", header: "最近同步", width: "145px", render: (item) => (item.last_synced_at ? new Date(item.last_synced_at).toLocaleString("zh-CN") : "—") },
-    { key: "failure_reason", header: "失败原因", width: "150px", render: (item) => <span title={item.failure_reason || "—"}>{item.failure_reason || "—"}</span> },
-    { key: "actions", header: "操作", width: "440px", align: "right", truncate: false, render: (item) => <RowActions rowLabel={item.name} actions={rowActions(item)} /> },
+    { key: "documents", header: "资料数", width: "80px", numeric: true, render: (item) => item.document_count },
+    { key: "synced", header: "最近同步", width: "160px", render: (item) => item.last_synced_at ? new Date(item.last_synced_at).toLocaleString("zh-CN") : "—" },
+    { key: "failure", header: "失败原因", width: "160px", render: (item) => <span title={item.failure_reason || "—"}>{item.failure_reason || "—"}</span> },
+    { key: "actions", header: "操作", width: "360px", align: "right", truncate: false, render: (item) => <RowActions rowLabel={item.name} actions={rowActions(item)} /> },
   ];
 
   return <section aria-label="知识库数据源" className="grid gap-3">
-    <Toolbar actions={<Button size="sm" onClick={openCreate}>新建外部数据源</Button>} />
+    <Toolbar filters={<>
+      <Select size="sm" aria-label="来源类型筛选" value={sourceTypeFilter} onChange={(event) => setSourceTypeFilter(event.target.value)}><option value="">全部来源</option><option value="file">文件</option><option value="object_storage">S3 对象存储</option><option value="local_directory">本地目录</option><option value="web">网页</option><option value="connector">连接器</option></Select>
+      <Select size="sm" aria-label="同步状态筛选" value={syncStatusFilter} onChange={(event) => setSyncStatusFilter(event.target.value)}><option value="">全部同步状态</option>{Object.entries(SYNC_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select>
+    </>} actions={<Button size="sm" onClick={openCreate}>新建外部数据源</Button>} />
     <DataTable
-      rows={items}
+      rows={visibleItems}
       columns={columns}
       rowKey={(item) => item.data_source_id}
       label="数据源列表"
-      emptyState={{ kind: "empty", title: "当前知识库没有数据源", description: "新建外部数据源以同步 S3 兼容存储中的资料，或前往「资料」Tab 上传文件。" }}
+      emptyState={items.length
+        ? { kind: "filtered", title: "没有符合条件的数据源", description: "调整来源类型或同步状态后重试。" }
+        : { kind: "empty", title: "暂无数据源", description: "新建外部数据源，或在资料页直接上传文件。" }}
     />
     {formOpen ? <Dialog open size="md" title={editing ? "编辑 S3 兼容数据源" : "新建 S3 兼容数据源"} description="凭据只读取运行环境变量，不保存到数据库。" onClose={() => { if (!busyId) { setFormOpen(false); setEditing(null); } }}>
       <form className="grid gap-[9px] pt-[20px] px-[22px]" onSubmit={(event) => { event.preventDefault(); void save(); }}>

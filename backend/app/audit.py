@@ -18,6 +18,10 @@ _GENESIS_HASH = "0" * 64
 _SAFE_METADATA_KEYS = {
     "active",
     "answer_status",
+    "error_code",
+    "model",
+    "previous_provider",
+    "provider",
     "role",
     "target_actor_hash",
 }

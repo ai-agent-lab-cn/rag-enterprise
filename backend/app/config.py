@@ -12,15 +12,25 @@ class Settings(BaseSettings):
     app_name: str = "RongRAG Studio"
     embedding_model: str = "shibing624/text2vec-base-chinese"
     reranker_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
-    generation_model: str = "gemini-3.6-flash"
+    generation_provider: Literal["gemini", "deepseek", "kimi"] | None = None
+    generation_model: str | None = None
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_api_key: str | None = None
+    deepseek_balance_limit: float | None = Field(default=None, gt=0)
+    gemini_model: str = "gemini-3.6-flash"
     gemini_api_key: str | None = None
+    kimi_model: str = "kimi-k2.6"
+    kimi_base_url: str = "https://api.moonshot.cn/v1"
+    kimi_api_key: str | None = None
+    kimi_balance_limit: float | None = Field(default=None, gt=0)
     upload_path: Path = Path("data/uploads")
     knowledge_bases_path: Path = Path("data/knowledge_bases/registry.json")
     conversations_path: Path = Path("data/conversations/records.json")
     auth_path: Path = Path("data/auth/store.json")
     audit_path: Path = Path("data/audit/events.json")
     database_url: str | None = None
-    required_database_schema_version: int = Field(default=21, ge=1)
+    required_database_schema_version: int = Field(default=23, ge=1)
     index_worker_id: str = "worker-local"
     index_job_max_attempts: int = Field(default=3, ge=1, le=10)
     index_job_stale_seconds: int = Field(default=900, ge=60, le=86400)
@@ -50,6 +60,11 @@ class Settings(BaseSettings):
     def empty_demo_seed_is_disabled(cls, value: object) -> object:
         return None if value == "" else value
 
+    @field_validator("deepseek_balance_limit", "kimi_balance_limit", mode="before")
+    @classmethod
+    def empty_balance_limit_is_disabled(cls, value: object) -> object:
+        return None if value == "" else value
+
     @model_validator(mode="after")
     def validate_security_boundaries(self) -> "Settings":
         origins = self.frontend_origins
@@ -66,6 +81,38 @@ class Settings(BaseSettings):
     @property
     def frontend_origins(self) -> list[str]:
         return [item.strip().rstrip("/") for item in self.frontend_origin.split(",") if item.strip()]
+
+    @property
+    def default_generation_provider(self) -> str:
+        if self.generation_provider:
+            return self.generation_provider
+        if self.generation_model and self.generation_model.startswith("gemini"):
+            return "gemini"
+        return "deepseek"
+
+    def generation_model_for(self, provider: str) -> str:
+        configured = {
+            "deepseek": self.deepseek_model,
+            "gemini": self.gemini_model,
+            "kimi": self.kimi_model,
+        }[provider]
+        if provider == self.default_generation_provider and self.generation_model:
+            return self.generation_model
+        return configured
+
+    def generation_key_for(self, provider: str) -> str | None:
+        return {
+            "deepseek": self.deepseek_api_key,
+            "gemini": self.gemini_api_key,
+            "kimi": self.kimi_api_key,
+        }[provider]
+
+    def generation_balance_limit_for(self, provider: str) -> float | None:
+        return {
+            "deepseek": self.deepseek_balance_limit,
+            "gemini": None,
+            "kimi": self.kimi_balance_limit,
+        }[provider]
 
 
 @lru_cache

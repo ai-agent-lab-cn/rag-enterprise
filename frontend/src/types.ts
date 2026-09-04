@@ -1,6 +1,7 @@
 export interface DocumentInfo {
   knowledge_base_id: string;
   document_id: string;
+  data_source_id?: string | null;
   filename: string;
   chunk_count: number;
   status: string;
@@ -216,6 +217,41 @@ export interface HealthStatus {
   collection_ready: boolean;
   generation_ready: boolean;
   models: Record<string, string>;
+}
+
+export type GenerationProvider = "deepseek" | "gemini" | "kimi";
+export type GenerationModelStatus =
+  | "unconfigured"
+  | "available"
+  | "region_unsupported"
+  | "quota_exhausted"
+  | "auth_failed"
+  | "rate_limited"
+  | "timeout"
+  | "model_not_found"
+  | "unavailable";
+
+export interface GenerationModelItem {
+  provider: GenerationProvider;
+  display_name: string;
+  model_name: string;
+  configured: boolean;
+  active: boolean;
+  status: GenerationModelStatus;
+  status_code: string | null;
+  status_message: string;
+  checked_at: string | null;
+  balance_status: "unknown" | "available" | "unsupported" | "error";
+  balance_amount: number | null;
+  balance_currency: string | null;
+  balance_limit: number | null;
+  balance_percent: number | null;
+  balance_checked_at: string | null;
+}
+
+export interface GenerationModels {
+  active_provider: GenerationProvider;
+  items: GenerationModelItem[];
 }
 
 export interface ReadinessStatus {

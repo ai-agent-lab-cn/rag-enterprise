@@ -96,6 +96,7 @@ RETRYABLE_CLASSIFICATION_FAILURES: frozenset[str] = frozenset(
 class DocumentInfo(BaseModel):
     knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
     document_id: str
+    data_source_id: str | None = None
     filename: str
     chunk_count: int
     status: str = "ready"
@@ -793,6 +794,43 @@ class HealthResponse(BaseModel):
     collection_ready: bool
     generation_ready: bool
     models: dict[str, str]
+
+
+class GenerationModelItemResponse(BaseModel):
+    provider: Literal["deepseek", "gemini", "kimi"]
+    display_name: str
+    model_name: str
+    configured: bool
+    active: bool
+    status: Literal[
+        "unconfigured",
+        "available",
+        "region_unsupported",
+        "quota_exhausted",
+        "auth_failed",
+        "rate_limited",
+        "timeout",
+        "model_not_found",
+        "unavailable",
+    ]
+    status_code: str | None = None
+    status_message: str
+    checked_at: datetime | None = None
+    balance_status: Literal["unknown", "available", "unsupported", "error"]
+    balance_amount: float | None = None
+    balance_currency: str | None = None
+    balance_limit: float | None = None
+    balance_percent: float | None = None
+    balance_checked_at: datetime | None = None
+
+
+class GenerationModelsResponse(BaseModel):
+    active_provider: Literal["deepseek", "gemini", "kimi"]
+    items: list[GenerationModelItemResponse]
+
+
+class GenerationModelActivateRequest(BaseModel):
+    provider: Literal["deepseek", "gemini", "kimi"]
 
 
 class LivenessResponse(BaseModel):

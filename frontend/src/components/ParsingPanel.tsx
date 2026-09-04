@@ -53,6 +53,7 @@ export function ParsingPanel({ knowledgeBaseId, versions, canManage, onRefresh }
   }, [effectiveVersionId, knowledgeBaseId]);
   const visibleChunks = preview?.chunks.filter((item) => !selectedNode || item.metadata.node_id === selectedNode) || [];
   const activeChunk = preview?.chunks.find((item) => item.chunk_id === selectedChunk) || visibleChunks[0];
+  const externalSourceUrl = preview?.tree.find((item) => item.location.source_url)?.location.source_url;
   const reprocess = async () => { if (!effectiveVersionId) return; setReprocessing(true); setError(""); try { await api.reprocessDocumentVersion(knowledgeBaseId, effectiveVersionId, chunkSize, chunkOverlap); await onRefresh(); } catch (reason) { setError(reason instanceof Error ? reason.message : "重新处理失败。"); } finally { setReprocessing(false); } };
 
   // 未核（真实分支未触发，靠注入探测元素实测）：以下三处空态段落在当前 demo 数据里
@@ -86,6 +87,7 @@ export function ParsingPanel({ knowledgeBaseId, versions, canManage, onRefresh }
           {preview ? PARSE_STATUS[preview.parse_status] : "等待读取"}
         </Badge>
         {preview && !preview.is_current ? <em className="text-base font-normal text-warning not-italic">历史版本 · 不进入当前检索</em> : null}
+        {externalSourceUrl ? <a className="ml-auto text-sm text-brand hover:underline" href={externalSourceUrl} target="_blank" rel="noreferrer">打开外部原文</a> : null}
       </div>
 
       {error ? <ErrorBanner>{error}</ErrorBanner> : null}

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from backend.app.config import get_settings
 from backend.app.errors import AppError
 from backend.app.main import _data_source_response, get_data_sources, get_service
+from backend.app.models import get_generator
 
 
 class _DataSourcesStub:
@@ -154,17 +155,18 @@ def test_health_does_not_initialize_rag_service(client) -> None:
     client.app.dependency_overrides[get_service] = fail_service_initialization
     response = client.get("/api/health")
     settings = get_settings()
+    generator = get_generator()
 
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
         "version": "1.0.0",
         "collection_ready": True,
-        "generation_ready": bool(settings.gemini_api_key),
+        "generation_ready": generator.ready,
         "models": {
             "embedding": settings.embedding_model,
             "reranker": settings.reranker_model,
-            "generation": settings.generation_model,
+            "generation": generator.model_name,
         },
     }
 

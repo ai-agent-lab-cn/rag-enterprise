@@ -6,6 +6,8 @@ interface AnswerPanelProps {
   result: QueryResult | null;
   loading: boolean;
   showSources?: boolean;
+  streamingText?: string;
+  streamingStage?: string;
 }
 
 const METRICS = [
@@ -63,13 +65,19 @@ function answerWithSourceLinks(answer: string, sourceCount: number) {
 /** 原 `.answer-placeholder`：无边框、无背景，纯文字/图标居中版。 */
 const PLACEHOLDER_CLASS = "mx-auto mt-[8vh] mb-0 grid max-w-[700px] min-h-[280px] content-center justify-items-center p-[26px] text-center text-[14px] text-ink-faint";
 
-export function AnswerPanel({ result, loading, showSources = true }: AnswerPanelProps) {
-  if (loading) {
+export function AnswerPanel({ result, loading, showSources = true, streamingText = "", streamingStage = "" }: AnswerPanelProps) {
+  if (loading && !streamingText) {
     // `.pulse` 是共享 legacy 动画（OverviewPage 也在用），不在本任务的独占 class
     // 清单里，保留字面 class 名而不是换成 Tailwind 的 animate-pulse——后者时长
     // （2s）和缓动都与原动画（1.5s ease-in-out）不同，会是一次不必要的视觉变化。
-    return <div className={`${PLACEHOLDER_CLASS} pulse`}>正在检索、精排并组织答案…</div>;
+    return <div className={`${PLACEHOLDER_CLASS} pulse`}>{streamingStage || "正在检索、精排并组织答案…"}</div>;
   }
+  if (!result && streamingText) return (
+    <section className="mx-auto mt-0 mb-5 max-w-[760px] min-h-0 rounded-[10px] border border-line bg-surface px-[22px] py-5 shadow-[0_6px_20px_rgba(31,38,63,0.04)]" aria-live="polite" aria-busy={loading}>
+      <div className="text-[10px] font-semibold text-brand">{streamingStage || "正在生成答案"}</div>
+      <p className="mt-[15px] mb-[15px] whitespace-pre-wrap text-[15px] leading-[1.9] text-[#31394d]">{streamingText}</p>
+    </section>
+  );
   if (!result) {
     return (
       <div className={PLACEHOLDER_CLASS}>

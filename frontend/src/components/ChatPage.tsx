@@ -1,5 +1,5 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { Bot, Download, FileText, MessageSquarePlus, Paperclip, Send, Trash2 } from "lucide-react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Bot, Download, FileText, MessageSquarePlus, Paperclip, Send, Square, Trash2 } from "lucide-react";
 import { api } from "../api";
 import type { AnswerRecord, ConversationDetail, ConversationSummary, DocumentCategory, DocumentInfo, KnowledgeBase, QueryResult, Source } from "../types";
 import { AnswerPanel } from "./AnswerPanel";
@@ -57,6 +57,11 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
   const [categoryFilter, setCategoryFilter] = useState("");
   const [tagFilter, setTagFilter] = useState("");
   const [sourceTypeFilter, setSourceTypeFilter] = useState("");
+  const [streamingText, setStreamingText] = useState("");
+  const [streamingStage, setStreamingStage] = useState("");
+  const [streamingSources, setStreamingSources] = useState<Source[]>([]);
+  const [pendingQuestion, setPendingQuestion] = useState("");
+  const streamController = useRef<AbortController | null>(null);
 
   const loadBase = useCallback(async (id: string) => {
     const [docs, items, categoryItems] = await Promise.all([api.listKnowledgeBaseDocuments(id), api.listConversations(id), api.listKnowledgeBaseCategories(id)]);
@@ -89,11 +94,41 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
     generation_governance: activeRecord.generation_governance,
     query_metadata: activeRecord.query_metadata,
   } : null, [activeRecord]);
-  const sources = result?.sources ?? activeRecord?.sources ?? [];
+  const sources = result?.sources ?? (streamingSources.length ? streamingSources : activeRecord?.sources) ?? [];
   const selectBase = (id: string) => { setResult(null); setHistory(null); setCategoryFilter(""); setTagFilter(""); setSourceTypeFilter(""); setBaseId(id); onOpen(`/chat?knowledge_base_id=${id}`); };
   const newConversation = () => { setResult(null); setHistory(null); onOpen(`/chat?knowledge_base_id=${baseId}`); };
   const openConversation = (id: string) => { setResult(null); onOpen(`/chat/${id}?knowledge_base_id=${baseId}`); };
-  const ask = async (event: FormEvent) => { event.preventDefault(); const value = question.trim(); if (!value) return; const tags = tagFilter.split(/[，,]/).map((item) => item.trim()).filter(Boolean); const filters = categoryFilter || tags.length || sourceTypeFilter ? { ...(categoryFilter ? { category_ids: [categoryFilter] } : {}), ...(tags.length ? { tags: [...new Set(tags)] } : {}), ...(sourceTypeFilter ? { source_types: [sourceTypeFilter] } : {}) } : undefined; setBusy(true); setError(""); try { const answer = await api.queryKnowledgeBase(baseId, value, conversationId, filters); setResult(answer); setQuestion(""); await loadBase(baseId); if (!conversationId && answer.conversation_id) onOpen(`/chat/${answer.conversation_id}?knowledge_base_id=${baseId}`); } catch (reason) { setError(reason instanceof Error ? reason.message : "查询失败。"); } finally { setBusy(false); } };
+  const ask = async (event: FormEvent) => {
+    event.preventDefault();
+    const value = question.trim();
+    if (!value || busy) return;
+    const tags = tagFilter.split(/[，,]/).map((item) => item.trim()).filter(Boolean);
+    const filters = categoryFilter || tags.length || sourceTypeFilter ? { ...(categoryFilter ? { category_ids: [categoryFilter] } : {}), ...(tags.length ? { tags: [...new Set(tags)] } : {}), ...(sourceTypeFilter ? { source_types: [sourceTypeFilter] } : {}) } : undefined;
+    const controller = new AbortController();
+    streamController.current = controller;
+    setBusy(true); setError(""); setResult(null); setStreamingText(""); setStreamingSources([]); setStreamingStage("正在检索资料"); setPendingQuestion(value); setQuestion("");
+    let finalAnswer: QueryResult | null = null;
+    let streamError = "";
+    try {
+      await api.streamKnowledgeBaseQuery(baseId, value, conversationId, filters, controller.signal, (message) => {
+        if (message.event === "stage") setStreamingStage(message.data.message);
+        else if (message.event === "answer_delta") setStreamingText((current) => current + message.data.text);
+        else if (message.event === "sources") setStreamingSources(message.data.items);
+        else if (message.event === "replace") setStreamingText(message.data.answer);
+        else if (message.event === "final") { finalAnswer = message.data; setResult(message.data); setStreamingText(""); }
+        else if (message.event === "error") { streamError = message.data.message; setError(message.data.message); }
+      });
+      if (streamError) return;
+      window.dispatchEvent(new Event("rag-generation-status-changed"));
+      await loadBase(baseId);
+      if (!conversationId && finalAnswer?.conversation_id) onOpen(`/chat/${finalAnswer.conversation_id}?knowledge_base_id=${baseId}`);
+    } catch (reason) {
+      if (!(reason instanceof DOMException && reason.name === "AbortError")) setError(reason instanceof Error ? reason.message : "查询失败。");
+      else setStreamingStage("已停止生成");
+    } finally {
+      streamController.current = null; setBusy(false); setPendingQuestion("");
+    }
+  };
   const removeConversation = async () => { if (!conversationId) return; setBusy(true); try { await api.deleteConversation(baseId, conversationId); await loadBase(baseId); setConfirmDelete(false); onOpen(`/chat?knowledge_base_id=${baseId}`); } catch (reason) { setError(reason instanceof Error ? reason.message : "删除会话失败。"); } finally { setBusy(false); } };
   const exportConversation = () => {
     if (!history) return;
@@ -115,8 +150,10 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
           {/* 弹层开着时错误只在弹层里显示：这条横幅在 Radix 的 aria-hidden 背景里。 */}
           {error && !confirmDelete ? <ErrorBanner>{error}</ErrorBanner> : null}
           {history?.records.map((record, index) => <div className="mx-auto mb-[30px] grid max-w-[760px] gap-[18px]" key={record.record_id}><article className="flex items-start justify-end gap-2.5"><span className="block max-w-[78%] rounded-[14px_14px_3px_14px] bg-[#eeeaff] px-4 py-[13px] leading-[1.65] text-[#332878] max-[768px]:max-w-[85%]">{record.question}</span><b className="grid h-[30px] w-[30px] flex-none place-items-center rounded-full bg-[#9a8ce8] text-[11px] font-bold text-white">你</b></article><article className="flex items-start gap-2.5"><span className="grid h-[30px] w-[30px] flex-none place-items-center rounded-full bg-brand text-white"><Bot size={17}/></span><div className="max-w-[min(86%,720px)] rounded-[3px_14px_14px_14px] border border-line bg-surface py-4 px-[18px] shadow-[0_5px_18px_rgba(31,38,63,0.04)] max-[768px]:max-w-[calc(100%-40px)] max-[768px]:p-[13px]"><p className="m-0 leading-[1.85] whitespace-pre-wrap text-[#343c50]">{record.answer ?? record.error_message ?? "本次回答失败。"}</p><small className="block mt-3 text-[10px] text-ink-faint">{record.sources.length} 条来源 · {new Date(record.created_at).toLocaleString("zh-CN")}</small>{index === history.records.length - 1 && historicalResult ? <TechnicalDrawer result={historicalResult}/> : null}</div></article></div>)}
-          {!history?.records.length && !result ? <AnswerPanel result={null} loading={false} showSources={false}/> : null}
-          {result || (busy && Boolean(question)) ? <AnswerPanel result={result} loading={busy && Boolean(question)} showSources={false}/> : null}
+          {pendingQuestion ? <article className="mx-auto mb-[18px] flex max-w-[760px] items-start justify-end gap-2.5"><span className="block max-w-[78%] rounded-[14px_14px_3px_14px] bg-[#eeeaff] px-4 py-[13px] leading-[1.65] text-[#332878]">{pendingQuestion}</span><b className="grid h-[30px] w-[30px] flex-none place-items-center rounded-full bg-[#9a8ce8] text-[11px] font-bold text-white">你</b></article> : null}
+          {!history?.records.length && !result && !busy && !streamingText ? <AnswerPanel result={null} loading={false} showSources={false}/> : null}
+          {result || busy || streamingText ? <AnswerPanel result={result} loading={busy} streamingText={streamingText} streamingStage={streamingStage} showSources={false}/> : null}
+          {busy ? <div className="mx-auto mb-4 flex max-w-[760px] justify-end"><Button type="button" size="sm" variant="outline" onClick={() => streamController.current?.abort()}><Square size={14}/> 停止生成</Button></div> : null}
         </div>
         <div className="pt-0 px-3 pb-3 bg-[linear-gradient(180deg,rgba(251,252,255,0),#fbfcff_22%)] [&>*]:mx-auto [&>*]:max-w-[760px] min-[768px]:px-[18px] min-[768px]:pb-3.5 min-[1025px]:px-[22px] min-[1025px]:pb-2.5"><div className="flex flex-nowrap gap-[7px] overflow-x-auto mt-2 mb-[9px] max-[768px]:mt-1">{EXAMPLES.map((item) => <Button variant="outline" size="sm" key={item} onClick={() => setQuestion(item)}>{item}</Button>)}</div><form className="overflow-hidden rounded-[9px] border border-[#c8c2f5] bg-surface shadow-[0_6px_20px_rgba(75,56,192,0.06)] focus-within:border-[#7568df] focus-within:shadow-[0_0_0_3px_#efedff]" onSubmit={ask}>{/* label 文字要 shrink-0：它和 w-full 的输入框同处一个 flex，不锁住就会被挤成两行。 */}<div className="grid grid-cols-[minmax(100px,0.8fr)_minmax(150px,1.4fr)_minmax(110px,0.8fr)] gap-2 border-b border-divider bg-[#fafbfe] py-[9px] px-3 max-[768px]:grid-cols-1" aria-label="检索过滤条件"><label className="flex min-w-0 items-center gap-1.5 text-[10px] text-ink-faint max-[768px]:grid max-[768px]:grid-cols-[36px_minmax(0,1fr)]"><span className="shrink-0">分类</span><Select size="sm" aria-label="过滤分类" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="">全部分类</option>{categories.map((item) => <option key={item.category_id} value={item.category_id}>{item.name}{item.active ? "" : "（已停用）"}</option>)}</Select></label><label className="flex min-w-0 items-center gap-1.5 text-[10px] text-ink-faint max-[768px]:grid max-[768px]:grid-cols-[36px_minmax(0,1fr)]"><span className="shrink-0">标签</span><Input size="sm" aria-label="过滤标签" value={tagFilter} onChange={(event) => setTagFilter(event.target.value)} placeholder="逗号分隔"/></label><label className="flex min-w-0 items-center gap-1.5 text-[10px] text-ink-faint max-[768px]:grid max-[768px]:grid-cols-[36px_minmax(0,1fr)]"><span className="shrink-0">来源</span><Select size="sm" aria-label="过滤来源类型" value={sourceTypeFilter} onChange={(event) => setSourceTypeFilter(event.target.value)}><option value="">全部</option><option value="file">文件</option><option value="object_storage">对象存储</option><option value="web">网页</option><option value="connector">连接器</option></Select></label></div><label className="sr-only" htmlFor="question">向知识库提问</label><textarea id="question" className="w-full min-h-[70px] resize-none border-0 bg-transparent pt-3.5 pr-3.5 pb-[7px] pl-3.5 text-[#283047] leading-[1.6] outline-0" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="输入你的问题…" rows={2} maxLength={2000}/><div className="flex min-h-[48px] items-center justify-between border-t border-divider pt-1.5 pr-2 pb-[7px] pl-3 max-[561px]:items-end max-[561px]:gap-2"><div className="flex items-center gap-3 max-[768px]:gap-[7px]"><label className="flex items-center gap-[5px] m-0"><span className="block text-[11px] font-semibold text-[#555f75] max-[768px]:hidden">知识库：</span><Select size="sm" aria-label="当前知识库" value={baseId} onChange={(event) => selectBase(event.target.value)}>{bases.map((item) => <option key={item.knowledge_base_id} value={item.knowledge_base_id}>{item.name}</option>)}</Select></label><span className="flex items-center gap-[5px] whitespace-nowrap text-[10px] text-ink-faint max-[768px]:hidden"><Paperclip size={15}/>{documents.length ? `已连接 ${documents.length} 份资料` : "暂无资料"}</span></div>{/* 禁用原因由 Button 自动渲染成 ⓘ + Tooltip，不占行高。 */}<Button type="submit" size="icon" aria-label="提问并发送" loading={busy} blockedReason={question.trim() ? undefined : "请先输入问题"}>{busy ? <span className="block h-3.5 w-3.5 rounded-full border-2 border-white/45 border-t-white [animation:spin_0.7s_linear_infinite]"/> : <Send size={17}/>}</Button></div></form><small className="block mt-2 text-center text-[9px] text-ink-faint">内容由人工智能生成，请注意甄别信息准确性</small></div>
       </section>

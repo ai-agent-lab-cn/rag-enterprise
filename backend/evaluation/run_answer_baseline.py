@@ -44,7 +44,7 @@ def run_baseline(
     settings = get_settings()
     if not settings.gemini_api_key:
         raise RuntimeError("正式回答评测需要通过本地环境提供 GEMINI_API_KEY")
-    if judge_model == settings.generation_model:
+    if judge_model == settings.gemini_model:
         raise ValueError("生成模型不能作为唯一裁判")
 
     dataset = load_answer_dataset(dataset_path)
@@ -64,7 +64,7 @@ def run_baseline(
             client,
             case,
             case_sources,
-            settings.generation_model,
+            settings.gemini_model,
             last_request_at,
             request_interval_seconds,
         )
@@ -91,7 +91,7 @@ def run_baseline(
         prompt_version="v3-grounded-answer-1",
         prompt_hash=_aggregate_hash(prompt_hashes),
         models={
-            "generation": settings.generation_model,
+            "generation": settings.gemini_model,
             "judge": judge_model,
         },
         parameters={

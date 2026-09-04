@@ -1,3 +1,6 @@
+import asyncio
+import json
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -8,6 +11,7 @@ from fastapi import Depends, FastAPI, File, Form, Query, Request, Response, Uplo
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from starlette.responses import StreamingResponse
 
 from .audit import AuditRepository
 from .auth import AuthenticatedSession, AuthRepository, UserRecord
@@ -20,13 +24,14 @@ from .errors import AppError, install_error_handlers
 from .evaluation_governance import BadCaseUpdate
 from .evaluation_reports import EvaluationReportRepository
 from .history import ConversationRepository
+from .generation_models import GenerationProviderState
 from .knowledge_bases import (
     DEFAULT_KNOWLEDGE_BASE_ID,
     KnowledgeBaseRecord,
     KnowledgeBaseRepository,
     KnowledgeBaseScope,
 )
-from .models import get_embedding_model, get_generator, get_reranker
+from .models import SwitchableGenerator, get_embedding_model, get_generator, get_reranker
 from .observability import MetricsRegistry, ObservabilityMiddleware, bind_actor, hash_identifier
 from .postgres_documents import PostgresAsyncRAGService, check_embedding_model
 from .postgres_evaluation import PostgresEvaluationGovernanceRepository
@@ -77,6 +82,9 @@ from .schemas import (
     EvaluationReportSummary,
     GovernedBadCaseResponse,
     GovernedBadCaseUpdate,
+    GenerationModelActivateRequest,
+    GenerationModelItemResponse,
+    GenerationModelsResponse,
     HealthResponse,
     IndexVersionResponse,
     KnowledgeBaseCreate,
@@ -122,6 +130,13 @@ def get_service() -> RAGService:
 
 ServiceDependency = Annotated[RAGServiceProtocol, Depends(get_service)]
 UploadedFile = Annotated[UploadFile, File()]
+
+
+def get_generation_manager() -> SwitchableGenerator:
+    generator = get_generator()
+    if not isinstance(generator, SwitchableGenerator):
+        raise AppError("POSTGRES_REQUIRED", "模型切换依赖 PostgreSQL 运行时。", 503)
+    return generator
 
 
 @lru_cache
@@ -294,15 +309,16 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
+        generator = get_generator()
         return HealthResponse(
             status="ok",
             version=app.version,
             collection_ready=True,
-            generation_ready=bool(settings.gemini_api_key),
+            generation_ready=generator.ready,
             models={
                 "embedding": settings.embedding_model,
                 "reranker": settings.reranker_model,
-                "generation": settings.generation_model,
+                "generation": generator.model_name,
             },
         )
 
@@ -342,6 +358,90 @@ def create_app() -> FastAPI:
     async def system_metrics(current: CurrentSessionDependency) -> MetricsResponse:
         _require_admin(current.user)
         return MetricsResponse(**metrics.snapshot())
+
+    @app.get("/api/generation-models", response_model=GenerationModelsResponse)
+    async def list_generation_models(current: CurrentSessionDependency) -> GenerationModelsResponse:
+        _require_admin(current.user)
+        states = await run_in_threadpool(get_generation_manager().states)
+        return _generation_models_response(states)
+
+    @app.post(
+        "/api/generation-models/{provider}/check",
+        response_model=GenerationModelItemResponse,
+    )
+    async def check_generation_model(
+        provider: str,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> GenerationModelItemResponse:
+        _require_admin(current.user)
+        manager = get_generation_manager()
+        try:
+            state = await run_in_threadpool(manager.check, provider, current.user.user_id)
+        except AppError as exc:
+            await _record_audit(
+                audit,
+                "generation_model.check",
+                current.user,
+                "generation_model",
+                provider,
+                result="failed",
+                metadata={"provider": provider, "error_code": exc.code},
+            )
+            raise
+        await _record_audit(
+            audit,
+            "generation_model.check",
+            current.user,
+            "generation_model",
+            provider,
+            metadata={"provider": provider, "model": state.model_name},
+        )
+        return _generation_model_item(state)
+
+    @app.put("/api/generation-models/active", response_model=GenerationModelsResponse)
+    async def activate_generation_model(
+        payload: GenerationModelActivateRequest,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> GenerationModelsResponse:
+        _require_admin(current.user)
+        manager = get_generation_manager()
+        previous_provider = manager.provider_name
+        try:
+            states = await run_in_threadpool(
+                manager.activate,
+                payload.provider,
+                current.user.user_id,
+            )
+        except AppError as exc:
+            await _record_audit(
+                audit,
+                "generation_model.switch",
+                current.user,
+                "generation_model",
+                payload.provider,
+                result="failed",
+                metadata={
+                    "provider": payload.provider,
+                    "previous_provider": previous_provider,
+                    "error_code": exc.code,
+                },
+            )
+            raise
+        await _record_audit(
+            audit,
+            "generation_model.switch",
+            current.user,
+            "generation_model",
+            payload.provider,
+            metadata={
+                "provider": payload.provider,
+                "previous_provider": previous_provider,
+                "model": manager.model_name,
+            },
+        )
+        return _generation_models_response(states)
 
     @app.get("/api/audit/events", response_model=list[AuditEventResponse])
     async def list_audit_events(
@@ -1778,6 +1878,74 @@ def create_app() -> FastAPI:
             current.user.user_id,
         )
 
+    @app.post("/api/knowledge-bases/{knowledge_base_id}/query/stream")
+    async def stream_knowledge_base_query(
+        knowledge_base_id: str,
+        payload: QueryRequest,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+        conversations: ConversationsDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> StreamingResponse:
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if payload.rerank_k > payload.retrieve_k:
+            raise AppError("INVALID_TOP_K", "rerank_k 不能大于 retrieve_k。")
+
+        async def events():
+            queue: asyncio.Queue[tuple[str, dict[str, object]] | None] = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+            cancelled = threading.Event()
+
+            def publish(event: str, data: dict[str, object]) -> None:
+                if cancelled.is_set():
+                    raise RuntimeError("query stream cancelled")
+                if event != "heartbeat":
+                    loop.call_soon_threadsafe(queue.put_nowait, (event, data))
+
+            async def execute() -> None:
+                try:
+                    result = await _execute_recorded_query(
+                        payload, service, conversations, knowledge_base_id, settings,
+                        abuse_protection, metrics, current.user.user_id, publish,
+                    )
+                    publish("final", result.model_dump(mode="json"))
+                except AppError as exc:
+                    publish("error", {"code": exc.code, "message": exc.message, "details": exc.details})
+                except RuntimeError as exc:
+                    if not cancelled.is_set():
+                        publish("error", {"code": "STREAM_FAILED", "message": str(exc)})
+                except Exception:
+                    if not cancelled.is_set():
+                        publish(
+                            "error",
+                            {
+                                "code": "STREAM_FAILED",
+                                "message": "流式查询暂时不可用，已保留可用的检索来源。",
+                            },
+                        )
+                finally:
+                    if not cancelled.is_set():
+                        loop.call_soon_threadsafe(queue.put_nowait, None)
+
+            task = asyncio.create_task(execute())
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        break
+                    event, data = item
+                    yield f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+            finally:
+                cancelled.set()
+                if not task.done():
+                    task.cancel()
+
+        return StreamingResponse(
+            events(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     @app.get(
         "/api/knowledge-bases/{knowledge_base_id}/conversations",
         response_model=list[ConversationSummaryResponse],
@@ -1913,6 +2081,44 @@ app = create_app()
 
 def _user_response(user: UserRecord) -> UserResponse:
     return UserResponse(**user.to_public())
+
+
+def _generation_model_item(state: GenerationProviderState) -> GenerationModelItemResponse:
+    return GenerationModelItemResponse(
+        provider=state.provider,
+        display_name={
+            "deepseek": "DeepSeek",
+            "gemini": "Gemini",
+            "kimi": "Kimi",
+        }[state.provider],
+        model_name=state.model_name,
+        configured=state.configured,
+        active=state.active,
+        status=state.status,
+        status_code=state.status_code,
+        status_message=state.status_message,
+        checked_at=state.checked_at,
+        balance_status=state.balance_status,
+        balance_amount=float(state.balance_amount) if state.balance_amount is not None else None,
+        balance_currency=state.balance_currency,
+        balance_limit=float(state.balance_limit) if state.balance_limit is not None else None,
+        balance_percent=(
+            min(100.0, max(0.0, float(state.balance_amount / state.balance_limit * 100)))
+            if state.balance_amount is not None and state.balance_limit
+            else None
+        ),
+        balance_checked_at=state.balance_checked_at,
+    )
+
+
+def _generation_models_response(
+    states: list[GenerationProviderState],
+) -> GenerationModelsResponse:
+    active = next((state.provider for state in states if state.active), "deepseek")
+    return GenerationModelsResponse(
+        active_provider=active,
+        items=[_generation_model_item(state) for state in states],
+    )
 
 
 def _auth_token_response(session: AuthenticatedSession) -> AuthTokenResponse:
@@ -2123,6 +2329,7 @@ async def _execute_recorded_query(
     abuse_protection: AbuseProtection,
     metrics: MetricsRegistry,
     user_id: str,
+    event_callback=None,
 ) -> QueryResponse:
     abuse_protection.check_expensive(user_id)
     question = payload.question.strip()
@@ -2148,8 +2355,10 @@ async def _execute_recorded_query(
                 knowledge_base_id,
                 payload.filters,
                 RetrievalAccessContext(user_id),
+                event_callback,
             )
     except AppError as exc:
+        active_generator = get_generator()
         failure_latency = {"total": _duration_ms(started)}
         metrics.record_rag(failure_latency, retrieval_failed=True, answer_failed=True)
         error_details = dict(exc.details) if isinstance(exc.details, dict) else {}
@@ -2165,9 +2374,12 @@ async def _execute_recorded_query(
             models={
                 "embedding": settings.embedding_model,
                 "reranker": settings.reranker_model,
-                "generation": settings.generation_model,
+                "generation": active_generator.model_name,
             },
-            model_metadata={"configured_model": settings.generation_model},
+            model_metadata={
+                "configured_model": active_generator.model_name,
+                "provider": active_generator.provider_name,
+            },
             prompt_version=None,
             prompt_hash=None,
             query_metadata=error_details.get("query_metadata"),

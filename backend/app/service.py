@@ -1,14 +1,16 @@
 import json
+import re
 import time
 from dataclasses import replace
 from datetime import datetime
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from .config import Settings
 from .errors import AppError
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
 from .lexical import LexicalIndexCache
-from .models import EmbeddingModel, GeminiGenerator, Reranker
+from .models import AnswerGenerator, EmbeddingModel, Reranker
 from .prompts import (
     GENERATION_FAILED_ANSWER,
     RETRIEVAL_ONLY_ANSWER,
@@ -21,6 +23,8 @@ from .ranking import fuse_query_candidates, rank_candidates, reciprocal_rank_fus
 from .retrieval_access import RetrievalAccessContext, can_retrieve_metadata
 from .schemas import DocumentInfo, QueryMetadataFilter, QueryResponse, Source
 from .store import RetrievedChunk
+
+QueryEventCallback = Callable[[str, dict[str, object]], None]
 
 # 完整 RAG 编排：入库、召回、精排、Prompt、生成
 
@@ -103,6 +107,7 @@ class RAGServiceProtocol(Protocol):
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
         filters: QueryMetadataFilter | None = None,
         access: RetrievalAccessContext | None = None,
+        event_callback: QueryEventCallback | None = None,
     ) -> QueryResponse: ...
     def list_index_versions(
         self, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
@@ -116,7 +121,7 @@ class RAGService:
         store: Any,
         embedder: EmbeddingModel,
         reranker: Reranker,
-        generator: GeminiGenerator,
+        generator: AnswerGenerator,
         lexical: LexicalIndexCache | None = None,
     ):
         self.settings = settings
@@ -277,8 +282,11 @@ class RAGService:
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
         filters: QueryMetadataFilter | None = None,
         access: RetrievalAccessContext | None = None,
+        event_callback: QueryEventCallback | None = None,
     ) -> QueryResponse:
         total_started = time.perf_counter()
+        if event_callback:
+            event_callback("stage", {"stage": "retrieval", "message": "正在检索资料"})
         retrieval_started = time.perf_counter()
         query_plan = build_query_plan(question)
         original_embedding = self.embedder.encode([query_plan.normalized])[0]
@@ -371,27 +379,42 @@ class RAGService:
             )
 
         rerank_started = time.perf_counter()
+        if event_callback:
+            event_callback("stage", {"stage": "rerank", "message": "正在进行相关性排序"})
         scores = self.reranker.score(question, [candidate.text for candidate in candidates])
         # 在线查询与正式评测共用融合排序，避免两个入口产生不同的质量结论。
         ranked = rank_candidates(candidates, scores, min(rerank_k, len(candidates)))
         rerank_ms = _elapsed(rerank_started)
 
+        source_items = [_source(item) for item in ranked]
+        if event_callback:
+            event_callback("sources", {"items": [item.model_dump(mode="json") for item in source_items]})
+
         prompt = build_prompt(question, ranked)
         generation_started = time.perf_counter()
-        parsed_answer, generation_metadata = self._generate_answer(prompt.text, len(ranked))
+        if event_callback:
+            event_callback("stage", {"stage": "generation", "message": "正在生成答案"})
+            parsed_answer, generation_metadata = self._generate_answer_stream(
+                prompt.text, len(ranked), event_callback
+            )
+        else:
+            parsed_answer, generation_metadata = self._generate_answer(prompt.text, len(ranked))
         generation_ms = _elapsed(generation_started)
-        model_metadata = _model_metadata(generation_metadata, self.generator.model_name)
+        used_generation_model = generation_metadata.get("configured_model")
+        if not isinstance(used_generation_model, str):
+            used_generation_model = self.generator.model_name
+        model_metadata = _model_metadata(generation_metadata, used_generation_model)
         return QueryResponse(
             answer=parsed_answer.answer,
             answer_status=parsed_answer.status,
             error_code=parsed_answer.error_code,
             error_message=parsed_answer.error_message,
-            sources=[_source(item) for item in ranked],
-            model=self.generator.model_name,
+            sources=source_items,
+            model=used_generation_model,
             models={
                 "embedding": self.embedder.model_name,
                 "reranker": self.reranker.model_name,
-                "generation": self.generator.model_name,
+                "generation": used_generation_model,
             },
             model_metadata=model_metadata,
             prompt_version=prompt.version,
@@ -439,7 +462,15 @@ class RAGService:
         try:
             raw_answer, metadata = self.generator.generate(prompt)
         except AppError as exc:
-            if exc.code not in {"MODEL_TIMEOUT", "MODEL_UNAVAILABLE"}:
+            if exc.code not in {
+                "MODEL_REGION_UNSUPPORTED",
+                "MODEL_QUOTA_EXHAUSTED",
+                "MODEL_AUTH_FAILED",
+                "MODEL_RATE_LIMITED",
+                "MODEL_TIMEOUT",
+                "MODEL_NOT_FOUND",
+                "MODEL_UNAVAILABLE",
+            }:
                 raise
             return (
                 ParsedAnswer(
@@ -448,9 +479,53 @@ class RAGService:
                     exc.code,
                     exc.message,
                 ),
-                {},
+                dict(exc.details) if isinstance(exc.details, dict) else {},
             )
         return parse_answer(raw_answer, source_count), metadata
+
+    def _generate_answer_stream(
+        self,
+        prompt: str,
+        source_count: int,
+        event_callback: QueryEventCallback,
+    ) -> tuple[ParsedAnswer, dict[str, object]]:
+        if not getattr(self.generator, "ready", True):
+            return ParsedAnswer("retrieval_only", RETRIEVAL_ONLY_ANSWER), {}
+        try:
+            chunks: list[str] = []
+            for chunk in self.generator.generate_stream(prompt):
+                chunks.append(chunk)
+                event_callback("heartbeat", {})
+            raw_answer = "".join(chunks)
+        except AppError as exc:
+            if exc.code not in {
+                "MODEL_REGION_UNSUPPORTED", "MODEL_QUOTA_EXHAUSTED", "MODEL_AUTH_FAILED",
+                "MODEL_RATE_LIMITED", "MODEL_TIMEOUT", "MODEL_NOT_FOUND", "MODEL_UNAVAILABLE",
+            }:
+                raise
+            details = dict(exc.details) if isinstance(exc.details, dict) else {}
+            return ParsedAnswer("generation_failed", GENERATION_FAILED_ANSWER, exc.code, exc.message), details
+
+        event_callback("stage", {"stage": "governance", "message": "正在校验引用"})
+        parsed = parse_answer(raw_answer, source_count)
+        provider_status = "unknown"
+        for status in ("ANSWERED", "INSUFFICIENT_EVIDENCE", "SOURCE_CONFLICT"):
+            if raw_answer.lstrip().startswith(f"[STATUS: {status}]"):
+                provider_status = status.lower()
+                break
+        metadata: dict[str, object] = {
+            "provider": getattr(self.generator, "provider_name", "unknown"),
+            "configured_model": self.generator.model_name,
+            "provider_decision": provider_status,
+            "effective_evidence_count": source_count,
+            "governance_decision": parsed.status,
+        }
+        if parsed.status in {"answered", "source_conflict"}:
+            for sentence in _answer_sentences(parsed.answer):
+                event_callback("answer_delta", {"text": sentence})
+        else:
+            event_callback("replace", {"answer": parsed.answer, "answer_status": parsed.status})
+        return parsed, metadata
 
 
 def _model_metadata(
@@ -459,15 +534,28 @@ def _model_metadata(
 ) -> dict[str, str | int | float | bool]:
     """只保留可复现且体积稳定的生成元数据，不保存供应商原始响应或 Prompt。"""
 
-    metadata: dict[str, str | int | float | bool] = {"configured_model": configured_model}
+    response_model = response_metadata.get("configured_model")
+    metadata: dict[str, str | int | float | bool] = {
+        "configured_model": response_model if isinstance(response_model, str) else configured_model
+    }
     for source_key, target_key in (
+        ("provider", "provider"),
         ("model_version", "model_version"),
         ("response_id", "response_id"),
+        ("provider_decision", "provider_decision"),
+        ("effective_evidence_count", "effective_evidence_count"),
+        ("governance_decision", "governance_decision"),
     ):
         value = response_metadata.get(source_key)
         if isinstance(value, (str, int, float, bool)):
             metadata[target_key] = value
     return metadata
+
+
+def _answer_sentences(answer: str) -> list[str]:
+    """将已通过最终治理的答案切成适合 SSE 展示的完整句子。"""
+    parts = re.findall(r".*?(?:[。！？；]\s*|\n+|$)", answer, flags=re.S)
+    return [part for part in parts if part]
 
 
 def _elapsed(started: float) -> float:

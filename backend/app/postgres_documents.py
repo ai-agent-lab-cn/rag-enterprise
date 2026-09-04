@@ -25,7 +25,7 @@ from .index_versions import (
 )
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID, validate_knowledge_base_id
 from .lexical import LexicalIndexCache
-from .models import EmbeddingModel, GeminiGenerator, Reranker, get_generator
+from .models import AnswerGenerator, EmbeddingModel, Reranker, get_generator
 from .parsers import parse_structured_document
 from .retrieval_access import RetrievalAccessContext
 from .schemas import DocumentInfo, QueryMetadataFilter
@@ -257,7 +257,7 @@ class PostgresVectorStore:
         validate_knowledge_base_id(knowledge_base_id)
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             rows = connection.execute(
-                """SELECT d.document_id, d.filename, d.current_version_id, d.metadata,
+                """SELECT d.document_id, d.data_source_id, d.filename, d.current_version_id, d.metadata,
                           d.created_at, s.source_type,
                           current_version.status AS current_status,
                           count(c.chunk_id) AS chunk_count,
@@ -277,7 +277,7 @@ class PostgresVectorStore:
                        ORDER BY dv.version_number DESC LIMIT 1
                    ) pending ON true
                    WHERE d.knowledge_base_id = %s
-                   GROUP BY d.document_id, d.filename, d.current_version_id, d.metadata,
+                   GROUP BY d.document_id, d.data_source_id, d.filename, d.current_version_id, d.metadata,
                             d.created_at, s.source_type, current_version.status, pending.status
                    ORDER BY lower(d.filename)""",
                 (self._active_index_version(knowledge_base_id), knowledge_base_id),
@@ -286,6 +286,7 @@ class PostgresVectorStore:
             {
                 "knowledge_base_id": knowledge_base_id,
                 "document_id": row["document_id"],
+                "data_source_id": row["data_source_id"],
                 "filename": row["filename"],
                 "chunk_count": int(row["chunk_count"]),
                 "status": row["pending_status"] or row["current_status"] or "pending",
@@ -472,7 +473,7 @@ class PostgresAsyncRAGService(RAGService):
         settings: Settings,
         embedder: EmbeddingModel,
         reranker: Reranker,
-        generator: GeminiGenerator,
+        generator: AnswerGenerator,
     ):
         if not settings.database_url:
             raise ValueError("DATABASE_URL is required")
@@ -942,7 +943,7 @@ class IndexWorker:
         self,
         settings: Settings,
         embedder: EmbeddingModel,
-        generator: GeminiGenerator | None = None,
+        generator: AnswerGenerator | None = None,
     ):
         if not settings.database_url:
             raise ValueError("DATABASE_URL is required")

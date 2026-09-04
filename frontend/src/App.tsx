@@ -12,6 +12,7 @@ import { DataSourcesPage } from "./components/DataSourcesPage";
 import { KnowledgeBaseDetailPage } from "./components/KnowledgeBaseDetailPage";
 import { KnowledgeBasesPage } from "./components/KnowledgeBasesPage";
 import { MembersPage } from "./components/MembersPage";
+import { ModelSwitcher } from "./components/ModelSwitcher";
 import { OverviewPage } from "./components/OverviewPage";
 import { PermissionDeniedPage } from "./components/PermissionDeniedPage";
 import { SystemPage } from "./components/SystemPage";
@@ -153,6 +154,7 @@ export default function App() {
           </span>
         </button>
         <AppNavigation page={page} onNavigate={navigate} isAdmin={auth.user.role === "admin"} />
+        {auth.user.role === "admin" ? <ModelSwitcher /> : null}
       </aside>
       <div className="min-w-0">
         {page !== "overview" ? (

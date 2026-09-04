@@ -14,6 +14,9 @@ import type {
   AnswerEvaluationSummary,
   EvaluationCenterOverview,
   GovernedBadCase,
+  GenerationModelItem,
+  GenerationModels,
+  GenerationProvider,
   IndexVersion,
   PipelineEvaluation,
   ConversationDetail,
@@ -60,6 +63,48 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export type QueryStreamEvent =
+  | { event: "stage"; data: { stage: string; message: string } }
+  | { event: "answer_delta"; data: { text: string } }
+  | { event: "sources"; data: { items: QueryResult["sources"] } }
+  | { event: "replace"; data: { answer: string; answer_status: QueryResult["answer_status"] } }
+  | { event: "final"; data: QueryResult }
+  | { event: "error"; data: { code: string; message: string } };
+
+async function streamQuery(
+  url: string,
+  body: object,
+  signal: AbortSignal,
+  onEvent: (event: QueryStreamEvent) => void,
+) {
+  const headers = new Headers({ "Content-Type": "application/json", Accept: "text/event-stream" });
+  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+  const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal });
+  if (!response.ok || !response.body) {
+    const payload = (await response.json().catch(() => ({}))) as ApiErrorPayload;
+    if (response.status === 401 && !url.startsWith("/api/auth/")) {
+      setAccessToken(null);
+      window.dispatchEvent(new Event("rag-auth-expired"));
+    }
+    throw new Error(payload.error?.message ?? `请求失败（${response.status}）`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const blocks = buffer.split("\n\n");
+    buffer = blocks.pop() ?? "";
+    for (const block of blocks) {
+      const event = block.match(/^event:\s*(.+)$/m)?.[1];
+      const raw = block.match(/^data:\s*(.+)$/m)?.[1];
+      if (event && raw) onEvent({ event, data: JSON.parse(raw) } as QueryStreamEvent);
+    }
+    if (done) break;
+  }
+}
+
 export const api = {
   getBootstrapStatus: () => request<{ required: boolean }>("/api/auth/bootstrap"),
   bootstrap: (username: string, password: string, displayName: string) =>
@@ -79,6 +124,15 @@ export const api = {
   health: () => request<HealthStatus>("/api/health"),
   readiness: () => request<ReadinessStatus>("/api/health/ready"),
   systemMetrics: () => request<SystemMetrics>("/api/system/metrics"),
+  listGenerationModels: () => request<GenerationModels>("/api/generation-models"),
+  checkGenerationModel: (provider: GenerationProvider) =>
+    request<GenerationModelItem>(`/api/generation-models/${provider}/check`, { method: "POST" }),
+  activateGenerationModel: (provider: GenerationProvider) =>
+    request<GenerationModels>("/api/generation-models/active", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider }),
+    }),
   listMembers: () => request<User[]>("/api/members?offset=0&limit=100"),
   createMember: (username: string, displayName: string, password: string, role: User["role"]) =>
     request<User>("/api/members", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, display_name: displayName, password, role }) }),
@@ -208,6 +262,19 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, retrieve_k: 10, rerank_k: 5, conversation_id: conversationId || null, ...(filters ? { filters } : {}) }),
     }),
+  streamKnowledgeBaseQuery: (
+    id: string,
+    question: string,
+    conversationId: string | undefined,
+    filters: { category_ids?: string[]; categories?: string[]; tags?: string[]; source_types?: string[] } | undefined,
+    signal: AbortSignal,
+    onEvent: (event: QueryStreamEvent) => void,
+  ) => streamQuery(
+    `/api/knowledge-bases/${id}/query/stream`,
+    { question, retrieve_k: 10, rerank_k: 5, conversation_id: conversationId || null, ...(filters ? { filters } : {}) },
+    signal,
+    onEvent,
+  ),
   listConversations: (id: string) =>
     request<ConversationSummary[]>(`/api/knowledge-bases/${id}/conversations`),
   getConversation: (knowledgeBaseId: string, conversationId: string) =>
