@@ -1,5 +1,6 @@
 import { useState } from "react";
-import type { DataSource, DocumentCategory, DocumentInfo, DocumentVersion } from "../types";
+import { RefreshCw } from "lucide-react";
+import type { DocumentCategory, DocumentInfo, DocumentVersion, GovernedOperation } from "../types";
 import { ParsingPanel } from "./ParsingPanel";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
@@ -7,9 +8,11 @@ import { Column, DataTable } from "./ui/DataTable";
 import { Dialog, DialogActions } from "./ui/Dialog";
 import { FileButton } from "./ui/FileButton";
 import { Input } from "./ui/Input";
+import { PipelineStepper } from "./ui/PipelineStepper";
 import { RowAction, RowActions } from "./ui/RowActions";
 import { Select } from "./ui/Select";
 import { Toolbar } from "./ui/Toolbar";
+import { Tooltip } from "./ui/Tooltip";
 import { useConfirm } from "./ui/useConfirm";
 import { useToast } from "./ui/Toast";
 
@@ -38,31 +41,25 @@ const STATUS_TONE: Record<DocumentInfo["classification_status"], "neutral" | "br
   failed: "danger",
 };
 
-const SOURCE_TYPE_LABEL: Record<string, string> = {
-  file: "文件上传",
-  object_storage: "S3 对象存储",
-  local_directory: "本地目录",
-  web: "网页",
-  connector: "连接器",
-};
-
 interface DocumentPanelProps {
   knowledgeBaseId: string;
   documents: DocumentInfo[];
   versions: DocumentVersion[];
   categories: DocumentCategory[];
-  dataSources?: DataSource[];
+  operations?: GovernedOperation[];
   loading: boolean;
   uploadProgress?: { completed: number; total: number } | null;
   onUpload: (files: File[]) => Promise<void>;
+  onUpdateFile: (document: DocumentInfo, file: File) => Promise<void>;
   onDelete: (documentId: string) => Promise<void>;
   onUpdateMetadata: (documentId: string, category: string, tags: string[]) => Promise<void>;
   onBatchCategory: (documentIds: string[], categoryId: string) => Promise<void>;
   onReclassify: (documentIds: string[]) => Promise<void>;
+  onRetryProcessing: (documentVersionId: string, chunkSize: number, chunkOverlap: number) => Promise<void>;
   canManage?: boolean;
 }
 
-export function DocumentPanel({ knowledgeBaseId, documents, versions, categories, dataSources = [], loading, uploadProgress, onUpload, onDelete, onUpdateMetadata, onBatchCategory, onReclassify, canManage = true }: DocumentPanelProps) {
+export function DocumentPanel({ knowledgeBaseId, documents, versions, categories, operations = [], loading, uploadProgress, onUpload, onUpdateFile, onDelete, onUpdateMetadata, onBatchCategory, onReclassify, onRetryProcessing, canManage = true }: DocumentPanelProps) {
   const [dragging, setDragging] = useState(false);
   const [editing, setEditing] = useState<DocumentInfo | null>(null);
   const [category, setCategory] = useState("");
@@ -71,11 +68,10 @@ export function DocumentPanel({ knowledgeBaseId, documents, versions, categories
   const [selected, setSelected] = useState<string[]>([]);
   const [categoryFilter, setCategoryFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
-  const [sourceTypeFilter, setSourceTypeFilter] = useState("");
-  const [dataSourceFilter, setDataSourceFilter] = useState("");
   const [batchCategory, setBatchCategory] = useState("");
   // 行级进度：重新分类只影响这一份资料，整页 Loading 会让其他行也变得不可用。
   const [retrying, setRetrying] = useState<string[]>([]);
+  const [retryingProcessing, setRetryingProcessing] = useState<string[]>([]);
   const [viewing, setViewing] = useState<DocumentInfo | null>(null);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const toast = useToast();
@@ -85,11 +81,29 @@ export function DocumentPanel({ knowledgeBaseId, documents, versions, categories
     || (categoryFilter === UNCATEGORIZED ? item.category_id === null : item.category_id === categoryFilter);
   const visibleDocuments = documents.filter((item) =>
     matchesCategory(item)
-    && (!statusFilter || item.classification_status === statusFilter)
-    && (!sourceTypeFilter || item.source_type === sourceTypeFilter)
-    && (!dataSourceFilter || item.data_source_id === dataSourceFilter));
-  const filtered = Boolean(categoryFilter || statusFilter || sourceTypeFilter || dataSourceFilter);
-  const sourceById = new Map(dataSources.map((item) => [item.data_source_id, item]));
+    && (!statusFilter || item.classification_status === statusFilter));
+  const filtered = Boolean(categoryFilter || statusFilter);
+  const fileOperations = operations.filter((item) =>
+    ["file_upload", "file_update", "document_reprocess"].includes(item.operation_type)
+    && !["succeeded", "completed", "cancelled"].includes(item.status));
+
+  const retryProcessing = async (operation: GovernedOperation) => {
+    const version = versions
+      .filter((item) => item.document_id === operation.document_id)
+      .sort((a, b) => Number(b.is_current) - Number(a.is_current) || b.version_number - a.version_number)[0];
+    if (!version) return;
+    const chunkSize = Number(version.processing_options.chunk_size) || 700;
+    const chunkOverlap = Number(version.processing_options.chunk_overlap) || 100;
+    setRetryingProcessing((current) => [...current, operation.operation_id]);
+    try {
+      await onRetryProcessing(version.document_version_id, chunkSize, chunkOverlap);
+      toast.success(`已重新提交「${version.filename}」的处理任务`);
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : "重新处理失败。");
+    } finally {
+      setRetryingProcessing((current) => current.filter((id) => id !== operation.operation_id));
+    }
+  };
 
   // 供行级与批量重新分类共用。返回是否成功，调用方据此决定要不要清空勾选。
   const reclassify = async (documentIds: string[]) => {
@@ -165,6 +179,24 @@ export function DocumentPanel({ knowledgeBaseId, documents, versions, categories
   const rowActions = (document: DocumentInfo): RowAction[] => {
     if (!canManage) return [];
     const actions: RowAction[] = [];
+    actions.push({
+      label: "更新文件",
+      file: {
+        accept: ".md,.txt,.pdf,.html,.htm,.docx,.xlsx,.csv",
+        onSelect: (files) => {
+          const file = files[0];
+          if (!file) return;
+          if (file.name !== document.filename) {
+            toast.error(`请选择同名文件“${document.filename}”。`);
+            return;
+          }
+          void onUpdateFile(document, file)
+            .then(() => toast.success(`“${document.filename}”的新版本已上传`))
+            .catch((reason: unknown) => toast.error(reason instanceof Error ? reason.message : "文件更新失败。"));
+        },
+      },
+      blockedReason: document.status === "pending" ? "资料正在处理中" : undefined,
+    });
     if (document.classification_status === "pending" || document.classification_status === "failed") {
       actions.push({
         label: "重新分类",
@@ -199,13 +231,6 @@ export function DocumentPanel({ knowledgeBaseId, documents, versions, categories
       ),
     },
     {
-      key: "source", header: "来源", width: "150px", truncate: false,
-      render: (document) => {
-        const source = document.data_source_id ? sourceById.get(document.data_source_id) : undefined;
-        return <span className="block truncate">{source?.name ?? (document.data_source_id ? "来源已删除" : "直接上传")}</span>;
-      },
-    },
-    {
       key: "category", header: "分类", width: "170px", truncate: false,
       render: (document) => (
         // 分类列只放真实分类名；没有分类就是「—」。状态是另一件事，单独一行显示——
@@ -238,7 +263,12 @@ export function DocumentPanel({ knowledgeBaseId, documents, versions, categories
     },
     {
       key: "status", header: "索引状态", width: "100px",
-      render: (document) => <Badge shape="status" tone={document.status === "ready" ? "success" : document.status === "failed" ? "danger" : "brand"}>{document.status === "ready" ? "已索引" : document.status === "failed" ? "失败" : "处理中"}</Badge>,
+      render: (document) => {
+        const failure = document.index_failure_reason === "文件中没有可索引的文本内容。"
+          ? "未提取到文本，文件可能是扫描版 PDF；当前版本暂不支持 OCR。"
+          : document.index_failure_reason;
+        return <span title={failure || undefined}><Badge shape="status" tone={document.status === "ready" ? "success" : document.status === "failed" ? "danger" : "brand"}>{document.status === "ready" ? "已索引" : document.status === "failed" ? "失败" : "处理中"}</Badge></span>;
+      },
     },
     ...(canManage ? [{
       key: "actions", header: "操作", width: "210px", align: "right", truncate: false,
@@ -248,7 +278,7 @@ export function DocumentPanel({ knowledgeBaseId, documents, versions, categories
 
   const uploadControl = <FileButton
         variant="outline"
-        className={`h-auto min-h-28 w-full flex-col items-center justify-center gap-1.5 whitespace-normal border-dashed p-4 text-center normal-case ${dragging ? "border-brand bg-brand-subtle" : "border-line-firm bg-canvas"}`}
+        className={`h-[210px] w-full flex-col items-center justify-center gap-1.5 whitespace-normal border-dashed p-4 text-center normal-case ${dragging ? "border-brand bg-brand-subtle" : "border-line-firm bg-canvas"}`}
         accept=".md,.txt,.pdf,.html,.htm,.docx,.xlsx,.csv"
         multiple
         inputLabel="批量上传资料"
@@ -268,7 +298,35 @@ export function DocumentPanel({ knowledgeBaseId, documents, versions, categories
 
   return (
     <section aria-label="知识库文档" className="grid gap-3">
-      {canManage ? uploadControl : null}
+      {canManage ? <div className="grid grid-cols-[minmax(220px,0.55fr)_minmax(620px,1.45fr)] gap-3 max-lg:grid-cols-1">
+        {uploadControl}
+        <section aria-label="文件处理进度" className="grid h-[210px] grid-rows-[auto_1fr] overflow-hidden rounded-lg border border-line bg-surface">
+          <div className="flex items-center justify-between gap-2 border-b border-divider px-4 py-2.5">
+            <strong className="text-sm text-ink">文件处理进度</strong>
+            <small className="text-ink-faint">进行中或失败 {fileOperations.length} 个</small>
+          </div>
+          <div className="min-h-0 overflow-y-auto px-4">
+            {fileOperations.length ? fileOperations.map((operation) => {
+              const document = documents.find((item) => item.document_id === operation.document_id);
+              const version = versions
+                .filter((item) => item.document_id === operation.document_id)
+                .sort((a, b) => Number(b.is_current) - Number(a.is_current) || b.version_number - a.version_number)[0];
+              const failed = operation.status === "failed" || operation.status === "aborted";
+              const retryAlreadyRunning = operations.some((item) =>
+                item.operation_type === "document_reprocess"
+                && item.document_id === operation.document_id
+                && ["queued", "preparing", "running", "validating", "activating"].includes(item.status));
+              return <div key={operation.operation_id} className="grid grid-cols-[minmax(100px,180px)_minmax(0,1fr)] items-start gap-2 border-b border-divider py-2.5 last:border-b-0">
+                <span className="flex min-w-0 items-center gap-1">
+                  <span className="truncate text-sm text-ink-muted" title={document?.filename ?? operation.document_id ?? operation.operation_id}>{document?.filename ?? operation.document_id ?? "文件任务"}</span>
+                  {failed ? (!version ? <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0" aria-label="重试处理" blockedReason="缺少可重新处理的文件版本，请重新上传文件"><RefreshCw size={14}/></Button> : retryAlreadyRunning || retryingProcessing.includes(operation.operation_id) ? <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0" aria-label="正在重新处理" loading><RefreshCw size={14}/></Button> : <Tooltip content="重试处理"><Button variant="ghost" size="icon" className="h-6 w-6 shrink-0" aria-label="重试处理" onClick={() => void retryProcessing(operation)}><RefreshCw size={14}/></Button></Tooltip>) : null}
+                </span>
+                <PipelineStepper kind={operation.operation_type} currentStage={operation.current_stage} status={operation.status} progressPercent={operation.progress_percent} label={document?.filename ?? "文件处理"} failureReason={operation.error_message}/>
+              </div>;
+            }) : <div className="grid h-full place-items-center text-center"><span><strong className="block text-sm text-ink-muted">暂无处理任务</strong><small className="mt-1 block text-ink-faint">上传或更新文件后，这里显示实时阶段。</small></span></div>}
+          </div>
+        </section>
+      </div> : null}
 
       <Toolbar
         filters={<>
@@ -283,18 +341,6 @@ export function DocumentPanel({ knowledgeBaseId, documents, versions, categories
             <Select size="sm" className="w-28" aria-label="分类状态筛选" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
               <option value="">全部</option>
               {(Object.keys(STATUS_LABEL) as Array<keyof typeof STATUS_LABEL>).map((key) => <option key={key} value={key}>{STATUS_LABEL[key]}</option>)}
-            </Select>
-          </label>
-          <label className="flex items-center gap-2 text-md">来源类型
-            <Select size="sm" className="w-32" aria-label="来源类型筛选" value={sourceTypeFilter} onChange={(event) => setSourceTypeFilter(event.target.value)}>
-              <option value="">全部类型</option>
-              {[...new Set(documents.map((item) => item.source_type))].map((value) => <option key={value} value={value}>{SOURCE_TYPE_LABEL[value] ?? value}</option>)}
-            </Select>
-          </label>
-          <label className="flex items-center gap-2 text-md">数据源
-            <Select size="sm" className="w-36" aria-label="所属数据源筛选" value={dataSourceFilter} onChange={(event) => setDataSourceFilter(event.target.value)}>
-              <option value="">全部数据源</option>
-              {dataSources.map((item) => <option key={item.data_source_id} value={item.data_source_id}>{item.name}</option>)}
             </Select>
           </label>
         </>}
@@ -336,7 +382,7 @@ export function DocumentPanel({ knowledgeBaseId, documents, versions, categories
         label="资料列表"
         selection={canManage ? { selected, onChange: setSelected, rowLabel: (document) => document.filename } : undefined}
         emptyState={filtered
-          ? { kind: "filtered", title: "没有符合条件的资料", description: "调整来源、分类或状态筛选后重试。" }
+          ? { kind: "filtered", title: "没有符合条件的资料", description: "调整分类或状态筛选后重试。" }
           : { kind: "empty", title: "还没有资料", description: "先上传一份你亲自编写的项目文档。" }}
       />
 

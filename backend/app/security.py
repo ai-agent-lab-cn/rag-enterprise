@@ -20,6 +20,23 @@ _ALLOWED_CONTENT_TYPES = {
     ".md": {"application/octet-stream", "text/markdown", "text/plain"},
     ".txt": {"application/octet-stream", "text/plain"},
     ".pdf": {"application/octet-stream", "application/pdf"},
+    ".html": {"application/octet-stream", "text/html"},
+    ".htm": {"application/octet-stream", "text/html"},
+    ".docx": {
+        "application/octet-stream",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
+    ".xlsx": {
+        "application/octet-stream",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    },
+    ".csv": {
+        "application/octet-stream",
+        "application/csv",
+        "application/vnd.ms-excel",
+        "text/csv",
+        "text/plain",
+    },
 }
 
 

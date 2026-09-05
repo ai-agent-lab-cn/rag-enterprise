@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     auth_path: Path = Path("data/auth/store.json")
     audit_path: Path = Path("data/audit/events.json")
     database_url: str | None = None
-    required_database_schema_version: int = Field(default=23, ge=1)
+    required_database_schema_version: int = Field(default=25, ge=1)
     index_worker_id: str = "worker-local"
     index_job_max_attempts: int = Field(default=3, ge=1, le=10)
     index_job_stale_seconds: int = Field(default=900, ge=60, le=86400)

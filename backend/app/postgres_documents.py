@@ -71,7 +71,11 @@ class PostgresVectorStore:
         access: RetrievalAccessContext | None = None,
     ) -> list[RetrievedChunk]:
         validate_knowledge_base_id(knowledge_base_id)
-        clauses = ["c.knowledge_base_id = %s", "c.index_version_id = %s"]
+        clauses = [
+            "c.knowledge_base_id = %s",
+            "c.index_version_id = %s",
+            "s.retrieval_enabled = true",
+        ]
         parameters: list[Any] = [knowledge_base_id, self._active_index_version(knowledge_base_id)]
         if filters:
             if filters.category_ids:
@@ -183,6 +187,7 @@ class PostgresVectorStore:
                    JOIN document_versions v ON v.document_version_id = c.document_version_id
                    WHERE c.knowledge_base_id = %s
                      AND c.index_version_id = %s
+                     AND s.retrieval_enabled = true
                      AND COALESCE(c.metadata->>'retrieval_status', 'searchable') = 'searchable'
                      AND (c.metadata->>'valid_from' IS NULL
                           OR (c.metadata->>'valid_from')::timestamptz <= now())
@@ -216,16 +221,18 @@ class PostgresVectorStore:
                 """SELECT count(*), COALESCE(max(c.created_at), to_timestamp(0)),
                           COALESCE(max((c.metadata->>'acl_version')::integer), 1),
                           COALESCE(max((c.metadata->'data_source_acl'->>'version')::integer), 1),
-                          COALESCE(max(c.metadata->>'classified_at'), '')
+                          COALESCE(max(c.metadata->>'classified_at'), ''),
+                          COALESCE(max(s.updated_at), to_timestamp(0))
                    FROM chunks c
                    JOIN documents d
                      ON d.knowledge_base_id = c.knowledge_base_id
                     AND d.document_id = (c.metadata->>'document_id')
                     AND d.current_version_id = c.document_version_id
+                   JOIN data_sources s ON s.data_source_id=d.data_source_id
                    WHERE c.knowledge_base_id = %s AND c.index_version_id = %s""",
                 (knowledge_base_id, active),
             ).fetchone()
-        return f"{active}:{int(row[0])}:{row[1].isoformat()}:{int(row[2])}:{int(row[3])}:{row[4]}"
+        return f"{active}:{int(row[0])}:{row[1].isoformat()}:{int(row[2])}:{int(row[3])}:{row[4]}:{row[5].isoformat()}"
 
     def score_by_ids(
         self,
@@ -261,7 +268,8 @@ class PostgresVectorStore:
                           d.created_at, s.source_type,
                           current_version.status AS current_status,
                           count(c.chunk_id) AS chunk_count,
-                          pending.status AS pending_status
+                          pending.status AS pending_status,
+                          pending.failure_reason AS pending_failure_reason
                    FROM documents d
                    JOIN data_sources s ON s.data_source_id = d.data_source_id
                    LEFT JOIN document_versions current_version
@@ -270,7 +278,7 @@ class PostgresVectorStore:
                    LEFT JOIN chunks c ON c.document_version_id = d.current_version_id
                                      AND c.index_version_id = %s
                    LEFT JOIN LATERAL (
-                       SELECT dv.status FROM document_versions dv
+                       SELECT dv.status, dv.failure_reason FROM document_versions dv
                        WHERE dv.knowledge_base_id = d.knowledge_base_id
                          AND dv.document_id = d.document_id
                          AND dv.status IN ('pending', 'indexing', 'failed')
@@ -278,7 +286,8 @@ class PostgresVectorStore:
                    ) pending ON true
                    WHERE d.knowledge_base_id = %s
                    GROUP BY d.document_id, d.data_source_id, d.filename, d.current_version_id, d.metadata,
-                            d.created_at, s.source_type, current_version.status, pending.status
+                            d.created_at, s.source_type, current_version.status, pending.status,
+                            pending.failure_reason
                    ORDER BY lower(d.filename)""",
                 (self._active_index_version(knowledge_base_id), knowledge_base_id),
             ).fetchall()
@@ -290,6 +299,7 @@ class PostgresVectorStore:
                 "filename": row["filename"],
                 "chunk_count": int(row["chunk_count"]),
                 "status": row["pending_status"] or row["current_status"] or "pending",
+                "index_failure_reason": row["pending_failure_reason"],
                 # 没有分类就是 None。默认「未分类」会把一份没跑成分类的资料显示成
                 # 「已归入某分类」，正是这次要消灭的混淆。
                 "category": dict(row["metadata"] or {}).get("category"),
@@ -530,6 +540,7 @@ class PostgresAsyncRAGService(RAGService):
         metadata: dict[str, object] | None = None,
         data_source_id: str | None = None,
         relative_path: str | None = None,
+        sync_run_id: str | None = None,
     ) -> DocumentInfo:
         """索引一份文档。
 
@@ -638,11 +649,37 @@ class PostgresAsyncRAGService(RAGService):
                         now,
                     ),
                 )
+                operation_id = None
+                if sync_run_id is None:
+                    from .pipeline_governance import create_operation
+
+                    operation_type = "file_upload" if version_number == 1 else "file_update"
+                    operation_id = create_operation(
+                        connection, operation_type=operation_type, knowledge_base_id=knowledge_base_id,
+                        data_source_id=source_id, document_id=document_id,
+                        document_version_id=version_id,
+                        idempotency_key=f"{operation_type.replace('_', '-')}:{version_id}", progress_mode="stages",
+                    )
+                    connection.execute(
+                        """INSERT INTO document_processing_runs
+                           (processing_run_id, operation_id, document_id, document_version_id,
+                            processing_type, status, uploaded_bytes, total_bytes)
+                           VALUES (%s,%s,%s,%s,%s,'parsing',%s,%s)""",
+                        (f"dpr_{uuid4().hex[:20]}", operation_id, document_id, version_id,
+                         operation_type, len(content), len(content)),
+                    )
+                    connection.execute(
+                        """UPDATE operations SET status='running', current_stage='parse',
+                                  progress_percent=20, total_count=5, completed_count=1,
+                                  started_at=now(), updated_at=now() WHERE operation_id=%s""",
+                        (operation_id,),
+                    )
                 connection.execute(
                     """INSERT INTO index_jobs
                        (index_job_id, knowledge_base_id, data_source_id, document_version_id,
-                        idempotency_key, status, max_attempts, job_type, target_chunking_version)
-                       VALUES (%s, %s, %s, %s, %s, 'queued', %s, 'index', %s)""",
+                        idempotency_key, status, max_attempts, job_type, target_chunking_version,
+                        sync_run_id, operation_id)
+                       VALUES (%s, %s, %s, %s, %s, 'queued', %s, 'index', %s, %s, %s)""",
                     (
                         f"job_{uuid4().hex[:20]}",
                         knowledge_base_id,
@@ -651,6 +688,8 @@ class PostgresAsyncRAGService(RAGService):
                         f"index:{version_id}",
                         self.settings.index_job_max_attempts,
                         chunking_version(self.settings.chunk_size, self.settings.chunk_overlap),
+                        sync_run_id,
+                        operation_id,
                     ),
                 )
         return DocumentInfo(
@@ -825,10 +864,33 @@ def enqueue_rebuild(
             "queued": 0,
         }
     index_version_id, batch_id = prepared
+    from .pipeline_governance import ensure_index_build, upsert_document_index_state
+
     with psycopg.connect(database_url, row_factory=dict_row) as connection:
         with connection.transaction():
+            index_build_id = ensure_index_build(
+                connection, knowledge_base_id=knowledge_base_id,
+                index_version_id=index_version_id,
+            )
+            inventory = connection.execute(
+                """SELECT d.document_id, v.document_version_id,
+                          EXISTS (SELECT 1 FROM chunks c
+                                  WHERE c.document_version_id=v.document_version_id
+                                    AND c.index_version_id=%s) AS covered
+                   FROM documents d JOIN document_versions v
+                     ON v.document_version_id=d.current_version_id
+                   WHERE d.knowledge_base_id=%s ORDER BY d.document_id""",
+                (index_version_id, knowledge_base_id),
+            ).fetchall()
+            for item in inventory:
+                upsert_document_index_state(
+                    connection, index_build_id=index_build_id, index_version_id=index_version_id,
+                    document_id=str(item["document_id"]),
+                    document_version_id=str(item["document_version_id"]),
+                    status="ready" if item["covered"] else "pending",
+                )
             candidates = connection.execute(
-                """SELECT v.document_version_id, d.data_source_id
+                """SELECT v.document_version_id, d.document_id, d.data_source_id
                    FROM documents d
                    JOIN document_versions v ON v.document_version_id = d.current_version_id
                    WHERE d.knowledge_base_id = %s
@@ -845,6 +907,11 @@ def enqueue_rebuild(
             ).fetchall()
             queued = 0
             for candidate in candidates:
+                upsert_document_index_state(
+                    connection, index_build_id=index_build_id, index_version_id=index_version_id,
+                    document_id=str(candidate["document_id"]),
+                    document_version_id=str(candidate["document_version_id"]),
+                )
                 result = connection.execute(
                     """INSERT INTO index_jobs
                        (index_job_id, knowledge_base_id, data_source_id, document_version_id,
@@ -867,12 +934,16 @@ def enqueue_rebuild(
                     ),
                 )
                 queued += result.rowcount
+    from .pipeline_governance import aggregate_index_build
+
+    aggregate_index_build(database_url, batch_id)
     return {
         "batch_id": batch_id,
         "index_version_id": index_version_id,
         "knowledge_base_id": knowledge_base_id,
         "target_chunking_version": target_chunking_version,
         "queued": queued,
+        "index_build_id": index_build_id,
     }
 
 
@@ -970,6 +1041,20 @@ class IndexWorker:
             return False
         try:
             self._process(job)
+            if job.get("sync_run_id") and str(job.get("job_type", "index")) == "index":
+                from .pipeline_governance import update_sync_resource_for_job
+
+                update_sync_resource_for_job(
+                    self.database_url, str(job["sync_run_id"]), str(job["document_version_id"]),
+                    succeeded=True, terminal=True,
+                )
+            if job.get("rebuild_batch_id") and str(job.get("job_type")) == "rebuild":
+                from .pipeline_governance import update_index_build_for_job
+
+                update_index_build_for_job(
+                    self.database_url, str(job["rebuild_batch_id"]),
+                    str(job["document_version_id"]), succeeded=True, terminal=True,
+                )
         except Exception as exc:
             self._fail(str(job["index_job_id"]), str(exc))
         return True
@@ -1140,6 +1225,31 @@ class IndexWorker:
             ).fetchone()
         if version is None:
             raise RuntimeError("document version not found")
+        def mark_stage(stage: str) -> None:
+            if str(job.get("job_type")) == "rebuild" and job.get("rebuild_batch_id"):
+                from .pipeline_governance import update_index_stage
+
+                update_index_stage(
+                    self.database_url, str(job["rebuild_batch_id"]),
+                    str(job["document_version_id"]), stage,
+                )
+            if job.get("operation_id"):
+                stage_percent = {
+                    "parsing": 35, "chunking": 50, "vector": 70,
+                    "keyword": 80, "metadata": 90, "validating": 95,
+                }[stage]
+                processing_status = "building" if stage in {"vector", "keyword", "metadata"} else stage
+                with psycopg.connect(self.database_url) as stage_connection, stage_connection.transaction():
+                    stage_connection.execute(
+                        "UPDATE document_processing_runs SET status=%s, updated_at=now() WHERE operation_id=%s",
+                        (processing_status, job["operation_id"]),
+                    )
+                    stage_connection.execute(
+                        """UPDATE operations SET current_stage=%s, progress_percent=%s,
+                                  completed_count=LEAST(total_count, floor(%s * total_count / 100.0)),
+                                  updated_at=now() WHERE operation_id=%s""",
+                        (stage, stage_percent, stage_percent, job["operation_id"]),
+                    )
         # 按入队时冻结的目标配置切分，重建期间修改进程配置不会让同一批次产生混合结果。
         target_version = str(
             job.get("target_chunking_version")
@@ -1147,6 +1257,7 @@ class IndexWorker:
         )
         _, chunk_size, chunk_overlap = parse_chunking_version(target_version)
         content = (self.settings.upload_path / version["source_path"]).read_bytes()
+        mark_stage("parsing")
         with psycopg.connect(self.database_url) as connection:
             connection.execute(
                 """UPDATE document_versions SET parse_status='parsing', parse_failure_code=NULL
@@ -1157,6 +1268,7 @@ class IndexWorker:
         sections = parsed.sections
         # 分类抽成独立方法：重新分类任务要在不重新解析、不重新切分的情况下再跑一次。
         self._classify(version)
+        mark_stage("chunking")
         with psycopg.connect(self.database_url) as connection:
             connection.execute(
                 "UPDATE document_versions SET parse_status='chunking' WHERE document_version_id=%s",
@@ -1185,6 +1297,7 @@ class IndexWorker:
                 },
             },
         )
+        mark_stage("vector")
         embeddings = self.embedder.encode([chunk.text for chunk in chunks])
         if embeddings:
             # 在写入分块之前登记/校验，避免污染后才在检索时发现维度冲突。
@@ -1205,9 +1318,21 @@ class IndexWorker:
                 processing_options={"chunk_size": chunk_size, "chunk_overlap": chunk_overlap},
             )
         now = datetime.now(UTC)
+        mark_stage("keyword")
+        mark_stage("metadata")
+        # 先更新治理状态，再进入写分块事务；避免在持有 chunks/documents 写锁时，
+        # 通过第二条连接回写同一构建批次造成锁等待。
+        mark_stage("validating")
         with psycopg.connect(self.database_url) as connection:
             register_vector(connection)
             with connection.transaction():
+                if job.get("sync_run_id"):
+                    sync_state = connection.execute(
+                        "SELECT status FROM sync_runs WHERE sync_run_id=%s FOR UPDATE",
+                        (job["sync_run_id"],),
+                    ).fetchone()
+                    if sync_state is None or str(sync_state[0]) in {"aborted", "failed"}:
+                        raise RuntimeError("sync run cancelled")
                 # 只删本索引版本自己的分块（供任务重试幂等），其他版本必须原样保留，
                 # 否则回滚无从谈起。V5-4 之前这里是无条件删除同文档版本的全部分块。
                 connection.execute(
@@ -1292,6 +1417,18 @@ class IndexWorker:
                        WHERE index_job_id = %s""",
                     (now, now, job["index_job_id"]),
                 )
+                if job.get("operation_id"):
+                    connection.execute(
+                        """UPDATE document_processing_runs SET status='succeeded', updated_at=%s
+                           WHERE operation_id=%s""",
+                        (now, job["operation_id"]),
+                    )
+                    connection.execute(
+                        """UPDATE operations SET status='succeeded', current_stage='complete',
+                                  progress_percent=100, completed_count=total_count,
+                                  finished_at=%s, updated_at=%s WHERE operation_id=%s""",
+                        (now, now, job["operation_id"]),
+                    )
 
     def _succeed(self, job_id: str) -> None:
         with psycopg.connect(self.database_url) as connection, connection.transaction():
@@ -1305,10 +1442,13 @@ class IndexWorker:
     def _fail(self, job_id: str, reason: str) -> None:
         with psycopg.connect(self.database_url) as connection, connection.transaction():
             job = connection.execute(
-                """SELECT attempt_count, max_attempts, document_version_id, job_type
+                """SELECT attempt_count, max_attempts, document_version_id, job_type, sync_run_id,
+                          operation_id, status
                    FROM index_jobs WHERE index_job_id = %s""",
                 (job_id,),
             ).fetchone()
+            if job is None or str(job[6]) == "cancelled":
+                return
             terminal = int(job[0]) >= int(job[1])
             status = "failed" if terminal else "queued"
             connection.execute(
@@ -1318,19 +1458,56 @@ class IndexWorker:
                           updated_at = now() WHERE index_job_id = %s""",
                 (status, reason[:1000], RETRY_BACKOFF_SECONDS, terminal, job_id),
             )
+            rebuild_batch_id = None
+            if str(job[3]) == "rebuild":
+                batch = connection.execute(
+                    "SELECT rebuild_batch_id FROM index_jobs WHERE index_job_id=%s", (job_id,)
+                ).fetchone()
+                rebuild_batch_id = str(batch[0]) if batch and batch[0] else None
             if str(job[3]) in {"rebuild", "classify"}:
                 # 重建失败时上一批 chunks 仍然完好；分类失败更是与正文无关——两者都
                 # 不得把文档版本标成 failed，文档必须保持可检索。
-                return
-            connection.execute(
-                """UPDATE document_versions SET status=%s, failure_reason=%s,
-                          parse_status=%s, parse_failure_code=%s
-                   WHERE document_version_id=%s""",
-                (
-                    "failed" if terminal else "pending",
-                    reason[:1000],
-                    "failed" if terminal else "pending",
-                    "PARSER_FAILED" if terminal else None,
-                    job[2],
-                ),
+                pass
+            else:
+                connection.execute(
+                    """UPDATE document_versions SET status=%s, failure_reason=%s,
+                              parse_status=%s, parse_failure_code=%s
+                       WHERE document_version_id=%s""",
+                    (
+                        "failed" if terminal else "pending",
+                        reason[:1000],
+                        "failed" if terminal else "pending",
+                        "PARSER_FAILED" if terminal else None,
+                        job[2],
+                    ),
+                )
+            if job[5]:
+                connection.execute(
+                    """UPDATE document_processing_runs SET status=%s,
+                              failure_stage=COALESCE((SELECT current_stage FROM operations WHERE operation_id=%s), 'build'),
+                              failure_code='INDEX_BUILD_FAILED', failure_reason=%s, updated_at=now()
+                       WHERE operation_id=%s""",
+                    ("failed" if terminal else "building", job[5], reason[:1000], job[5]),
+                )
+                connection.execute(
+                    """UPDATE operations SET status=%s,
+                              current_stage=CASE WHEN %s THEN current_stage ELSE 'retry_wait' END,
+                              error_code='INDEX_BUILD_FAILED', error_message=%s,
+                              finished_at=CASE WHEN %s THEN now() ELSE NULL END, updated_at=now()
+                       WHERE operation_id=%s""",
+                    ("failed" if terminal else "running", terminal, reason[:1000], terminal, job[5]),
+                )
+        if job[4] and str(job[3]) == "index":
+            from .pipeline_governance import update_sync_resource_for_job
+
+            update_sync_resource_for_job(
+                self.database_url, str(job[4]), str(job[2]), succeeded=False,
+                terminal=terminal, failure_reason=reason[:1000],
+            )
+        if str(job[3]) == "rebuild" and rebuild_batch_id:
+            from .pipeline_governance import update_index_build_for_job
+
+            update_index_build_for_job(
+                self.database_url, rebuild_batch_id, str(job[2]), succeeded=False,
+                terminal=terminal, failure_reason=reason[:1000],
             )

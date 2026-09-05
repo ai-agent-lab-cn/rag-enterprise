@@ -19,12 +19,24 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .config import Settings
-from .connectors import Connector, LocalDirectoryConnector, S3Connector, SourceObject
+from .connectors import (
+    Connector,
+    LocalDirectoryConnector,
+    ReadOnlyDatabaseConnector,
+    S3Connector,
+    SourceObject,
+    WebConnector,
+)
 from .errors import AppError
 from .observability import structured_log
+from .pipeline_governance import (
+    aggregate_sync_run,
+    create_operation,
+    upsert_sync_resource,
+)
 
 # 已实现同步的数据源类型。web 与 connector 自 0001 起就是预留值，不对应任何实现。
-SYNCABLE_SOURCE_TYPES = frozenset({"local_directory", "object_storage"})
+SYNCABLE_SOURCE_TYPES = frozenset({"local_directory", "object_storage", "web", "connector"})
 
 
 @dataclass(frozen=True)
@@ -156,6 +168,28 @@ def mark_documents_searchable(
     return _set_retrieval_status(database_url, knowledge_base_id, document_ids, "searchable")
 
 
+def _apply_governance_metadata(
+    database_url: str, knowledge_base_id: str, document_id: str, metadata: dict[str, object]
+) -> None:
+    """正文未变时仍扩散 Metadata/ACL，避免幂等短路留下旧权限。"""
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """UPDATE documents SET metadata=metadata || %s, updated_at=now()
+               WHERE knowledge_base_id=%s AND document_id=%s""",
+            (Jsonb(metadata), knowledge_base_id, document_id),
+        )
+        connection.execute(
+            """UPDATE chunks c SET metadata=c.metadata || %s
+               FROM documents d JOIN index_versions iv ON iv.knowledge_base_id=d.knowledge_base_id
+               WHERE d.knowledge_base_id=%s AND d.document_id=%s
+                 AND c.knowledge_base_id=d.knowledge_base_id
+                 AND c.document_version_id=d.current_version_id
+                 AND c.index_version_id=iv.index_version_id
+                 AND iv.status IN ('active','previous','building','ready')""",
+            (Jsonb(metadata), knowledge_base_id, document_id),
+        )
+
+
 def _read_credentials(configuration: dict[str, Any]) -> tuple[str, str]:
     """从环境变量读取对象存储的访问密钥。
 
@@ -220,6 +254,25 @@ def build_connector(
             max_bytes=max_bytes,
         )
 
+    if source_type == "web":
+        urls = [str(value) for value in configuration.get("urls") or []]
+        return WebConnector(
+            urls, max_bytes=max_bytes,
+            sitemap_url=str(configuration.get("sitemap_url") or "") or None,
+            max_objects=int(configuration.get("max_objects") or 1000),
+        )
+
+    if source_type == "connector" and configuration.get("connector_type") == "database_readonly":
+        return ReadOnlyDatabaseConnector(
+            str(configuration.get("database_url_env") or ""),
+            str(configuration.get("view") or ""),
+            str(configuration.get("id_column") or "id"),
+            str(configuration.get("content_column") or "content"),
+            str(configuration.get("updated_column") or "") or None,
+            {str(key): str(value) for key, value in dict(configuration.get("metadata_mapping") or {}).items()},
+            {str(key): str(value) for key, value in dict(configuration.get("acl_mapping") or {}).items()},
+        )
+
     raise AppError(
         "SOURCE_TYPE_NOT_SUPPORTED", f"数据源类型 {source_type} 尚未实现同步。", 409
     )
@@ -236,13 +289,13 @@ def enqueue_sync(
 
     with psycopg.connect(database_url, row_factory=dict_row) as connection:
         source = connection.execute(
-            """SELECT data_source_id, knowledge_base_id, source_type, enabled
+            """SELECT data_source_id, knowledge_base_id, source_type, sync_enabled
                FROM data_sources WHERE data_source_id = %s""",
             (data_source_id,),
         ).fetchone()
         if source is None:
             raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
-        if not bool(source["enabled"]):
+        if not bool(source["sync_enabled"]):
             raise AppError("DATA_SOURCE_DISABLED", "数据源已停用，不能启动同步。", 409)
         if str(source["source_type"]) not in SYNCABLE_SOURCE_TYPES:
             raise AppError(
@@ -254,14 +307,26 @@ def enqueue_sync(
         sync_run_id = f"run_{uuid4().hex[:20]}"
         try:
             with connection.transaction():
+                operation_id = create_operation(
+                    connection,
+                    operation_type="sync_run",
+                    knowledge_base_id=str(source["knowledge_base_id"]),
+                    data_source_id=data_source_id,
+                    idempotency_key=f"sync:{data_source_id}:{sync_run_id}",
+                )
                 connection.execute(
                     """INSERT INTO sync_runs
-                       (sync_run_id, data_source_id, knowledge_base_id, status, stage, cursor)
+                       (sync_run_id, data_source_id, knowledge_base_id, status, stage, cursor,
+                        input_cursor, operation_id)
                        VALUES (%s, %s, %s, 'queued', 'discover',
                          (SELECT next_cursor FROM sync_runs
                           WHERE data_source_id = %s AND status IN ('succeeded', 'partial_failed')
-                          ORDER BY created_at DESC LIMIT 1))""",
-                    (sync_run_id, data_source_id, source["knowledge_base_id"], data_source_id),
+                          ORDER BY created_at DESC LIMIT 1),
+                         (SELECT next_cursor FROM sync_runs
+                          WHERE data_source_id = %s AND status IN ('succeeded', 'partial_failed')
+                          ORDER BY created_at DESC LIMIT 1), %s)""",
+                    (sync_run_id, data_source_id, source["knowledge_base_id"], data_source_id,
+                     data_source_id, operation_id),
                 )
                 connection.execute(
                     """INSERT INTO index_jobs
@@ -276,6 +341,12 @@ def enqueue_sync(
                         max_attempts,
                         sync_run_id,
                     ),
+                )
+                connection.execute(
+                    """UPDATE data_sources SET last_sync_status='queued',
+                              sync_failure_reason=NULL, updated_at=now()
+                       WHERE data_source_id=%s""",
+                    (data_source_id,),
                 )
         except psycopg.errors.UniqueViolation:
             raise AppError(
@@ -344,7 +415,8 @@ def _update_sync_run(
     allowed = {
         "added_count", "updated_count", "deleted_count", "skipped_count",
         "failed_count", "retry_count", "cursor", "next_cursor", "error_code",
-        "failure_reason",
+        "failure_reason", "input_cursor", "discovered_cursor", "committed_cursor",
+        "total_count", "completed_count", "processing_count", "dead_letter_count",
     }
     assignments = ["status = %s", "stage = %s", "updated_at = now()"]
     parameters: list[object] = [status, stage]
@@ -365,6 +437,18 @@ def _update_sync_run(
         )
 
 
+def _ensure_sync_active(database_url: str, sync_run_id: str) -> None:
+    """Worker 的协作式取消检查点；不强杀网络请求，但禁止取消后继续产生写入。"""
+    if not sync_run_id:
+        return
+    with psycopg.connect(database_url) as connection:
+        row = connection.execute(
+            "SELECT status FROM sync_runs WHERE sync_run_id=%s", (sync_run_id,)
+        ).fetchone()
+    if row is None or str(row[0]) in {"aborted", "failed"}:
+        raise AppError("SYNC_CANCELLED", "同步任务已取消。", 409)
+
+
 def run_sync(settings: Settings, embedder: Any, job: dict[str, Any]) -> dict[str, object]:
     """执行一次同步：列举、比对、熔断、索引变化对象、软删消失对象。
 
@@ -375,6 +459,7 @@ def run_sync(settings: Settings, embedder: Any, job: dict[str, Any]) -> dict[str
     database_url = str(settings.database_url)
     data_source_id = str(job["data_source_id"])
     sync_run_id = str(job.get("sync_run_id") or "")
+    _ensure_sync_active(database_url, sync_run_id)
     _set_sync_status(database_url, data_source_id, "running")
     if sync_run_id:
         _update_sync_run(database_url, sync_run_id, "discovering", "discover")
@@ -400,6 +485,7 @@ def run_sync(settings: Settings, embedder: Any, job: dict[str, Any]) -> dict[str
         # 熔断分母用全部记录：未 ready 的对象在远端依然存在，不该被算进"待删除"。
         known = _known_objects(database_url, data_source_id)
         remote = list(connector.list_objects())
+        _ensure_sync_active(database_url, sync_run_id)
         next_cursor = sha256(
             "\n".join(
                 f"{item.key}:{item.version}"
@@ -436,46 +522,126 @@ def run_sync(settings: Settings, embedder: Any, job: dict[str, Any]) -> dict[str
         from .postgres_documents import PostgresAsyncRAGService
 
         service = PostgresAsyncRAGService(settings, embedder, None, None)
-        processed = 0
-        for item in diff.added + diff.updated:
-            metadata = dict(configuration.get("metadata_defaults") or {})
-            metadata.update(
-                {
-                    "source_system": str(source["source_type"]),
-                    "external_resource_id": item.key,
-                    "retrieval_status": "searchable",
-                }
-            )
-            category_id = configuration.get("default_category_id")
-            if category_id:
-                with psycopg.connect(database_url) as category_connection:
-                    category = category_connection.execute(
-                        """SELECT name FROM document_categories
-                           WHERE knowledge_base_id=%s AND category_id=%s AND active""",
-                        (knowledge_base_id, category_id),
-                    ).fetchone()
-                if category:
-                    metadata.update(
-                        {
-                            "category_id": str(category_id),
-                            "category": str(category[0]),
-                            "classification_status": "manual",
-                        }
-                    )
-            document = service.index_document(
-                Path(item.key).name,
-                connector.fetch(item.key),
-                knowledge_base_id,
-                metadata=metadata,
-                data_source_id=data_source_id,
-                relative_path=item.key,
-            )
-            _record_object(database_url, data_source_id, item, document.document_id)
-            processed += 1
+        for item in diff.added:
+            upsert_sync_resource(database_url, sync_run_id, item.key, "add")
+        for item in diff.updated:
+            upsert_sync_resource(database_url, sync_run_id, item.key, "update")
         for item in retry:
-            if _retry_object(settings, knowledge_base_id, str(known[item.key]["document_id"])):
+            upsert_sync_resource(database_url, sync_run_id, item.key, "retry")
+        for key in diff.deleted:
+            upsert_sync_resource(database_url, sync_run_id, key, "delete")
+        unchanged_keys = sorted(remote_keys - {item.key for item in diff.added + diff.updated + retry})
+        for key in unchanged_keys:
+            upsert_sync_resource(database_url, sync_run_id, key, "unchanged", status="unchanged", stage="complete")
+        with psycopg.connect(database_url) as progress_connection:
+            progress_connection.execute(
+                """UPDATE operations SET status='running', current_stage='fetch',
+                          total_count=%s, completed_count=%s, progress_percent=10, updated_at=now()
+                   WHERE operation_id=(SELECT operation_id FROM sync_runs WHERE sync_run_id=%s)""",
+                (len(remote) + len(diff.deleted), len(unchanged_keys), sync_run_id),
+            )
+        processed = 0
+        changed_items = diff.added + diff.updated
+        for item_index, item in enumerate(changed_items, start=1):
+            _ensure_sync_active(database_url, sync_run_id)
+            resource_operation = "add" if item in diff.added else "update"
+            try:
+                upsert_sync_resource(
+                    database_url, sync_run_id, item.key, resource_operation,
+                    status="fetching", stage="fetch",
+                )
+                content = None
+                for fetch_attempt in range(1, settings.index_job_max_attempts + 1):
+                    try:
+                        content = connector.fetch(item.key)
+                        break
+                    except Exception:
+                        with psycopg.connect(database_url) as attempt_connection:
+                            attempt_connection.execute(
+                                """UPDATE sync_resource_runs SET attempt_count=%s,
+                                          current_stage='retry_wait', updated_at=now()
+                                   WHERE sync_run_id=%s AND external_resource_id=%s""",
+                                (fetch_attempt, sync_run_id, item.key),
+                            )
+                        if fetch_attempt >= settings.index_job_max_attempts:
+                            raise
+                assert content is not None
+                upsert_sync_resource(
+                    database_url, sync_run_id, item.key, resource_operation,
+                    status="normalizing", stage="normalize",
+                )
+                metadata = dict(configuration.get("metadata_defaults") or {})
+                metadata.update({"source_system": str(source["source_type"]),
+                                 "external_resource_id": item.key,
+                                 "retrieval_status": "searchable"})
+                metadata.update(connector.metadata(item.key))
+                category_id = configuration.get("default_category_id")
+                if category_id:
+                    with psycopg.connect(database_url) as category_connection:
+                        category = category_connection.execute(
+                            """SELECT name FROM document_categories
+                               WHERE knowledge_base_id=%s AND category_id=%s AND active""",
+                            (knowledge_base_id, category_id),
+                        ).fetchone()
+                    if category:
+                        metadata.update({"category_id": str(category_id),
+                                         "category": str(category[0]),
+                                         "classification_status": "manual"})
+                document = service.index_document(
+                    Path(item.key).name, content, knowledge_base_id, metadata=metadata,
+                    data_source_id=data_source_id, relative_path=item.key, sync_run_id=sync_run_id,
+                )
+                _apply_governance_metadata(
+                    database_url, knowledge_base_id, document.document_id, metadata
+                )
+                _record_object(database_url, data_source_id, item, document.document_id)
+                with psycopg.connect(database_url) as resource_connection:
+                    version = resource_connection.execute(
+                        """SELECT document_version_id FROM document_versions
+                           WHERE knowledge_base_id=%s AND document_id=%s
+                           ORDER BY version_number DESC LIMIT 1""",
+                        (knowledge_base_id, document.document_id),
+                    ).fetchone()
+                if version and version[0]:
+                    immediate = document.status == "ready"
+                    upsert_sync_resource(
+                        database_url, sync_run_id, item.key, resource_operation,
+                        status="succeeded" if immediate else "building",
+                        stage="complete" if immediate else "build", document_id=document.document_id,
+                        document_version_id=str(version[0]),
+                    )
+                processed += 1
+            except Exception as resource_error:
+                upsert_sync_resource(
+                    database_url, sync_run_id, item.key, resource_operation,
+                    status="dead_letter", stage="fetch_or_normalize",
+                    error_code=(resource_error.code if isinstance(resource_error, AppError)
+                                else "SYNC_RESOURCE_FAILED"),
+                    error_message=str(resource_error)[:1000],
+                )
+            with psycopg.connect(database_url) as progress_connection:
+                fetch_progress = 10 + round(25 * item_index / max(len(changed_items), 1), 2)
+                progress_connection.execute(
+                    """UPDATE operations SET current_stage='fetch', progress_percent=%s,
+                              completed_count=completed_count+1, updated_at=now()
+                       WHERE operation_id=(SELECT operation_id FROM sync_runs WHERE sync_run_id=%s)
+                         AND status='running'""",
+                    (fetch_progress, sync_run_id),
+                )
+        for item in retry:
+            _ensure_sync_active(database_url, sync_run_id)
+            retried_version = _retry_object(
+                settings, knowledge_base_id, str(known[item.key]["document_id"]), sync_run_id
+            )
+            if retried_version:
+                upsert_sync_resource(
+                    database_url, sync_run_id, item.key, "retry", status="building", stage="build",
+                    document_id=str(known[item.key]["document_id"]),
+                    document_version_id=retried_version,
+                )
                 processed += 1
 
+        _ensure_sync_active(database_url, sync_run_id)
         deleted_document_ids = [
             str(known[key]["document_id"])
             for key in diff.deleted
@@ -483,6 +649,9 @@ def run_sync(settings: Settings, embedder: Any, job: dict[str, Any]) -> dict[str
         ]
         mark_documents_deleted(database_url, knowledge_base_id, deleted_document_ids)
         _forget_objects(database_url, data_source_id, diff.deleted)
+        for key in diff.deleted:
+            upsert_sync_resource(database_url, sync_run_id, key, "delete", status="deleted", stage="complete",
+                                 document_id=str(known[key]["document_id"]) if known[key].get("document_id") else None)
 
         # 把当前远端仍存在的对象一律标为可检索。这同时覆盖三种情况：本次新索引的、
         # 内容未变的、以及曾被软删后重新出现的——最后那种走的是"新增"路径，而
@@ -493,12 +662,15 @@ def run_sync(settings: Settings, embedder: Any, job: dict[str, Any]) -> dict[str
         ]
         mark_documents_searchable(database_url, knowledge_base_id, present_ids)
 
-        _set_sync_status(database_url, data_source_id, "succeeded")
+        _set_sync_status(database_url, data_source_id, "running")
         # 跳过对同步结果是「成功」，对提问的人是「这份资料不在库里」。两者之间只有日志：
         # 超限对象不入队、不软删、不进对象记录，任何一张表里都查不到它存在过。
         # 逐条记录而非拼成一行，是因为 structured_log 会丢弃列表值并截断长字符串。
         skipped = list(getattr(connector, "skipped", []))
         for key, size in skipped:
+            upsert_sync_resource(database_url, sync_run_id, key, "skip", status="skipped", stage="size_limit",
+                                 error_code="SOURCE_OBJECT_TOO_LARGE",
+                                 error_message=f"对象 {size} bytes，超过上传限制")
             structured_log(
                 "data_source.object_skipped",
                 data_source_id=data_source_id,
@@ -510,15 +682,16 @@ def run_sync(settings: Settings, embedder: Any, job: dict[str, Any]) -> dict[str
             _update_sync_run(
                 database_url,
                 sync_run_id,
-                "succeeded",
-                "complete",
+                "indexing",
+                "build",
                 added_count=len(diff.added),
                 updated_count=len(diff.updated),
                 deleted_count=len(diff.deleted),
                 skipped_count=len(skipped),
                 retry_count=len(retry),
-                next_cursor=next_cursor,
+                discovered_cursor=next_cursor,
             )
+            aggregate_sync_run(database_url, sync_run_id)
         return {
             "data_source_id": data_source_id,
             "added": len(diff.added),
@@ -529,7 +702,7 @@ def run_sync(settings: Settings, embedder: Any, job: dict[str, Any]) -> dict[str
             "skipped": [key for key, _ in skipped],
         }
     except AppError as error:
-        status = "aborted" if error.code == "SYNC_DELETE_CIRCUIT_BREAKER" else "failed"
+        status = "aborted" if error.code in {"SYNC_DELETE_CIRCUIT_BREAKER", "SYNC_CANCELLED"} else "failed"
         _set_sync_status(database_url, data_source_id, status, f"{error.code}: {error.message}")
         if sync_run_id:
             _update_sync_run(
@@ -589,7 +762,9 @@ def _forget_objects(database_url: str, data_source_id: str, object_keys: list[st
         )
 
 
-def _retry_object(settings: Settings, knowledge_base_id: str, document_id: str) -> bool:
+def _retry_object(
+    settings: Settings, knowledge_base_id: str, document_id: str, sync_run_id: str
+) -> str | None:
     """重新处理一个索引失败的文档。
 
     走 ``reprocess_version`` 而不是 ``index_document``：后者对相同 content_sha256 的既有
@@ -610,17 +785,66 @@ def _retry_object(settings: Settings, knowledge_base_id: str, document_id: str) 
             (knowledge_base_id, document_id),
         ).fetchone()
     if row is None or not row[0]:
-        return False
+        return None
     repository = PostgresDataSourceRepository(database_url)
     try:
-        return bool(
-            repository.reprocess_version(
-                knowledge_base_id,
-                str(row[0]),
-                chunking_version(settings.chunk_size, settings.chunk_overlap),
-                settings.index_job_max_attempts,
-            )
+        job_id = repository.reprocess_version(
+            knowledge_base_id,
+            str(row[0]),
+            chunking_version(settings.chunk_size, settings.chunk_overlap),
+            settings.index_job_max_attempts,
+            sync_run_id=sync_run_id,
         )
+        return str(row[0]) if job_id else None
     except psycopg.errors.UniqueViolation:
         # 该版本已有活动任务在跑，本次不必重复入队。
+        return None
+
+
+def retry_sync_resource(
+    settings: Settings, data_source_id: str, sync_run_id: str, sync_resource_run_id: str
+) -> bool:
+    """只重试一个失败资源，并复用原批次保留审计关系。"""
+    database_url = str(settings.database_url)
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        resource = connection.execute(
+            """SELECT r.document_id, r.document_version_id, r.status, s.knowledge_base_id,
+                      s.operation_id
+               FROM sync_resource_runs r JOIN sync_runs s USING (sync_run_id)
+               WHERE r.sync_resource_run_id=%s AND r.sync_run_id=%s
+                 AND s.data_source_id=%s""",
+            (sync_resource_run_id, sync_run_id, data_source_id),
+        ).fetchone()
+    if resource is None:
         return False
+    if str(resource["status"]) not in {"failed", "dead_letter"} or not resource["document_version_id"]:
+        raise AppError("SYNC_RESOURCE_NOT_RETRYABLE", "该资源当前不可重试。", 409)
+    from .chunking import chunking_version
+    from .postgres_repositories import PostgresDataSourceRepository
+
+    job_id = PostgresDataSourceRepository(database_url).reprocess_version(
+        str(resource["knowledge_base_id"]), str(resource["document_version_id"]),
+        chunking_version(settings.chunk_size, settings.chunk_overlap),
+        settings.index_job_max_attempts, sync_run_id=sync_run_id,
+    )
+    if not job_id:
+        return False
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """UPDATE sync_resource_runs SET status='building', current_stage='retry_wait',
+                      error_code=NULL, error_message=NULL, finished_at=NULL, updated_at=now()
+               WHERE sync_resource_run_id=%s""",
+            (sync_resource_run_id,),
+        )
+        connection.execute(
+            """UPDATE sync_runs SET status='indexing', stage='retry', finished_at=NULL,
+                      failure_reason=NULL, updated_at=now() WHERE sync_run_id=%s""",
+            (sync_run_id,),
+        )
+        connection.execute(
+            """UPDATE operations SET status='running', current_stage='retry', finished_at=NULL,
+                      error_code=NULL, error_message=NULL, updated_at=now() WHERE operation_id=%s""",
+            (resource["operation_id"],),
+        )
+    aggregate_sync_run(database_url, sync_run_id)
+    return True

@@ -100,6 +100,7 @@ class DocumentInfo(BaseModel):
     filename: str
     chunk_count: int
     status: str = "ready"
+    index_failure_reason: str | None = None
     # 没有分类就是 None。此前这里默认「未分类」，把「模型超时了」和「管理员就是
     # 没给它分类」压成了同一个值，导致分类失败无法按状态治理。
     category: str | None = None
@@ -399,7 +400,7 @@ class KnowledgeBaseResponse(BaseModel):
     document_count: int
     chunk_count: int
     source_file_bytes: int = 0
-    index_status: Literal["empty", "processing", "ready", "failed"] = "empty"
+    index_status: Literal["empty", "processing", "ready", "degraded", "failed"] = "empty"
     current_user_permission: Literal["admin", "use"] = "use"
     allowed_actions: list[Literal["detail", "edit", "delete"]] = ["detail"]
 
@@ -411,12 +412,16 @@ class DataSourceResponse(BaseModel):
     knowledge_base_id: str
     knowledge_base_name: str
     enabled: bool
+    sync_enabled: bool = True
+    retrieval_enabled: bool = True
     configuration: dict[str, object] = Field(default_factory=dict)
     default_category_id: str | None = None
     metadata_defaults: dict[str, object] = Field(default_factory=dict)
     upload_status: Literal["idle", "succeeded"]
     index_status: Literal["idle", "queued", "running", "succeeded", "failed"]
     sync_status: Literal["idle", "queued", "running", "succeeded", "failed", "aborted"]
+    sync_progress_percent: float = 0
+    sync_current_stage: str | None = None
     document_count: int
     source_file_bytes: int
     last_indexed_at: datetime | None
@@ -427,7 +432,10 @@ class DataSourceResponse(BaseModel):
     allow_user_ids: list[str] = Field(default_factory=list)
     deny_user_ids: list[str] = Field(default_factory=list)
     allowed_actions: list[
-        Literal["detail", "edit", "disable", "enable", "update_file", "delete", "test", "sync"]
+        Literal[
+            "detail", "edit", "disable", "enable", "disable_retrieval",
+            "enable_retrieval", "update_file", "delete", "test", "sync"
+        ]
     ]
 
 
@@ -435,7 +443,7 @@ class DataSourceCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=120)
-    source_type: Literal["local_directory", "object_storage"]
+    source_type: Literal["local_directory", "object_storage", "web", "connector"]
     configuration: dict[str, object]
     default_category_id: str | None = None
     metadata_defaults: dict[str, object] = Field(default_factory=dict)
@@ -456,10 +464,66 @@ class DataSourceConnectionTestResponse(BaseModel):
     message: str
 
 
+class DataSourcePreviewItem(BaseModel):
+    key: str
+    version: str
+    size: int
+    modified_at: datetime | None
+
+
+class DataSourcePreviewResponse(BaseModel):
+    items: list[DataSourcePreviewItem]
+    discovered_count: int
+    truncated: bool
+
+
 class SyncEnqueueResponse(BaseModel):
     index_job_id: str
     sync_run_id: str
     data_source_id: str
+
+
+class OperationResponse(BaseModel):
+    operation_id: str
+    operation_type: str
+    knowledge_base_id: str
+    data_source_id: str | None
+    document_id: str | None
+    document_version_id: str | None
+    status: str
+    current_stage: str
+    progress_mode: str
+    progress_percent: float | None
+    total_count: int
+    completed_count: int
+    processing_count: int
+    failed_count: int
+    error_code: str | None
+    error_message: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SyncResourceRunResponse(BaseModel):
+    sync_resource_run_id: str
+    sync_run_id: str
+    external_resource_id: str
+    operation: str
+    status: str
+    current_stage: str
+    document_id: str | None
+    document_version_id: str | None
+    index_build_id: str | None
+    attempt_count: int
+    max_attempts: int
+    error_code: str | None
+    error_message: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class SyncRunResponse(BaseModel):
@@ -482,6 +546,14 @@ class SyncRunResponse(BaseModel):
     skipped_count: int
     failed_count: int
     retry_count: int
+    operation_id: str | None = None
+    input_cursor: str | None = None
+    discovered_cursor: str | None = None
+    committed_cursor: str | None = None
+    total_count: int = 0
+    completed_count: int = 0
+    processing_count: int = 0
+    dead_letter_count: int = 0
     error_code: str | None
     failure_reason: str | None
     started_at: datetime | None
@@ -865,6 +937,71 @@ class IndexVersionResponse(BaseModel):
     created_at: datetime
     activated_at: datetime | None
     retired_at: datetime | None
+
+
+class IndexBuildCreate(BaseModel):
+    chunk_size: int = Field(default=500, ge=100, le=4000)
+    chunk_overlap: int = Field(default=50, ge=0, le=1000)
+
+
+class IndexDefinitionResponse(BaseModel):
+    index_definition_id: str
+    name: str
+    vector_config: dict[str, object]
+    keyword_config: dict[str, object]
+    metadata_schema: dict[str, object]
+    parser_schema_version: str
+    chunking_policy: dict[str, object]
+    embedding_model: str
+    embedding_dimension: int
+    reranker_config: dict[str, object]
+    config_fingerprint: str
+    active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class IndexVersionActivateRequest(BaseModel):
+    evaluation_report_id: str = Field(min_length=1, max_length=160)
+
+
+class IndexBuildResponse(BaseModel):
+    index_build_id: str
+    operation_id: str
+    index_version_id: str
+    index_definition_id: str | None
+    build_type: str
+    status: str
+    total_documents: int
+    queued_documents: int
+    processing_documents: int
+    succeeded_documents: int
+    failed_documents: int
+    failure_code: str | None
+    failure_reason: str | None
+    progress_percent: float | None = None
+    current_stage: str = "queued"
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DocumentIndexStateResponse(BaseModel):
+    index_build_id: str
+    index_version_id: str
+    document_id: str
+    document_version_id: str
+    filename: str
+    vector_status: str
+    keyword_status: str
+    metadata_status: str
+    overall_status: str
+    chunk_count: int
+    failure_stage: str | None
+    failure_code: str | None
+    failure_reason: str | None
+    updated_at: datetime
 
 
 class AuditEventResponse(BaseModel):

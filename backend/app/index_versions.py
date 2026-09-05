@@ -181,6 +181,14 @@ def active_or_bootstrap_version(
             "SELECT active_index_version_id FROM knowledge_bases WHERE knowledge_base_id = %s",
             (knowledge_base_id,),
         ).fetchone()
+        if row and row[0]:
+            from .pipeline_governance import ensure_index_definition
+
+            ensure_index_definition(
+                connection,
+                knowledge_base_id=knowledge_base_id,
+                index_version_id=str(row[0]),
+            )
     # 并发下另一个 worker 可能先完成引导，此时沿用它创建的版本。
     return str(row[0]) if row and row[0] else index_version_id
 
@@ -396,6 +404,18 @@ def switch_to_version(
         connection.execute(
             "UPDATE knowledge_bases SET active_index_version_id = %s WHERE knowledge_base_id = %s",
             (index_version_id, knowledge_base_id),
+        )
+        connection.execute(
+            """UPDATE index_builds SET status='succeeded', finished_at=now(), updated_at=now()
+               WHERE index_version_id=%s AND status='ready'""",
+            (index_version_id,),
+        )
+        connection.execute(
+            """UPDATE operations o SET status='succeeded', current_stage='active',
+                      progress_percent=100, finished_at=now(), updated_at=now()
+               FROM index_builds ib
+               WHERE ib.operation_id=o.operation_id AND ib.index_version_id=%s""",
+            (index_version_id,),
         )
     if audit is not None:
         audit.record(

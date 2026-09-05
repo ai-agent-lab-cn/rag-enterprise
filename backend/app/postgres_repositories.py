@@ -226,7 +226,8 @@ class PostgresDataSourceRepository:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             rows = connection.execute(
                 """SELECT s.data_source_id, s.name, s.source_type, s.knowledge_base_id,
-                          k.name AS knowledge_base_name, s.enabled, s.updated_at, s.acl,
+                          k.name AS knowledge_base_name, s.enabled, s.sync_enabled,
+                          s.retrieval_enabled, s.updated_at, s.acl,
                           s.configuration,
                           count(DISTINCT d.document_id) AS document_count,
                           COALESCE(sum(v.source_file_bytes), 0) AS source_file_bytes,
@@ -242,6 +243,14 @@ class PostgresDataSourceRepository:
                           -- 会显示成 idle，与"从未同步"无法区分。
                           s.last_sync_at AS last_synced_at,
                           s.last_sync_status AS sync_status,
+                          COALESCE((SELECT progress_percent FROM operations op
+                                    WHERE op.data_source_id=s.data_source_id
+                                      AND op.operation_type='sync_run'
+                                    ORDER BY op.created_at DESC LIMIT 1), 0) AS sync_progress_percent,
+                          (SELECT current_stage FROM operations op
+                           WHERE op.data_source_id=s.data_source_id
+                             AND op.operation_type='sync_run'
+                           ORDER BY op.created_at DESC LIMIT 1) AS sync_current_stage,
                           COALESCE(s.sync_failure_reason, j.failure_reason) AS failure_reason
                    FROM data_sources s JOIN knowledge_bases k USING (knowledge_base_id)
                    LEFT JOIN documents d ON d.data_source_id = s.data_source_id
@@ -411,6 +420,7 @@ class PostgresDataSourceRepository:
         document_version_id: str,
         target_chunking_version: str,
         max_attempts: int,
+        sync_run_id: str | None = None,
     ) -> str | None:
         validate_knowledge_base_id(knowledge_base_id)
         # 用 index 而不是 rebuild：V5-5 之后 rebuild 的语义是「写入某个 building 索引
@@ -421,19 +431,38 @@ class PostgresDataSourceRepository:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             with connection.transaction():
                 version = connection.execute(
-                    """SELECT d.data_source_id FROM document_versions v
+                    """SELECT d.data_source_id, v.document_id FROM document_versions v
                        JOIN documents d USING (knowledge_base_id, document_id)
                        WHERE v.knowledge_base_id=%s AND v.document_version_id=%s""",
                     (knowledge_base_id, document_version_id),
                 ).fetchone()
                 if version is None:
                     return None
+                from .pipeline_governance import create_operation
+
+                operation_id = create_operation(
+                    connection,
+                    operation_type="document_reprocess",
+                    knowledge_base_id=knowledge_base_id,
+                    data_source_id=version["data_source_id"],
+                    document_id=version["document_id"],
+                    document_version_id=document_version_id,
+                    idempotency_key=f"document-reprocess:{document_version_id}:{job_id}",
+                    progress_mode="stages",
+                )
+                connection.execute(
+                    """INSERT INTO document_processing_runs
+                       (processing_run_id, operation_id, document_id, document_version_id,
+                        processing_type, status)
+                       VALUES (%s,%s,%s,%s,'reparse','queued')""",
+                    (f"dpr_{uuid4().hex[:20]}", operation_id, version["document_id"], document_version_id),
+                )
                 connection.execute(
                     """INSERT INTO index_jobs
                        (index_job_id, knowledge_base_id, data_source_id, document_version_id,
                         idempotency_key, status, max_attempts, job_type,
-                        target_chunking_version)
-                       VALUES (%s, %s, %s, %s, %s, 'queued', %s, 'index', %s)""",
+                        target_chunking_version, sync_run_id, operation_id)
+                       VALUES (%s, %s, %s, %s, %s, 'queued', %s, 'index', %s, %s, %s)""",
                     (
                         job_id,
                         knowledge_base_id,
@@ -442,6 +471,8 @@ class PostgresDataSourceRepository:
                         f"reprocess:{document_version_id}:{job_id}",
                         max_attempts,
                         target_chunking_version,
+                        sync_run_id,
+                        operation_id,
                     ),
                 )
                 connection.execute(
@@ -455,7 +486,16 @@ class PostgresDataSourceRepository:
     def set_enabled(self, data_source_id: str, enabled: bool) -> bool:
         with psycopg.connect(self.database_url) as connection:
             result = connection.execute(
-                "UPDATE data_sources SET enabled = %s, updated_at = now() WHERE data_source_id = %s",
+                """UPDATE data_sources SET sync_enabled = %s,
+                          updated_at = now() WHERE data_source_id = %s""",
+                (enabled, data_source_id),
+            )
+        return result.rowcount > 0
+
+    def set_retrieval_enabled(self, data_source_id: str, enabled: bool) -> bool:
+        with psycopg.connect(self.database_url) as connection:
+            result = connection.execute(
+                "UPDATE data_sources SET retrieval_enabled=%s, updated_at=now() WHERE data_source_id=%s",
                 (enabled, data_source_id),
             )
         return result.rowcount > 0

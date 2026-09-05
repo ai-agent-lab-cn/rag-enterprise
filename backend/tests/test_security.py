@@ -71,6 +71,15 @@ def test_upload_validation_rejects_mime_and_content_mismatch() -> None:
     assert binary_text_error.value.code == "INVALID_TEXT_FILE"
 
 
+def test_upload_validation_accepts_structured_document_mime_types() -> None:
+    assert validate_upload(
+        "论文-动态测试.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        b"PK\x03\x04docx",
+        max_filename_chars=160,
+    ) == "论文-动态测试.docx"
+
+
 def test_uploaded_original_uses_private_permissions(tmp_path) -> None:
     """上传的源文件与其目录必须只有当前服务用户可读写。
 

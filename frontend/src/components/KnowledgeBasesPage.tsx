@@ -16,10 +16,10 @@ import { Toolbar } from "./ui/Toolbar";
 import { useConfirm } from "./ui/useConfirm";
 import { useToast } from "./ui/Toast";
 
-const STATUS_LABEL = { empty: "空库", processing: "处理中", ready: "可用", failed: "失败" } as const;
+const STATUS_LABEL = { empty: "空库", processing: "处理中", ready: "可用", degraded: "部分异常", failed: "失败" } as const;
 // Badge 只有 5 档语义色，没有专门的「进行中/蓝色」；processing 借用 brand（品牌色）表达
 // 「正在推进」，与 ready 的 success（绿）、failed 的 danger（红）区分开。
-const STATUS_TONE = { empty: "neutral", processing: "brand", ready: "success", failed: "danger" } as const;
+const STATUS_TONE = { empty: "neutral", processing: "brand", ready: "success", degraded: "warning", failed: "danger" } as const;
 function formatBytes(bytes: number) { if (!bytes) return "0 KB"; const units = ["B", "KB", "MB", "GB"]; const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 3); return `${(bytes / 1024 ** exponent).toFixed(exponent ? 1 : 0)} ${units[exponent]}`; }
 
 export function KnowledgeBasesPage({ isAdmin, onOpen, showCreate, onCloseCreate }: { isAdmin: boolean; onOpen: (path: string) => void; showCreate: boolean; onCloseCreate: () => void }) {
@@ -131,7 +131,7 @@ export function KnowledgeBasesPage({ isAdmin, onOpen, showCreate, onCloseCreate 
     <Toolbar
       filters={<>
         <label><span className="sr-only">搜索知识库</span><Input size="sm" className="w-52" value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder="搜索知识库名称" /></label>
-        <Select size="sm" className="w-28" aria-label="状态筛选" value={status} onChange={(event) => { setStatus(event.target.value); setPage(0); }}><option value="">全部状态</option><option value="empty">空库</option><option value="processing">处理中</option><option value="ready">可用</option><option value="failed">失败</option></Select>
+        <Select size="sm" className="w-28" aria-label="状态筛选" value={status} onChange={(event) => { setStatus(event.target.value); setPage(0); }}><option value="">全部状态</option><option value="empty">空库</option><option value="processing">处理中</option><option value="ready">可用</option><option value="degraded">部分异常</option><option value="failed">失败</option></Select>
         <Select size="sm" className="w-28" aria-label="更新时间排序" value={sort} onChange={(event) => { setSort(event.target.value as typeof sort); setPage(0); }}><option value="updated_desc">最近更新</option><option value="updated_asc">最早更新</option></Select>
       </>}
       actions={isAdmin ? <Button variant="secondary" size="sm" onClick={() => { setShowTemplate(true); if (!template) void loadTemplate(); }}>知识库分类模板</Button> : null}

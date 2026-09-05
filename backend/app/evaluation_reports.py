@@ -36,6 +36,14 @@ class EvaluationReportRepository:
                 return self._detail(report)
         raise AppError("EVALUATION_REPORT_NOT_FOUND", "未找到该正式评测报告。", 404)
 
+    def load_official_model(self, report_id: str) -> RetrievalEvaluationReport:
+        """索引放行使用完整报告模型；API 展示仍返回裁剪后的响应模型。"""
+        for path in sorted(self.reports_path.glob("*.json")):
+            report = self._load(path)
+            if report.official and report.report_id == report_id:
+                return report
+        raise AppError("EVALUATION_REPORT_NOT_FOUND", "未找到该正式评测报告。", 404)
+
     def list_official_answers(self) -> list[AnswerEvaluationReportSummary]:
         """回答报告独立存放，只公开经过人工复核后标记 official 的正式报告。"""
         reports = [

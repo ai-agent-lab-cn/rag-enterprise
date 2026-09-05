@@ -9,10 +9,22 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
+import json
+import os
+import re
+import socket
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple, Protocol
+from urllib.parse import urlparse
+from xml.etree import ElementTree
+
+import httpx
+import psycopg
+from psycopg import sql
+from psycopg.rows import dict_row
 
 from minio import Minio
 from minio.error import S3Error
@@ -43,6 +55,190 @@ class SourceObject(NamedTuple):
 class Connector(Protocol):
     def list_objects(self) -> Iterator[SourceObject]: ...
     def fetch(self, key: str) -> bytes: ...
+    def metadata(self, key: str) -> dict[str, object]: ...
+
+
+class WebConnector:
+    """受控 URL 列表连接器；不跟随任意站内链接，避免抓取范围失控。"""
+
+    def __init__(
+        self, urls: list[str], max_bytes: int | None = None,
+        sitemap_url: str | None = None, max_objects: int = 1000,
+    ):
+        if not urls and not sitemap_url:
+            raise AppError("SOURCE_CONFIGURATION_INVALID", "Web 数据源至少配置一个 URL。", 400)
+        self.urls = [self._validate_url(value) for value in urls]
+        self.sitemap_url = self._validate_url(sitemap_url) if sitemap_url else None
+        self.max_bytes = max_bytes
+        if max_objects < 1 or max_objects > 10_000:
+            raise AppError("SOURCE_CONFIGURATION_INVALID", "Web 最大资源数必须在 1 到 10000 之间。", 400)
+        self.max_objects = max_objects
+        self.skipped: list[tuple[str, int]] = []
+        self._cache: dict[str, bytes] = {}
+        self._url_by_key: dict[str, str] = {}
+
+    @staticmethod
+    def _validate_url(value: str) -> str:
+        parsed = urlparse(value.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise AppError("SOURCE_CONFIGURATION_INVALID", "Web URL 必须使用 HTTP 或 HTTPS。", 400)
+        hostname = parsed.hostname or ""
+        try:
+            addresses = {item[4][0] for item in socket.getaddrinfo(hostname, parsed.port or 443)}
+        except socket.gaierror as exc:
+            raise AppError("SOURCE_UNAVAILABLE", "Web 数据源域名无法解析。", 409) from exc
+        for address in addresses:
+            ip = ipaddress.ip_address(address)
+            if not ip.is_global:
+                raise AppError("SOURCE_URL_FORBIDDEN", "Web 数据源不允许访问本机或内网地址。", 409)
+        return value.strip()
+
+    def _discovery_urls(self, client: httpx.Client) -> list[str]:
+        if not self.sitemap_url:
+            return self.urls[: self.max_objects]
+        response = client.get(self.sitemap_url)
+        response.raise_for_status()
+        self._validate_url(str(response.url))
+        if self.max_bytes is not None and len(response.content) > self.max_bytes:
+            raise AppError("SOURCE_OBJECT_TOO_LARGE", "Sitemap 超过允许大小。", 409)
+        root = ElementTree.fromstring(response.content)
+        urls = [self._validate_url((node.text or "").strip()) for node in root.findall(".//{*}loc")]
+        return list(dict.fromkeys([*self.urls, *urls]))[: self.max_objects]
+
+    def list_objects(self) -> Iterator[SourceObject]:
+        self.skipped = []
+        self._cache = {}
+        self._url_by_key = {}
+        with httpx.Client(timeout=15, follow_redirects=True) as client:
+            for url in self._discovery_urls(client):
+                response = client.get(url)
+                response.raise_for_status()
+                self._validate_url(str(response.url))
+                content_type = response.headers.get("content-type", "").lower()
+                if not any(value in content_type for value in ("text/", "application/xhtml+xml")):
+                    self.skipped.append((url, len(response.content)))
+                    continue
+                content = response.content
+                if self.max_bytes is not None and len(content) > self.max_bytes:
+                    self.skipped.append((url, len(content)))
+                    continue
+                parsed = urlparse(url)
+                basename = Path(parsed.path).name or "index.html"
+                key = validate_object_key(
+                    f"{parsed.netloc}/{hashlib.sha256(url.encode()).hexdigest()[:12]}-{basename}"
+                )
+                self._cache[key] = content
+                self._url_by_key[key] = url
+                yield SourceObject(key, hashlib.sha256(content).hexdigest(), len(content), None)
+
+    def fetch(self, key: str) -> bytes:
+        if key in self._cache:
+            return self._cache[key]
+        url = self._url_by_key.get(key)
+        if not url:
+            raise AppError("SOURCE_OBJECT_MISSING", "Web 资源不在本次发现结果中。", 409)
+        with httpx.Client(timeout=15, follow_redirects=True) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            return response.content
+
+    def metadata(self, key: str) -> dict[str, object]:
+        return {"source_url": self._url_by_key.get(key)}
+
+
+class ReadOnlyDatabaseConnector:
+    """固定 View 只读连接器；配置只允许标识符，不接受任意 SQL。"""
+
+    def __init__(
+        self, database_url_env: str, view: str, id_column: str, content_column: str,
+        updated_column: str | None = None,
+        metadata_mapping: dict[str, str] | None = None,
+        acl_mapping: dict[str, str] | None = None,
+    ):
+        self.database_url = os.getenv(database_url_env, "")
+        if not self.database_url:
+            raise AppError("SOURCE_CREDENTIALS_MISSING", f"缺少环境变量 {database_url_env}。", 409)
+        identifiers = [view, id_column, content_column, *( [updated_column] if updated_column else [])]
+        if any(not value or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value) for value in identifiers):
+            raise AppError("SOURCE_CONFIGURATION_INVALID", "数据库 View 或列名格式无效。", 400)
+        self.view, self.id_column, self.content_column = view, id_column, content_column
+        self.updated_column = updated_column
+        allowed_metadata = {"department", "sensitivity", "tags", "valid_from", "valid_to", "owner_user_id"}
+        allowed_acl = {"allow_user_ids", "deny_user_ids"}
+        self.metadata_mapping = metadata_mapping or {}
+        self.acl_mapping = acl_mapping or {}
+        if set(self.metadata_mapping) - allowed_metadata or set(self.acl_mapping) - allowed_acl:
+            raise AppError(
+                "SOURCE_MAPPING_FORBIDDEN",
+                "字段映射包含不允许覆盖的系统治理字段。",
+                400,
+            )
+        mapped_columns = [*self.metadata_mapping.values(), *self.acl_mapping.values()]
+        if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value) for value in mapped_columns):
+            raise AppError("SOURCE_CONFIGURATION_INVALID", "Metadata 或 ACL 映射列名格式无效。", 400)
+        self._cache: dict[str, bytes] = {}
+        self._metadata: dict[str, dict[str, object]] = {}
+
+    def list_objects(self) -> Iterator[SourceObject]:
+        columns = [sql.Identifier(self.id_column), sql.Identifier(self.content_column)]
+        if self.updated_column:
+            columns.append(sql.Identifier(self.updated_column))
+        for column in dict.fromkeys([*self.metadata_mapping.values(), *self.acl_mapping.values()]):
+            if column not in {self.id_column, self.content_column, self.updated_column}:
+                columns.append(sql.Identifier(column))
+        query = sql.SQL("SELECT {columns} FROM {view} ORDER BY {id}").format(
+            columns=sql.SQL(",").join(columns), view=sql.Identifier(self.view),
+            id=sql.Identifier(self.id_column),
+        )
+        self._cache = {}
+        self._metadata = {}
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            connection.execute("SET TRANSACTION READ ONLY")
+            connection.execute("SET LOCAL statement_timeout = '30s'")
+            for row in connection.execute(query):
+                key = validate_object_key(f"{row[self.id_column]}.txt")
+                content = str(row[self.content_column] or "").encode("utf-8")
+                self._cache[key] = content
+                modified = row.get(self.updated_column) if self.updated_column else None
+                metadata = {
+                    target: row.get(column)
+                    for target, column in self.metadata_mapping.items()
+                    if row.get(column) is not None
+                }
+                if "tags" in metadata and not isinstance(metadata["tags"], list):
+                    metadata["tags"] = [
+                        value.strip() for value in str(metadata["tags"]).split(",") if value.strip()
+                    ]
+                for time_key in ("valid_from", "valid_to"):
+                    value = metadata.get(time_key)
+                    if hasattr(value, "isoformat"):
+                        metadata[time_key] = value.isoformat()
+                acl = {}
+                for target, column in self.acl_mapping.items():
+                    raw = row.get(column)
+                    if raw is None:
+                        continue
+                    if isinstance(raw, (list, tuple)):
+                        acl[target] = [str(value).strip() for value in raw if str(value).strip()]
+                    else:
+                        acl[target] = [value.strip() for value in str(raw).split(",") if value.strip()]
+                self._metadata[key] = {
+                    **metadata,
+                    "external_updated_at": modified.isoformat() if hasattr(modified, "isoformat") else None,
+                    **acl,
+                }
+                fingerprint = hashlib.sha256(
+                    content + json.dumps({"metadata": metadata, "acl": acl}, sort_keys=True, default=str).encode()
+                ).hexdigest()
+                yield SourceObject(key, fingerprint, len(content), modified)
+
+    def fetch(self, key: str) -> bytes:
+        if key not in self._cache:
+            raise AppError("SOURCE_OBJECT_MISSING", "数据库资源不在本次发现结果中。", 409)
+        return self._cache[key]
+
+    def metadata(self, key: str) -> dict[str, object]:
+        return self._metadata.get(key, {})
 
 
 def validate_object_key(key: str) -> str:
@@ -121,6 +317,9 @@ class LocalDirectoryConnector:
             # 列举与拉取之间对象可能已被删除，这是可预期状态而非崩溃。
             raise AppError("SOURCE_OBJECT_MISSING", f"对象已不存在：{key}", 409)
         return resolved.read_bytes()
+
+    def metadata(self, key: str) -> dict[str, object]:
+        return {}
 
 
 _S3_ERROR_CODES: dict[str, tuple[str, str, int]] = {
@@ -221,3 +420,6 @@ class S3Connector:
             # get_object 返回的是 HTTP 响应而不是字节，不释放会泄漏连接池。
             response.close()
             response.release_conn()
+
+    def metadata(self, key: str) -> dict[str, object]:
+        return {"external_resource_id": key}

@@ -379,7 +379,7 @@ test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
   await userEvent.click(screen.getByRole("button", { name: "取消" }));
   await userEvent.click(screen.getByRole("tab", { name: /版本治理/ }));
   expect(screen.getByRole("tab", { name: /版本治理/ })).toHaveAttribute("aria-selected", "true");
-  expect(screen.getByRole("heading", { name: "Index Version" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "索引版本" })).toBeInTheDocument();
   expect(screen.getByText("iv_active")).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "文档与版本" })).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("tab", { name: /解析与切片/ }));

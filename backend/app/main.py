@@ -17,12 +17,21 @@ from .audit import AuditRepository
 from .auth import AuthenticatedSession, AuthRepository, UserRecord
 from .chunking import chunking_version
 from .config import get_settings
-from .data_source_sync import build_connector, enqueue_sync
+from .data_source_sync import build_connector, enqueue_sync, retry_sync_resource
+from .pipeline_governance import (
+    cancel_sync_run,
+    list_document_index_states,
+    list_index_definitions,
+    list_index_builds,
+    list_operations,
+    list_sync_resources,
+)
 from .database import check_schema_version
 from .demo import seed_demo_document
 from .errors import AppError, install_error_handlers
 from .evaluation_governance import BadCaseUpdate
 from .evaluation_reports import EvaluationReportRepository
+from .index_versions import retire_version, rollback_to_previous, switch_to_version
 from .history import ConversationRepository
 from .generation_models import GenerationProviderState
 from .knowledge_bases import (
@@ -33,7 +42,11 @@ from .knowledge_bases import (
 )
 from .models import SwitchableGenerator, get_embedding_model, get_generator, get_reranker
 from .observability import MetricsRegistry, ObservabilityMiddleware, bind_actor, hash_identifier
-from .postgres_documents import PostgresAsyncRAGService, check_embedding_model
+from .postgres_documents import (
+    PostgresAsyncRAGService,
+    check_embedding_model,
+    enqueue_rebuild,
+)
 from .postgres_evaluation import PostgresEvaluationGovernanceRepository
 from .postgres_repositories import (
     PostgresAuthRepository,
@@ -71,6 +84,7 @@ from .schemas import (
     ConversationDetailResponse,
     ConversationSummaryResponse,
     DataSourceConnectionTestResponse,
+    DataSourcePreviewResponse,
     DataSourceCreate,
     DataSourceResponse,
     DataSourceUpdate,
@@ -87,6 +101,11 @@ from .schemas import (
     GenerationModelsResponse,
     HealthResponse,
     IndexVersionResponse,
+    IndexDefinitionResponse,
+    IndexBuildCreate,
+    IndexBuildResponse,
+    DocumentIndexStateResponse,
+    IndexVersionActivateRequest,
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
     KnowledgeBaseUpdate,
@@ -94,6 +113,7 @@ from .schemas import (
     MemberCreate,
     MemberUpdate,
     MetricsResponse,
+    OperationResponse,
     ParsingPreviewResponse,
     PipelineEvaluationResponse,
     QueryRequest,
@@ -102,6 +122,7 @@ from .schemas import (
     ReprocessDocumentVersionRequest,
     SyncEnqueueResponse,
     SyncRunResponse,
+    SyncResourceRunResponse,
     UserResponse,
 )
 from .security import AbuseProtection, SecurityBoundaryMiddleware, validate_upload
@@ -663,7 +684,7 @@ def create_app() -> FastAPI:
         offset: PageOffset = 0,
         limit: PageLimit = 50,
         name: str = Query(default="", max_length=80),
-        status: str = Query(default="", pattern=r"^(|empty|processing|ready|failed)$"),
+        status: str = Query(default="", pattern=r"^(|empty|processing|ready|degraded|failed)$"),
         sort: str = Query(default="updated_desc", pattern=r"^(updated_desc|updated_asc)$"),
     ) -> list[KnowledgeBaseResponse]:
         records = await run_in_threadpool(knowledge_bases.list)
@@ -780,6 +801,33 @@ def create_app() -> FastAPI:
         )
 
     @app.post(
+        "/api/data-sources/{data_source_id}/preview",
+        response_model=DataSourcePreviewResponse,
+    )
+    async def preview_data_source(
+        data_source_id: str,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> DataSourcePreviewResponse:
+        _require_admin(current.user)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "数据源预览需要 PostgreSQL。", 503)
+        source = await run_in_threadpool(sources.get, data_source_id)
+        if source is None:
+            raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
+        connector = await run_in_threadpool(
+            build_connector, dict(source.get("configuration") or {}), str(source["source_type"]),
+            settings.max_upload_mb * 1024 * 1024,
+        )
+        objects = await run_in_threadpool(lambda: list(connector.list_objects()))
+        return DataSourcePreviewResponse(
+            items=[{"key": item.key, "version": item.version, "size": item.size,
+                    "modified_at": item.modified_at} for item in objects[:limit]],
+            discovered_count=len(objects), truncated=len(objects) > limit,
+        )
+
+    @app.post(
         "/api/data-sources/{data_source_id}/sync",
         response_model=SyncEnqueueResponse,
         status_code=202,
@@ -813,6 +861,43 @@ def create_app() -> FastAPI:
         rows = await run_in_threadpool(sources.list_sync_runs, data_source_id, limit)
         return [SyncRunResponse(**row) for row in rows]
 
+    @app.get(
+        "/api/data-sources/{data_source_id}/sync-runs/{sync_run_id}/resources",
+        response_model=list[SyncResourceRunResponse],
+    )
+    async def list_data_source_sync_resources(
+        data_source_id: str,
+        sync_run_id: str,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+    ) -> list[SyncResourceRunResponse]:
+        _require_admin(current.user)
+        if sources is None or await run_in_threadpool(sources.get, data_source_id) is None:
+            raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
+        rows = await run_in_threadpool(
+            list_sync_resources, sources.database_url, sync_run_id, data_source_id
+        )
+        return [SyncResourceRunResponse(**row) for row in rows]
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/operations",
+        response_model=list[OperationResponse],
+    )
+    async def list_knowledge_base_operations(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> list[OperationResponse]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "运行任务治理需要 PostgreSQL。", 503)
+        rows = await run_in_threadpool(list_operations, sources.database_url, knowledge_base_id, limit)
+        return [OperationResponse(**row) for row in rows]
+
     @app.post(
         "/api/data-sources/{data_source_id}/retry",
         response_model=SyncEnqueueResponse,
@@ -825,6 +910,40 @@ def create_app() -> FastAPI:
         audit: AuditRepositoryDependency,
     ) -> SyncEnqueueResponse:
         return await trigger_data_source_sync(data_source_id, sources, current, audit)
+
+    @app.post("/api/data-sources/{data_source_id}/sync-runs/{sync_run_id}/cancel", status_code=204)
+    async def cancel_data_source_sync_run(
+        data_source_id: str,
+        sync_run_id: str,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> None:
+        _require_admin(current.user)
+        if sources is None or not await run_in_threadpool(
+            cancel_sync_run, sources.database_url, data_source_id, sync_run_id
+        ):
+            raise AppError("SYNC_RUN_NOT_FOUND", "未找到同步任务。", 404)
+        await _record_audit(audit, "data_source.sync.cancel", current.user, "sync_run", sync_run_id)
+
+    @app.post(
+        "/api/data-sources/{data_source_id}/sync-runs/{sync_run_id}/resources/{resource_id}/retry",
+        status_code=204,
+    )
+    async def retry_data_source_sync_resource(
+        data_source_id: str,
+        sync_run_id: str,
+        resource_id: str,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> None:
+        _require_admin(current.user)
+        if sources is None or not await run_in_threadpool(
+            retry_sync_resource, settings, data_source_id, sync_run_id, resource_id
+        ):
+            raise AppError("SYNC_RESOURCE_NOT_FOUND", "未找到同步资源。", 404)
+        await _record_audit(audit, "data_source.sync.resource.retry", current.user, "sync_resource", resource_id)
 
     @app.put("/api/data-sources/{data_source_id}/enabled", status_code=204)
     async def set_data_source_enabled(
@@ -840,6 +959,27 @@ def create_app() -> FastAPI:
         await _record_audit(
             audit,
             "data_source.enable" if enabled else "data_source.disable",
+            current.user,
+            "data_source",
+            data_source_id,
+        )
+
+    @app.put("/api/data-sources/{data_source_id}/retrieval-enabled", status_code=204)
+    async def set_data_source_retrieval_enabled(
+        data_source_id: str,
+        enabled: bool,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        audit: AuditRepositoryDependency,
+    ) -> None:
+        _require_admin(current.user)
+        if sources is None or not await run_in_threadpool(
+            sources.set_retrieval_enabled, data_source_id, enabled
+        ):
+            raise AppError("DATA_SOURCE_NOT_FOUND", "未找到该数据源。", 404)
+        await _record_audit(
+            audit,
+            "data_source.retrieval.enable" if enabled else "data_source.retrieval.disable",
             current.user,
             "data_source",
             data_source_id,
@@ -1368,12 +1508,176 @@ def create_app() -> FastAPI:
         offset: PageOffset = 0,
         limit: PageLimit = 50,
     ) -> list[IndexVersionResponse]:
-        """索引版本只读视图。切换与回滚是高风险操作，只提供 CLI 入口，不开放写接口。"""
+        """读取当前知识库的索引版本与生命周期状态。"""
 
         _require_admin(current.user)
         await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         versions = await run_in_threadpool(service.list_index_versions, knowledge_base_id)
         return _page([IndexVersionResponse(**item) for item in versions], offset, limit)
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/index-definitions",
+        response_model=list[IndexDefinitionResponse],
+    )
+    async def list_scoped_index_definitions(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> list[IndexDefinitionResponse]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(
+            knowledge_bases, auth, current.user, knowledge_base_id
+        )
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引定义需要 PostgreSQL。", 503)
+        rows = await run_in_threadpool(
+            list_index_definitions, sources.database_url, knowledge_base_id
+        )
+        return [IndexDefinitionResponse(**row) for row in rows]
+
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/index-builds",
+        status_code=202,
+    )
+    async def create_scoped_index_build(
+        knowledge_base_id: str,
+        payload: IndexBuildCreate,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> dict[str, object]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引构建需要 PostgreSQL。", 503)
+        if payload.chunk_overlap >= payload.chunk_size:
+            raise AppError("CHUNKING_POLICY_INVALID", "切片重叠必须小于切片大小。", 400)
+        if not await run_in_threadpool(service.list_documents, knowledge_base_id):
+            raise AppError(
+                "INDEX_BUILD_EMPTY_KNOWLEDGE_BASE",
+                "知识库暂无可构建资料，请先添加资料。",
+                409,
+            )
+        target = chunking_version(payload.chunk_size, payload.chunk_overlap)
+        result = await run_in_threadpool(
+            enqueue_rebuild, sources.database_url, knowledge_base_id, target,
+        )
+        await _record_audit(audit, "index_build.create", current.user, "knowledge_base", knowledge_base_id)
+        return result
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/index-builds",
+        response_model=list[IndexBuildResponse],
+    )
+    async def list_scoped_index_builds(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> list[IndexBuildResponse]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引构建需要 PostgreSQL。", 503)
+        rows = await run_in_threadpool(list_index_builds, sources.database_url, knowledge_base_id)
+        return [IndexBuildResponse(**row) for row in rows]
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/index-builds/{index_build_id}/documents",
+        response_model=list[DocumentIndexStateResponse],
+    )
+    async def list_scoped_index_build_documents(
+        knowledge_base_id: str,
+        index_build_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> list[DocumentIndexStateResponse]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引构建需要 PostgreSQL。", 503)
+        rows = await run_in_threadpool(
+            list_document_index_states, sources.database_url, knowledge_base_id, index_build_id
+        )
+        return [DocumentIndexStateResponse(**row) for row in rows]
+
+    @app.put(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/active"
+    )
+    async def activate_scoped_index_version(
+        knowledge_base_id: str,
+        index_version_id: str,
+        payload: IndexVersionActivateRequest,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> dict[str, object]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引切换需要 PostgreSQL。", 503)
+        if not any(
+            item["index_version_id"] == index_version_id
+            for item in await run_in_threadpool(service.list_index_versions, knowledge_base_id)
+        ):
+            raise AppError("INDEX_VERSION_NOT_FOUND", "未找到该知识库的索引版本。", 404)
+        report = await run_in_threadpool(
+            EvaluationReportRepository(settings.evaluation_reports_path).load_official_model,
+            payload.evaluation_report_id,
+        )
+        result = await run_in_threadpool(
+            switch_to_version, sources.database_url, index_version_id, report, audit,
+        )
+        return result
+
+    @app.post("/api/knowledge-bases/{knowledge_base_id}/index-versions/rollback")
+    async def rollback_scoped_index_version(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> dict[str, str]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引回滚需要 PostgreSQL。", 503)
+        return await run_in_threadpool(
+            rollback_to_previous, sources.database_url, knowledge_base_id, audit,
+        )
+
+    @app.delete(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/content"
+    )
+    async def cleanup_scoped_index_version(
+        knowledge_base_id: str,
+        index_version_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> dict[str, int]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引清理需要 PostgreSQL。", 503)
+        if not any(
+            item["index_version_id"] == index_version_id
+            for item in await run_in_threadpool(service.list_index_versions, knowledge_base_id)
+        ):
+            raise AppError("INDEX_VERSION_NOT_FOUND", "未找到该知识库的索引版本。", 404)
+        deleted = await run_in_threadpool(retire_version, sources.database_url, index_version_id)
+        return {"deleted_chunks": deleted}
 
     @app.get(
         "/api/knowledge-bases/{knowledge_base_id}/documents",
@@ -2188,10 +2492,12 @@ async def _knowledge_base_response(
     statuses = {item.status for item in documents}
     if not documents:
         index_status = "empty"
-    elif "failed" in statuses:
-        index_status = "failed"
     elif statuses & {"queued", "pending", "indexing", "processing"}:
         index_status = "processing"
+    elif "failed" in statuses and statuses - {"failed"}:
+        index_status = "degraded"
+    elif statuses == {"failed"}:
+        index_status = "failed"
     else:
         index_status = "ready"
     upload_path = KnowledgeBaseScope(
@@ -2229,14 +2535,20 @@ def _data_source_response(row: dict[str, object], user: UserRecord) -> DataSourc
     if source_type == "file":
         actions.append("update_file")
     if user.role == "admin":
-        actions.extend(["edit", "disable" if row["enabled"] else "enable"])
-        if source_type in {"local_directory", "object_storage"} and row["enabled"]:
+        sync_enabled = bool(row.get("sync_enabled", row.get("enabled", True)))
+        actions.append("edit")
+        if source_type in {"local_directory", "object_storage", "web", "connector"}:
+            actions.append("disable" if sync_enabled else "enable")
+        retrieval_enabled = bool(row.get("retrieval_enabled", True))
+        actions.append("disable_retrieval" if retrieval_enabled else "enable_retrieval")
+        if source_type in {"local_directory", "object_storage", "web", "connector"} and sync_enabled:
             actions.extend(["test", "sync"])
         if not row["document_count"] and index_status not in {"queued", "running"}:
             actions.append("delete")
     configuration = dict(row.get("configuration") or {})
     normalized = {
         **row,
+        "enabled": bool(row.get("sync_enabled", row.get("enabled", True))),
         "configuration": {
             key: value
             for key, value in configuration.items()

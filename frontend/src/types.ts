@@ -5,6 +5,7 @@ export interface DocumentInfo {
   filename: string;
   chunk_count: number;
   status: string;
+  index_failure_reason?: string | null;
   /** null 表示没有分类。它与 classification_status 是两回事：没有分类不等于分类失败。 */
   category: string | null;
   category_id: string | null;
@@ -319,7 +320,7 @@ export interface KnowledgeBase {
   document_count: number;
   chunk_count: number;
   source_file_bytes: number;
-  index_status: "empty" | "processing" | "ready" | "failed";
+  index_status: "empty" | "processing" | "ready" | "degraded" | "failed";
   current_user_permission: "admin" | "use";
   allowed_actions: Array<"detail" | "edit" | "delete">;
 }
@@ -327,17 +328,20 @@ export interface KnowledgeBase {
 export interface DataSource {
   data_source_id: string; name: string; source_type: "file" | "local_directory" | "object_storage" | "web" | "connector";
   knowledge_base_id: string; knowledge_base_name: string; enabled: boolean;
+  sync_enabled?: boolean; retrieval_enabled?: boolean;
   upload_status: "idle" | "succeeded";
   index_status: "idle" | "queued" | "running" | "succeeded" | "failed";
   /** @deprecated 使用 index_status。 */
   sync_status: "idle" | "queued" | "running" | "succeeded" | "failed" | "aborted";
+  sync_progress_percent?: number;
+  sync_current_stage?: string | null;
   configuration?: Record<string, unknown>;
   default_category_id?: string | null;
   metadata_defaults?: Record<string, unknown>;
   document_count: number; source_file_bytes: number; last_indexed_at: string | null; last_synced_at: string | null;
   failure_reason: string | null; updated_at: string;
   acl_version: number; allow_user_ids: string[]; deny_user_ids: string[];
-  allowed_actions: Array<"detail" | "edit" | "disable" | "enable" | "update_file" | "delete" | "test" | "sync">;
+  allowed_actions: Array<"detail" | "edit" | "disable" | "enable" | "disable_retrieval" | "enable_retrieval" | "update_file" | "delete" | "test" | "sync">;
 }
 
 export interface SyncRun {
@@ -351,12 +355,37 @@ export interface SyncRun {
   skipped_count: number;
   failed_count: number;
   retry_count: number;
+  operation_id: string | null;
+  input_cursor: string | null;
+  discovered_cursor: string | null;
+  committed_cursor: string | null;
+  total_count: number;
+  completed_count: number;
+  processing_count: number;
+  dead_letter_count: number;
   error_code: string | null;
   failure_reason: string | null;
   started_at: string | null;
   finished_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface SyncResourceRun {
+  sync_resource_run_id: string; sync_run_id: string; external_resource_id: string;
+  operation: string; status: string; current_stage: string;
+  document_id: string | null; document_version_id: string | null; index_build_id: string | null;
+  attempt_count: number; max_attempts: number; error_code: string | null; error_message: string | null;
+  started_at: string | null; finished_at: string | null; created_at: string; updated_at: string;
+}
+
+export interface GovernedOperation {
+  operation_id: string; operation_type: string; knowledge_base_id: string;
+  data_source_id: string | null; document_id: string | null; document_version_id: string | null;
+  status: string; current_stage: string; progress_mode: string; progress_percent: number | null;
+  total_count: number; completed_count: number; processing_count: number; failed_count: number;
+  error_code: string | null; error_message: string | null;
+  started_at: string | null; finished_at: string | null; created_at: string; updated_at: string;
 }
 
 export interface ConversationSummary {
@@ -502,4 +531,31 @@ export interface IndexVersion {
   created_at: string;
   activated_at: string | null;
   retired_at: string | null;
+}
+
+export interface IndexDefinition {
+  index_definition_id: string; name: string;
+  vector_config: Record<string, unknown>; keyword_config: Record<string, unknown>;
+  metadata_schema: Record<string, unknown>; parser_schema_version: string;
+  chunking_policy: Record<string, unknown>; embedding_model: string;
+  embedding_dimension: number; reranker_config: Record<string, unknown>;
+  config_fingerprint: string; active: boolean; created_at: string; updated_at: string;
+}
+
+export interface IndexBuild {
+  index_build_id: string; operation_id: string; index_version_id: string;
+  index_definition_id: string | null; build_type: string; status: string;
+  total_documents: number; queued_documents: number; processing_documents: number;
+  succeeded_documents: number; failed_documents: number;
+  failure_code: string | null; failure_reason: string | null;
+  progress_percent: number | null; current_stage: string;
+  started_at: string | null; finished_at: string | null; created_at: string; updated_at: string;
+}
+
+export interface DocumentIndexState {
+  index_build_id: string; index_version_id: string; document_id: string;
+  document_version_id: string; filename: string; vector_status: string;
+  keyword_status: string; metadata_status: string; overall_status: string;
+  chunk_count: number; failure_stage: string | null; failure_code: string | null;
+  failure_reason: string | null; updated_at: string;
 }
