@@ -12,17 +12,22 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 from uuid import uuid4
 
 import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from backend.app.chunking import chunking_version
 from backend.app.config import get_settings
 from backend.app.database import check_schema_version
-from backend.app.index_versions import config_fingerprint
+from backend.app.index_versions import component_manifest, config_fingerprint
 from backend.app.models import get_embedding_model, get_reranker
 from backend.app.postgres_documents import IndexWorker, PostgresAsyncRAGService
 from backend.app.ranking import VECTOR_SCORE_WEIGHT, rank_candidates
+from backend.app.retrieval_access import RetrievalAccessContext
+from backend.app.schemas import QueryMetadataFilter
 from backend.app.store import RetrievedChunk
 
 from .corpus_dataset import (
@@ -41,9 +46,11 @@ from .run_baseline import resolved_model
 RECALL_AT_5_THRESHOLD = 0.70
 VECTOR_MRR_THRESHOLD = 0.55
 RERANK_MRR_THRESHOLD = 0.65
+RECALL_AT_10_THRESHOLD = 0.85
+NDCG_AT_10_THRESHOLD = 0.70
 
 RETRIEVE_K = 10
-RERANK_K = 5
+RERANK_K = 10
 
 # vector 为既有单路基线；lexical 单独衡量 BM25；hybrid 用 RRF 合并两路名次。
 RETRIEVAL_MODES = ("vector", "lexical", "hybrid")
@@ -81,6 +88,7 @@ def run_corpus_baseline(
         embedder.model_name,
         len(embedder.encode(["维度探测"])[0]),
         {"chunk_size": chunk_size, "chunk_overlap": chunk_overlap},
+        component_manifest(reranker_model=settings.reranker_model),
     )
     knowledge_base_id = f"kb_eval_{uuid4().hex[:20]}"
 
@@ -130,6 +138,14 @@ def run_corpus_baseline(
                 else:
                     reranked = []
                 reranked_rankings[query.query_id] = [_position(item) for item in reranked]
+            metadata_filter_accuracy, acl_leak_count = _governance_quality_probes(
+                database_url,
+                service,
+                embedder,
+                knowledge_base_id,
+                retrieval_mode,
+                retrieve_k,
+            )
             chunk_count = service.store.count(knowledge_base_id)
         finally:
             _delete_evaluation_knowledge_base(database_url, knowledge_base_id)
@@ -176,6 +192,11 @@ def run_corpus_baseline(
             RECALL_AT_5_THRESHOLD,
             baseline.recall_at_5.value if baseline else None,
         ),
+        recall_at_10=assess_metric(
+            metrics.recall_at_10,
+            RECALL_AT_10_THRESHOLD,
+            baseline.recall_at_10.value if baseline and baseline.recall_at_10 else None,
+        ),
         vector_mrr=assess_metric(
             metrics.vector_mrr,
             VECTOR_MRR_THRESHOLD,
@@ -194,6 +215,21 @@ def run_corpus_baseline(
             else None,
         ),
         ndcg_at_5=assess_metric(metrics.ndcg_at_5, 0.70),
+        ndcg_at_10=assess_metric(
+            metrics.ndcg_at_10,
+            NDCG_AT_10_THRESHOLD,
+            baseline.ndcg_at_10.value if baseline and baseline.ndcg_at_10 else None,
+        ),
+        metadata_filter_accuracy=assess_metric(
+            metadata_filter_accuracy,
+            1.0,
+            (
+                baseline.metadata_filter_accuracy.value
+                if baseline and baseline.metadata_filter_accuracy
+                else None
+            ),
+        ),
+        acl_leak_count=acl_leak_count,
         config_fingerprint=fingerprint,
     )
     return report.model_copy(update={"official": report.passed})
@@ -239,6 +275,111 @@ def _unfinished_index_jobs(database_url: str, knowledge_base_id: str) -> list[st
                 (knowledge_base_id,),
             ).fetchall()
         ]
+
+
+def _governance_quality_probes(
+    database_url: str,
+    service: PostgresAsyncRAGService,
+    embedder: Any,
+    knowledge_base_id: str,
+    retrieval_mode: str,
+    retrieve_k: int,
+) -> tuple[float, int]:
+    """通过线上同款召回路径验证 Metadata filter 与 ACL deny。
+
+    评测知识库是本次运行独占的临时数据，因此可以给一个真实文档临时写入探针标签与
+    deny 用户。这里不直接检查 SQL：只有调用 ``retrieve_candidates``，才能同时覆盖
+    向量、词法、Hybrid、元数据过滤和访问控制在服务层的组合行为。
+    """
+
+    probe_tag = "evaluation-metadata-probe"
+    missing_tag = "evaluation-metadata-probe-missing"
+    denied_user = "evaluation-denied-user"
+    with psycopg.connect(database_url, row_factory=dict_row) as connection, connection.transaction():
+        protected = connection.execute(
+            """SELECT c.metadata->>'document_id' AS document_id, c.content
+               FROM chunks c
+               JOIN knowledge_bases kb
+                 ON kb.knowledge_base_id=c.knowledge_base_id
+                AND kb.active_index_version_id=c.index_version_id
+               WHERE c.knowledge_base_id=%s
+               ORDER BY c.chunk_id
+               LIMIT 1""",
+            (knowledge_base_id,),
+        ).fetchone()
+        if protected is None:
+            raise RuntimeError("无法执行治理质量探针：评测索引没有可检索分块")
+        document_id = str(protected["document_id"])
+        question = str(protected["content"])[:500]
+        connection.execute(
+            """UPDATE chunks
+               SET metadata=metadata || %s
+               WHERE knowledge_base_id=%s
+                 AND index_version_id=(
+                     SELECT active_index_version_id FROM knowledge_bases
+                     WHERE knowledge_base_id=%s)
+                 AND metadata->>'document_id'=%s""",
+            (
+                Jsonb({"tags": [probe_tag]}),
+                knowledge_base_id,
+                knowledge_base_id,
+                document_id,
+            ),
+        )
+
+    embedding = embedder.encode([question])[0]
+    tagged = service.retrieve_candidates(
+        question,
+        embedding,
+        retrieve_k,
+        knowledge_base_id,
+        retrieval_mode,
+        filters=QueryMetadataFilter(tags=[probe_tag]),
+    )
+    missing = service.retrieve_candidates(
+        question,
+        embedding,
+        retrieve_k,
+        knowledge_base_id,
+        retrieval_mode,
+        filters=QueryMetadataFilter(tags=[missing_tag]),
+    )
+    metadata_checks = (
+        bool(tagged),
+        bool(tagged) and all(str(item.metadata.get("document_id")) == document_id for item in tagged),
+        not missing,
+    )
+    metadata_filter_accuracy = sum(metadata_checks) / len(metadata_checks)
+
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """UPDATE chunks
+               SET metadata=metadata || %s
+               WHERE knowledge_base_id=%s
+                 AND index_version_id=(
+                     SELECT active_index_version_id FROM knowledge_bases
+                     WHERE knowledge_base_id=%s)
+                 AND metadata->>'document_id'=%s""",
+            (
+                Jsonb({"deny_user_ids": [denied_user]}),
+                knowledge_base_id,
+                knowledge_base_id,
+                document_id,
+            ),
+        )
+
+    denied = service.retrieve_candidates(
+        question,
+        embedding,
+        retrieve_k,
+        knowledge_base_id,
+        retrieval_mode,
+        access=RetrievalAccessContext(denied_user),
+    )
+    acl_leak_count = sum(
+        str(item.metadata.get("document_id")) == document_id for item in denied
+    )
+    return metadata_filter_accuracy, acl_leak_count
 
 
 def _delete_evaluation_knowledge_base(database_url: str, knowledge_base_id: str) -> None:

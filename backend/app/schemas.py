@@ -401,6 +401,9 @@ class KnowledgeBaseResponse(BaseModel):
     chunk_count: int
     source_file_bytes: int = 0
     index_status: Literal["empty", "processing", "ready", "degraded", "failed"] = "empty"
+    # 当前生效的索引不是用现在的配置建的。逐项列出差异而不只给一个布尔值——
+    # 操作者要据此判断值不值得重建，「有问题」三个字给不了这个判断。
+    index_config_drift: list[dict[str, object]] = Field(default_factory=list)
     current_user_permission: Literal["admin", "use"] = "use"
     allowed_actions: list[Literal["detail", "edit", "delete"]] = ["detail"]
 
@@ -919,13 +922,19 @@ class MetricsResponse(BaseModel):
     requests: dict[str, Any]
     rag: dict[str, int | float]
     indexing: dict[str, int | float]
+    index_governance: dict[str, int]
 
 
 class IndexVersionResponse(BaseModel):
     """索引版本的只读视图。配置指纹一并返回，便于操作者核对放行报告是否对应同一配置。"""
 
     index_version_id: str
-    status: Literal["building", "ready", "active", "previous", "retired", "failed"]
+    # 与 index_versions_status_check 同一套取值。V31 扩了数据库状态域与前端类型，
+    # 唯独漏了这里——第一个 build_failed 版本出现时，整个索引版本列表接口直接 500。
+    status: Literal[
+        "building", "validating", "ready", "active", "previous",
+        "retired", "cleaned", "build_failed", "validation_failed",
+    ]
     chunking_version: str
     parser_version: str
     embedding_model: str
@@ -933,43 +942,111 @@ class IndexVersionResponse(BaseModel):
     processing_options: dict[str, object]
     config_fingerprint: str
     evaluation_report_id: str | None
+    validation_report_id: str | None = None
+    document_snapshot_id: str | None = None
     rebuild_batch_id: str | None
+    version_no: int | None = None
+    creation_reason: str = "legacy"
+    force_reason: str | None = None
+    requested_by: str | None = None
+    config_snapshot: dict[str, object] = Field(default_factory=dict)
+    component_manifest: dict[str, object] = Field(default_factory=dict)
+    release_fingerprint: str | None = None
+    config_completeness: Literal["complete", "unknown"] = "unknown"
+    legacy_migrated: bool = False
     created_at: datetime
     activated_at: datetime | None
     retired_at: datetime | None
+    cleaned_at: datetime | None = None
 
 
-class IndexBuildCreate(BaseModel):
-    chunk_size: int = Field(default=500, ge=100, le=4000)
-    chunk_overlap: int = Field(default=50, ge=0, le=1000)
+class IndexVersionValidationRequest(BaseModel):
+    evaluation_report_id: str = Field(min_length=1, max_length=160)
+
+
+class IndexVersionPreviewRequest(BaseModel):
+    reason: Literal[
+        "initial_build", "config_changed", "document_snapshot_changed",
+        "component_upgraded", "consistency_repair", "manual_rebuild",
+    ]
+    chunk_size: int = Field(ge=100, le=4000)
+    chunk_overlap: int = Field(ge=0, le=1000)
+    force: bool = False
+    force_reason: str | None = Field(default=None, max_length=500)
+
+
+class IndexVersionCreateRequest(IndexVersionPreviewRequest):
+    expected_config_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_document_set_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_release_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class IndexVersionCreationContextResponse(BaseModel):
+    scenario: Literal["initial_build", "candidate", "no_change"]
+    definition: dict[str, object]
+    active_version: dict[str, object] | None
+    candidate_version: dict[str, object] | None
+    latest_document_snapshot: dict[str, object] | None
+    document_scope: dict[str, int]
+    document_exclusions: list[dict[str, object]] = Field(default_factory=list)
+    build_capacity: dict[str, int]
+    document_diff: dict[str, int]
+    document_set_fingerprint: str
+    config_changed: bool
+    document_changed: bool
+    creation_allowed: bool
+    blocked_reasons: list[str]
 
 
 class IndexDefinitionResponse(BaseModel):
-    index_definition_id: str
-    name: str
-    vector_config: dict[str, object]
-    keyword_config: dict[str, object]
-    metadata_schema: dict[str, object]
-    parser_schema_version: str
-    chunking_policy: dict[str, object]
-    embedding_model: str
-    embedding_dimension: int
-    reranker_config: dict[str, object]
-    config_fingerprint: str
-    active: bool
-    created_at: datetime
-    updated_at: datetime
+    effective_config: dict[str, object]
+    active_version: dict[str, object] | None
+    config_changed: bool
+    document_changed: bool
+    document_scope: dict[str, int]
 
 
-class IndexVersionActivateRequest(BaseModel):
-    evaluation_report_id: str = Field(min_length=1, max_length=160)
+class IndexVersionCandidatePreviewResponse(IndexVersionCreationContextResponse):
+    reason: str
+    force: bool
+    force_reason: str | None
+    config_fingerprint: str | None
+    release_fingerprint: str | None
+    config_snapshot: dict[str, object]
+    component_manifest: dict[str, object]
+    config_diff: list[dict[str, object]]
+    estimated_documents: int
+    estimated_chunks: int
+    estimated_embedding_units: int
+
+
+class IndexVersionCreateResponse(BaseModel):
+    batch_id: str
+    index_version_id: str
+    index_build_id: str
+    knowledge_base_id: str
+    target_chunking_version: str
+    queued: int
+    reused: bool = False
+
+
+class IndexVersionComparisonResponse(BaseModel):
+    knowledge_base_id: str
+    target_version: dict[str, object]
+    baseline_version: dict[str, object] | None
+    config_diff: list[dict[str, object]]
+    document_diff: dict[str, int]
+    actual_scope: dict[str, int]
+    current_content: dict[str, object]
+    validation_comparison: dict[str, object | None]
+    content_snapshot_note: str
 
 
 class IndexBuildResponse(BaseModel):
     index_build_id: str
     operation_id: str
     index_version_id: str
-    index_definition_id: str | None
+    attempt_no: int
     build_type: str
     status: str
     total_documents: int
@@ -1035,17 +1112,20 @@ class EvaluationReportSummary(BaseModel):
     run_at: datetime
     models: dict[str, str]
     passed: bool
+    config_fingerprint: str | None = None
 
 
 class EvaluationReportResponse(EvaluationReportSummary):
     parameters: dict[str, int | float | str | bool]
     query_count: int
     recall_at_5: EvaluationMetricResponse
+    recall_at_10: EvaluationMetricResponse | None = None
     vector_mrr: EvaluationMetricResponse
     rerank_mrr: EvaluationMetricResponse
     rerank_recall_at_5: EvaluationMetricResponse | None = None
     hybrid_mrr: EvaluationMetricResponse | None = None
     ndcg_at_5: EvaluationMetricResponse | None = None
+    ndcg_at_10: EvaluationMetricResponse | None = None
     metadata_filter_accuracy: EvaluationMetricResponse | None = None
     query_rewrite_success_rate: EvaluationMetricResponse | None = None
     query_rewrite_fallback_rate: EvaluationMetricResponse | None = None
@@ -1086,3 +1166,47 @@ class ErrorBody(BaseModel):
     code: str
     message: str
     details: Any = None
+
+
+class ValidationReportResponse(BaseModel):
+    """一次发布门禁的完整结论。
+
+    三层结果各自保留结构化明细（check_key / expected / actual / status），页面因此能
+    指出具体哪一项没过，而不是只显示「验证失败」。
+    """
+
+    validation_report_id: str
+    index_version_id: str
+    index_build_id: str | None
+    status: Literal["pending", "running", "pass", "failed", "cancelled"]
+    policy_version: str
+    evaluation_set_version: str | None
+    baseline_version_id: str | None
+    integrity_result: dict[str, object]
+    technical_result: dict[str, object]
+    retrieval_result: dict[str, object]
+    summary: str | None
+    failure_items: list[dict[str, object]]
+    report_source: Literal["standard", "legacy_backfill", "bootstrap"]
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+
+
+class LifecycleEventResponse(BaseModel):
+    """索引版本的一次状态转换。
+
+    ``actor_id`` 为空表示系统自动触发（worker 收口构建、首次索引引导），
+    与「不知道是谁」不同——后者在 V35 之前是常态，因为审计里 actor 恒为硬编码的 None。
+    """
+
+    event_id: str
+    index_version_id: str
+    event_type: str
+    from_status: str | None
+    to_status: str | None
+    actor_id: str | None
+    actor_role: str | None
+    reason: str | None
+    validation_report_id: str | None
+    created_at: datetime

@@ -113,9 +113,26 @@ def test_evaluate_rankings_preserves_vector_and_rerank_order() -> None:
 
     assert metrics.query_count == 2
     assert metrics.recall_at_5 == 1.0
+    assert metrics.recall_at_10 == 1.0
     assert metrics.vector_mrr == 0.75
     assert metrics.rerank_mrr == 0.75
     assert metrics.hybrid_mrr == 1.0
+    assert metrics.ndcg_at_10 > 0
+
+
+def test_evaluate_rankings_records_recall_and_ndcg_at_ten() -> None:
+    query = EvaluationQuery(
+        query_id="q001", question="第六名也应计入十条门禁", relevant_chunk_ids=["hit"]
+    )
+    ranking = ["a", "b", "c", "d", "e", "hit"]
+
+    metrics = evaluate_rankings(
+        [query], {"q001": ranking}, {"q001": ranking}
+    )
+
+    assert metrics.recall_at_5 == 0
+    assert metrics.recall_at_10 == 1
+    assert metrics.ndcg_at_10 > 0
 
 
 def test_evaluate_rankings_rejects_missing_query_results() -> None:

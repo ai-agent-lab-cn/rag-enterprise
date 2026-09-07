@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
-import type { ConversationSummary, DataSource, DocumentCategory, DocumentIndexState, DocumentInfo, DocumentVersion, EvaluationReportSummary, GovernedOperation, IndexBuild, IndexDefinition, IndexVersion, KnowledgeBase, User } from "../types";
+import type { ConversationSummary, DataSource, DocumentCategory, DocumentIndexState, DocumentInfo, DocumentVersion, EvaluationReportSummary, GovernedOperation, IndexBuild, IndexVersion, IndexVersionCandidatePreview, IndexVersionComparison, IndexVersionCreationContext, KnowledgeBase, LifecycleEvent, User, ValidationReport } from "../types";
 import { DocumentPanel } from "./DocumentPanel";
 import { Dialog, DialogActions } from "./ui/Dialog";
 import { PipelineStepper } from "./ui/PipelineStepper";
@@ -14,16 +14,31 @@ import { Select } from "./ui/Select";
 import { Tabs, type TabItem } from "./ui/Tabs";
 import { Toolbar } from "./ui/Toolbar";
 import { KnowledgeBaseDataSourcesPanel } from "./KnowledgeBaseDataSourcesPanel";
+import { IndexVersionCreationWizard } from "./IndexVersionCreationWizard";
+import { IndexVersionDetailDialog } from "./IndexVersionDetailDialog";
 
 const STATUS = { empty: "空库", processing: "处理中", ready: "可用", degraded: "部分异常", failed: "失败" } as const;
 // 与 KnowledgeBasesPage 的 STATUS_TONE 同一套约定：同一个 index_status 取值域，
 // 在两处渲染成不同颜色才是真正的不一致——见 CLAUDE.md 第二条。
 const STATUS_TONE = { empty: "neutral", processing: "brand", ready: "success", degraded: "warning", failed: "danger" } as const;
 const VERSION_STATUS = { pending: "等待索引", indexing: "索引中", ready: "可用", failed: "失败", superseded: "历史版本" } as const;
-const GOVERNANCE_STATUS: Record<string, string> = { queued: "等待处理", preparing: "准备中", running: "处理中", building: "构建中", validating: "验证中", ready: "待激活", activating: "激活中", active: "当前生效", previous: "上一版本", retired: "已退役", succeeded: "已完成", partial_failed: "部分失败", failed: "失败", cancel_requested: "正在取消", cancelled: "已取消", aborted: "已中止" };
+const GOVERNANCE_STATUS: Record<string, string> = { queued: "等待处理", preparing: "准备中", running: "处理中", building: "构建中", validating: "验证中", ready: "待激活", activating: "激活中", active: "当前生效", previous: "上一版本", retired: "已退役", cleaned: "已清理", build_failed: "构建失败", validation_failed: "验证失败", succeeded: "已完成", partial_failed: "部分失败", failed: "失败", cancel_requested: "正在取消", cancelled: "已取消", aborted: "已中止" };
+const INDEX_CREATION_REASON: Record<string, string> = {
+  legacy: "历史迁移", initial_build: "创建首个索引版本", config_changed: "配置已变更",
+  document_snapshot_changed: "文档集合已变化", component_upgraded: "索引组件已升级",
+  consistency_repair: "索引一致性修复", manual_rebuild: "主动创建回滚版本",
+};
 const OPERATION_TYPE_LABEL: Record<string, string> = { index_build: "索引构建", sync_run: "数据同步", file_upload: "文件上传", file_update: "文件更新", document_reprocess: "资料重新处理", index_validation: "索引验证", index_activation: "索引激活" };
 const OPERATION_STAGE_LABEL: Record<string, string> = { queued: "等待处理", discover: "发现资源", fetch: "获取内容", normalize: "内容规范化", parse: "解析资料", parsing: "解析资料", chunk: "资料切片", chunking: "资料切片", enrich: "补充元数据与权限", vector: "构建向量索引", keyword: "构建关键词索引", metadata: "构建元数据索引", build: "构建索引", validating: "验证索引", validate: "验证索引", activate: "激活版本", retry: "正在重试", retry_wait: "等待重试", complete: "已完成", completed: "已完成", cancelled: "已取消", failed: "失败" };
 const operationStage = (item: GovernedOperation) => item.current_stage === "failed" && item.error_message?.includes("没有可索引的文本") ? "parsing" : item.current_stage;
+const CONFIG_FIELD_LABEL: Record<string, string> = {
+  chunking_version: "切片策略", embedding_model: "向量模型",
+  embedding_dimension: "向量维度", processing_options: "切片参数",
+  parser_schema_version: "解析器版本",
+  vector_index_schema_version: "Vector 索引结构", keyword_index_schema_version: "Keyword 索引结构",
+  metadata_schema_version: "Metadata 结构", acl_schema_version: "ACL 结构",
+  citation_schema_version: "Citation 结构", reranker_model: "Reranker 模型",
+};
 const INDEX_LANE_STATUS_LABEL: Record<string, string> = { pending: "等待处理", queued: "等待处理", building: "构建中", ready: "可用", succeeded: "已完成", failed: "失败", cancelled: "已取消" };
 const CATEGORY_ORIGIN_LABEL = {
   template_copy: "默认模板复制",
@@ -48,14 +63,14 @@ const INDEX_VERSION_COLUMNS: Column<IndexVersion>[] = [
     key: "version",
     header: "版本",
     width: "24%",
-    render: (item) => <strong className="font-medium text-ink">{item.index_version_id}</strong>,
+    render: (item) => <span className="grid gap-0.5"><strong className="font-medium text-ink">{item.version_no ? `v${item.version_no}` : "Legacy"}</strong><small className="truncate text-ink-faint" title={item.index_version_id}>{item.index_version_id}</small><small className="truncate text-ink-faint">{INDEX_CREATION_REASON[item.creation_reason] || item.creation_reason}</small></span>,
   },
   {
     key: "status",
     header: "状态",
     width: "14%",
     render: (item) => (
-      <Badge shape="status" tone={item.status === "failed" ? "danger" : item.status === "building" ? "brand" : "success"}>
+      <Badge shape="status" tone={item.status === "build_failed" || item.status === "validation_failed" ? "danger" : item.status === "building" || item.status === "validating" ? "brand" : item.status === "cleaned" || item.status === "retired" ? "neutral" : "success"}>
         {GOVERNANCE_STATUS[item.status] || item.status}
       </Badge>
     ),
@@ -65,9 +80,11 @@ const INDEX_VERSION_COLUMNS: Column<IndexVersion>[] = [
     header: "索引配置",
     width: "34%",
     render: (item) => {
-      const legacy = item.parser_version === "legacy" && item.chunking_version === "legacy" && item.embedding_model === "legacy";
-      const value = legacy ? "历史索引配置" : `${item.parser_version} · ${item.chunking_version} · ${item.embedding_model} · ${item.embedding_dimension} 维`;
-      return <span className="block truncate" title={value}>{value}</span>;
+      const legacy = item.config_completeness === "unknown" || (item.parser_version === "legacy" && item.chunking_version === "legacy" && item.embedding_model === "legacy");
+      const value = legacy
+        ? "历史索引配置不完整，缺少组件版本快照，不能作为新门禁的可复现配置"
+        : `${item.parser_version} · ${item.chunking_version} · ${item.embedding_model} · ${item.embedding_dimension} 维`;
+      return <span className="grid gap-0.5" title={value}><span className="truncate">{legacy ? "历史索引配置" : value}</span>{legacy ? <small className="truncate text-warning">组件清单未知 · 仅保留历史</small> : null}</span>;
     },
   },
   {
@@ -85,15 +102,24 @@ export function KnowledgeBaseDetailPage({ id, onOpen }: { id: string; onOpen: (p
   const [versions, setVersions] = useState<DocumentVersion[]>([]); const [members, setMembers] = useState<User[]>([]);
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
   const [indexVersions, setIndexVersions] = useState<IndexVersion[]>([]);
-  const [indexDefinitions, setIndexDefinitions] = useState<IndexDefinition[]>([]);
   const [operations, setOperations] = useState<GovernedOperation[]>([]);
   const [indexBuilds, setIndexBuilds] = useState<IndexBuild[]>([]);
   const [buildDocuments, setBuildDocuments] = useState<DocumentIndexState[]>([]);
   const [selectedBuild, setSelectedBuild] = useState<IndexBuild | null>(null);
-  const [governanceConfigOpen, setGovernanceConfigOpen] = useState(false);
   const [versionDetail, setVersionDetail] = useState<IndexVersion | null>(null);
+  const [versionReports, setVersionReports] = useState<ValidationReport[]>([]);
+  const [versionEvents, setVersionEvents] = useState<LifecycleEvent[]>([]);
   const [operationDetail, setOperationDetail] = useState<GovernedOperation | null>(null);
   const [activationTarget, setActivationTarget] = useState<IndexVersion | null>(null);
+  const [validationTarget, setValidationTarget] = useState<IndexVersion | null>(null);
+  const [cleanupTarget, setCleanupTarget] = useState<IndexVersion | null>(null);
+  const [cancelBuildTarget, setCancelBuildTarget] = useState<IndexVersion | null>(null);
+  const [retireTarget, setRetireTarget] = useState<IndexVersion | null>(null);
+  const [rollbackTarget, setRollbackTarget] = useState<IndexVersion | null>(null);
+  const [versionComparison, setVersionComparison] = useState<IndexVersionComparison | null>(null);
+  const [creationContext, setCreationContext] = useState<IndexVersionCreationContext | null>(null);
+  const [creationContextLoading, setCreationContextLoading] = useState(false);
+  const [creationIdempotencyKey, setCreationIdempotencyKey] = useState("");
   const [reportId, setReportId] = useState("");
   const [evaluationReports, setEvaluationReports] = useState<EvaluationReportSummary[]>([]);
   const [buildDetailLoading, setBuildDetailLoading] = useState(false);
@@ -110,11 +136,57 @@ export function KnowledgeBaseDetailPage({ id, onOpen }: { id: string; onOpen: (p
   const [uploadProgress, setUploadProgress] = useState<{ completed: number; total: number } | null>(null);
   const [taskTypeFilter, setTaskTypeFilter] = useState("");
   const [taskStatusFilter, setTaskStatusFilter] = useState("");
-  const load = useCallback(async () => { const detail = await api.getKnowledgeBase(id); const admin = detail.current_user_permission === "admin"; const [docs, history, versionItems, indexVersionItems, definitionItems, buildItems, operationItems, memberItems, sourceItems, categoryItems, reports] = await Promise.all([api.listKnowledgeBaseDocuments(id), api.listConversations(id), api.listKnowledgeBaseDocumentVersions(id), admin ? api.listKnowledgeBaseIndexVersions(id) : Promise.resolve([]), admin ? api.listKnowledgeBaseIndexDefinitions(id) : Promise.resolve([]), admin ? api.listKnowledgeBaseIndexBuilds(id) : Promise.resolve([]), admin ? api.listKnowledgeBaseOperations(id) : Promise.resolve([]), admin ? api.listKnowledgeBaseMembers(id) : Promise.resolve([]), admin ? api.listDataSources(0, 100) : Promise.resolve([]), api.listKnowledgeBaseCategories(id), admin ? api.listEvaluations() : Promise.resolve([])]); setBase(detail); setDocuments(docs); setConversations(history); setVersions(versionItems); setIndexVersions(indexVersionItems); setIndexDefinitions(definitionItems); setIndexBuilds(buildItems); setOperations(operationItems); setMembers(memberItems); setDataSources(sourceItems.filter((item) => item.knowledge_base_id === id)); setCategories(categoryItems); setEvaluationReports(reports); }, [id]);
+  const openCreationWizard = async () => {
+    setCreationContextLoading(true); setError("");
+    try {
+      const context = await api.getIndexVersionCreationContext(id);
+      setCreationIdempotencyKey(globalThis.crypto?.randomUUID?.() || `index-version-${Date.now()}`);
+      setCreationContext(context);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法读取索引定义与文档范围。");
+    } finally { setCreationContextLoading(false); }
+  };
+  const previewIndexVersion = (payload: Parameters<typeof api.previewIndexVersion>[1]) => api.previewIndexVersion(id, payload);
+  const createIndexVersion = async (preview: IndexVersionCandidatePreview) => {
+    setBusy(true); setError("");
+    try {
+      await api.createIndexVersion(id, preview, creationIdempotencyKey);
+      setCreationContext(null);
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "索引版本创建失败。");
+      throw reason;
+    } finally { setBusy(false); }
+  };
+  const openRollback = async (item: IndexVersion) => {
+    setRollbackTarget(item); setVersionComparison(null); setError("");
+    try { setVersionComparison(await api.compareIndexVersion(id, item.index_version_id)); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "无法读取回滚差异。"); }
+  };
+  const openVersionDetail = useCallback(async (item: IndexVersion) => {
+    setVersionDetail(item);
+    // 报告拉取失败不该挡住详情本身——配置与指纹是本地已有的数据，仍然该看得到。
+    try {
+      const [reports, events] = await Promise.all([
+        api.listIndexVersionValidations(id, item.index_version_id),
+        api.listIndexVersionEvents(id, item.index_version_id),
+      ]);
+      setVersionReports(reports);
+      setVersionEvents(events);
+    } catch (reason) {
+      // 静默吞掉会让「治理数据拉取失败」看起来像「这个版本没有治理数据」——两者
+      // 在页面上长得一模一样，而含义相反。配置与指纹是本地已有的，详情本身仍要能看。
+      setVersionReports([]);
+      setVersionEvents([]);
+      console.error("索引版本治理数据拉取失败", reason);
+    }
+  }, [id]);
+
+  const load = useCallback(async () => { const detail = await api.getKnowledgeBase(id); const admin = detail.current_user_permission === "admin"; const [docs, history, versionItems, indexVersionItems, buildItems, operationItems, memberItems, sourceItems, categoryItems, reports] = await Promise.all([api.listKnowledgeBaseDocuments(id), api.listConversations(id), api.listKnowledgeBaseDocumentVersions(id), admin ? api.listKnowledgeBaseIndexVersions(id) : Promise.resolve([]), admin ? api.listKnowledgeBaseIndexBuilds(id) : Promise.resolve([]), admin ? api.listKnowledgeBaseOperations(id) : Promise.resolve([]), admin ? api.listKnowledgeBaseMembers(id) : Promise.resolve([]), admin ? api.listDataSources(0, 100) : Promise.resolve([]), api.listKnowledgeBaseCategories(id), admin ? api.listEvaluations() : Promise.resolve([])]); setBase(detail); setDocuments(docs); setConversations(history); setVersions(versionItems); setIndexVersions(indexVersionItems); setIndexBuilds(buildItems); setOperations(operationItems); setMembers(memberItems); setDataSources(sourceItems.filter((item) => item.knowledge_base_id === id)); setCategories(categoryItems); setEvaluationReports(reports); }, [id]);
   useEffect(() => { Promise.resolve().then(load).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取知识库。")); }, [load]);
   useEffect(() => {
-    const activeBuild = indexBuilds.some((item) => ["queued", "preparing", "building", "validating", "activating"].includes(item.status));
-    const activeOperation = operations.some((item) => ["queued", "preparing", "running", "validating", "activating", "cancel_requested"].includes(item.status));
+    const activeBuild = indexBuilds.some((item) => ["queued", "building"].includes(item.status));
+    const activeOperation = operations.some((item) => ["queued", "running"].includes(item.status));
     if (!activeBuild && !activeOperation) return;
     const timer = window.setInterval(() => void load(), 1500);
     return () => window.clearInterval(timer);
@@ -194,14 +266,22 @@ export function KnowledgeBaseDetailPage({ id, onOpen }: { id: string; onOpen: (p
   const governedIndexVersionColumns: Column<IndexVersion>[] = [
     ...INDEX_VERSION_COLUMNS,
     { key: "actions", header: "操作", width: "16%", align: "right", truncate: false, render: (item) => <RowActions rowLabel={item.index_version_id} actions={[
-      { label: "详情", onSelect: () => setVersionDetail(item) },
-      ...(item.status === "ready" ? [{ label: "激活", onSelect: () => { setActivationTarget(item); setReportId(item.evaluation_report_id || ""); } } as RowAction] : []),
-      ...(["retired", "failed"].includes(item.status) ? [{ label: "清理", tone: "destructive" as const, onSelect: async () => { setBusy(true); try { await api.cleanupIndexVersion(id, item.index_version_id); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "索引清理失败。"); } finally { setBusy(false); } } } as RowAction] : []),
+      { label: "详情", onSelect: () => void openVersionDetail(item) },
+      ...(item.status === "building" ? [{ label: "取消构建", tone: "destructive" as const, onSelect: () => { setCancelBuildTarget(item); setError(""); } } as RowAction] : []),
+      ...(["validating", "validation_failed"].includes(item.status) ? [{ label: item.status === "validation_failed" ? "重新验证" : "执行验证", onSelect: () => { setValidationTarget(item); setReportId(""); setError(""); } } as RowAction] : []),
+      ...(["build_failed", "validating", "validation_failed"].includes(item.status) ? [{ label: "重新构建", onSelect: async () => { setBusy(true); setError(""); try { await api.retryIndexVersionBuild(id, item.index_version_id); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "索引重新构建失败。"); } finally { setBusy(false); } } } as RowAction] : []),
+      ...(item.status === "ready" ? [{ label: "激活", onSelect: () => { setActivationTarget(item); setError(""); } } as RowAction] : []),
+      ...(item.status === "previous" ? [{ label: "回滚", onSelect: () => void openRollback(item) } as RowAction, { label: "退役", tone: "destructive" as const, onSelect: () => { setRetireTarget(item); setError(""); } } as RowAction] : []),
+      ...(["retired", "build_failed", "validation_failed"].includes(item.status) ? [{ label: "清理", tone: "destructive" as const, onSelect: () => { setCleanupTarget(item); setError(""); } } as RowAction] : []),
     ]}/> },
   ];
   // 弹层打开时错误只显示在弹层内：Radix 给背景内容加了 aria-hidden，
   // 顶部横幅在弹层背后，既看不见也不会被屏幕阅读器读到。
-  const dialogOpen = Boolean(categoryForm || deletingCategory || aclTarget || activationTarget || governanceConfigOpen || versionDetail || operationDetail);
+  const dialogOpen = Boolean(categoryForm || deletingCategory || aclTarget || activationTarget || validationTarget || cleanupTarget || cancelBuildTarget || retireTarget || rollbackTarget || creationContext || versionDetail || operationDetail);
+  const compatibleEvaluationReports = validationTarget
+    ? evaluationReports.filter((report) =>
+        report.passed && report.config_fingerprint === validationTarget.config_fingerprint)
+    : [];
 
   const fileSourceIds = new Set(dataSources.filter((item) => item.source_type === "file").map((item) => item.data_source_id));
   const uploadedDocuments = documents.filter((item) => !item.data_source_id || fileSourceIds.has(item.data_source_id) || item.source_type === "upload");
@@ -214,7 +294,7 @@ export function KnowledgeBaseDetailPage({ id, onOpen }: { id: string; onOpen: (p
     { value: "documents", label: "资料", count: uploadedDocuments.length },
     ...(base?.current_user_permission === "admin" ? [{ value: "data_sources", label: "数据源", count: externalDataSources.length }] : []),
     { value: "categories", label: "分类管理", count: categories.length },
-    { value: "versions", label: "版本治理", count: versions.length },
+    { value: "versions", label: "版本治理", count: indexVersions.length },
     { value: "members", label: "权限边界", count: members.length },
     { value: "conversations", label: "会话", count: conversations.length },
   ];
@@ -238,7 +318,11 @@ export function KnowledgeBaseDetailPage({ id, onOpen }: { id: string; onOpen: (p
       </div>
       <div className="grid min-h-16 min-w-0 content-center gap-[5px] border-r border-divider px-3 py-[9px] max-md:border-r-0 max-md:border-b">
         <span className="text-[10px] text-[#8b92a4]">索引状态</span>
-        <Badge shape="status" tone={STATUS_TONE[base.index_status]} className="w-fit">{STATUS[base.index_status]}</Badge>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge shape="status" tone={STATUS_TONE[base.index_status]} className="w-fit">{STATUS[base.index_status]}</Badge>
+          {base.index_config_drift.length ? <Badge shape="status" tone="warning" className="w-fit">配置已变更</Badge> : null}
+        </div>
+        {base.index_config_drift.length ? <small className="text-[10px] leading-[1.5] text-warning">当前索引建于旧配置：{base.index_config_drift.map((item) => CONFIG_FIELD_LABEL[item.field] || item.field).join("、")}已变更，重建后生效</small> : null}
       </div>
       <div className="grid min-h-16 min-w-0 content-center gap-[5px] px-3 py-[9px] max-md:even:border-r-0">
         <span className="text-[10px] text-[#8b92a4]">更新时间</span>
@@ -258,8 +342,14 @@ export function KnowledgeBaseDetailPage({ id, onOpen }: { id: string; onOpen: (p
         <DataTable rows={managedCategories} columns={categoryColumns} rowKey={(item) => item.category_id} label="分类管理列表" emptyState={{ kind: "empty", title: "暂无知识库独立分类", description: "新建分类后，可用于当前知识库的资料归类和问答筛选。" }}/>
       </section> : null}
       {activeTab === "versions" ? <section className="grid gap-3">
-        <div className="mt-[18px] flex flex-wrap items-center justify-between gap-3"><h3 className="m-0 text-[16px] font-bold text-ink">索引版本</h3><div className="flex flex-wrap gap-2"><Button variant="secondary" size="sm" onClick={() => setGovernanceConfigOpen(true)}>治理配置</Button>{indexVersions.some((item) => item.status === "previous") ? <Button variant="secondary" size="sm" onClick={async () => { setBusy(true); try { await api.rollbackIndexVersion(id); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "索引回滚失败。"); } finally { setBusy(false); } }}>回滚上一版本</Button> : null}{base.current_user_permission === "admin" ? <Button size="sm" loading={busy} onClick={async () => { setBusy(true); try { await api.createKnowledgeBaseIndexBuild(id, 500, 50); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "索引重建启动失败。"); } finally { setBusy(false); } }}>重建索引</Button> : null}</div></div><DataTable label="索引版本" rows={indexVersions} rowKey={(item) => item.index_version_id} columns={governedIndexVersionColumns} emptyState={{ kind: "empty", title: "还没有索引版本", description: "重建索引后这里会列出每一次的解析、切片与向量配置。" }}/>
-        {activationTarget ? <Dialog open title="激活索引版本" description={activationTarget.index_version_id} onClose={() => setActivationTarget(null)}><label className="grid gap-2 text-sm text-ink-muted">正式质量报告<Select value={reportId} onChange={(event) => setReportId(event.target.value)}><option value="">选择已通过的检索评测报告</option>{evaluationReports.filter((report) => report.passed).map((report) => <option key={report.report_id} value={report.report_id}>{report.report_id} · 已通过</option>)}</Select></label><p className="text-sm text-ink-faint">仅展示已通过报告；激活时仍会校验配置指纹，避免使用其他索引版本的报告。</p><DialogActions><Button variant="secondary" onClick={() => setActivationTarget(null)}>取消</Button><Button loading={busy} blockedReason={reportId.trim() ? undefined : "请选择质量报告"} onClick={async () => { setBusy(true); try { await api.activateIndexVersion(id, activationTarget.index_version_id, reportId.trim()); setActivationTarget(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "索引激活失败。"); } finally { setBusy(false); } }}>验证并激活</Button></DialogActions></Dialog> : null}
+        <div className="mt-[18px] flex flex-wrap items-center justify-between gap-3"><div><h3 className="m-0 text-[16px] font-bold text-ink">索引版本</h3><p className="m-0 mt-1 text-sm text-ink-faint">Definition → Version → Build → Validate → Activate；数据同步任务在下方独立展示。</p></div>{base.current_user_permission === "admin" ? <Button size="sm" loading={busy || creationContextLoading} onClick={() => void openCreationWizard()}>创建索引版本</Button> : null}</div><DataTable label="索引版本" rows={indexVersions} rowKey={(item) => item.index_version_id} columns={governedIndexVersionColumns} emptyState={{ kind: "empty", title: "还没有索引版本", description: "创建首个索引版本后，将按快照构建、验证并等待激活。" }}/>
+        {creationContext ? <IndexVersionCreationWizard open context={creationContext} busy={busy} onClose={() => { if (!busy) setCreationContext(null); }} onPreview={previewIndexVersion} onCreate={createIndexVersion}/> : null}
+        {cancelBuildTarget ? <Dialog open title="取消索引构建" description={cancelBuildTarget.index_version_id} onClose={() => { setCancelBuildTarget(null); setError(""); }}>{error ? <ErrorBanner>{error}</ErrorBanner> : null}<p className="text-sm text-ink-muted">将停止尚未完成的文档任务，并把 Version 标记为 build_failed。已完成的候选分块不会上线，之后可选择重新构建或清理。</p><DialogActions><Button variant="secondary" loading={busy} onClick={() => setCancelBuildTarget(null)}>继续构建</Button><Button variant="destructive" loading={busy} onClick={async () => { setBusy(true); setError(""); try { await api.cancelIndexVersionBuild(id, cancelBuildTarget.index_version_id); setCancelBuildTarget(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "取消索引构建失败。"); } finally { setBusy(false); } }}>确认取消</Button></DialogActions></Dialog> : null}
+        {validationTarget ? <Dialog open title={validationTarget.status === "validation_failed" ? "重新验证索引版本" : "验证索引版本"} description={validationTarget.index_version_id} onClose={() => { setValidationTarget(null); setError(""); }}>{error ? <ErrorBanner>{error}</ErrorBanner> : null}<label className="grid gap-2 text-sm text-ink-muted">正式质量报告<Select value={reportId} onChange={(event) => setReportId(event.target.value)}><option value="">{compatibleEvaluationReports.length ? "选择配置指纹匹配的已通过报告" : "暂无配置指纹匹配的已通过报告"}</option>{compatibleEvaluationReports.map((report) => <option key={report.report_id} value={report.report_id}>{report.report_id} · 已通过 · 指纹匹配</option>)}</Select></label>{compatibleEvaluationReports.length ? null : <p className="rounded-md border border-warning/30 bg-warning/10 p-3 text-sm text-warning">请先使用本版本配置运行正式检索评测。其他版本或旧版无配置指纹的报告不能用于放行。</p>}<p className="text-sm text-ink-faint">本次只执行完整性、技术与检索质量三层门禁；通过后状态变为 ready（待激活），不会自动切换线上版本。</p><DialogActions><Button variant="secondary" loading={busy} onClick={() => setValidationTarget(null)}>取消</Button><Button loading={busy} blockedReason={reportId.trim() ? undefined : "请选择与本版本配置匹配的质量报告"} onClick={async () => { setBusy(true); setError(""); try { await api.createIndexVersionValidation(id, validationTarget.index_version_id, reportId.trim()); setValidationTarget(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "索引验证失败。"); } finally { setBusy(false); } }}>执行三层验证</Button></DialogActions></Dialog> : null}
+        {activationTarget ? <Dialog open title="激活索引版本" description={activationTarget.index_version_id} onClose={() => { setActivationTarget(null); setError(""); }}>{error ? <ErrorBanner>{error}</ErrorBanner> : null}<p className="text-sm text-ink-muted">该版本已通过三层门禁，激活只执行原子指针切换。当前 active 将变为 previous，不会重新运行验证。</p><p className="break-all text-sm text-ink-faint">绑定验证报告：{activationTarget.validation_report_id || "缺失"}</p><DialogActions><Button variant="secondary" loading={busy} onClick={() => setActivationTarget(null)}>取消</Button><Button loading={busy} onClick={async () => { setBusy(true); setError(""); try { await api.activateIndexVersion(id, activationTarget.index_version_id); setActivationTarget(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "索引激活失败。"); } finally { setBusy(false); } }}>确认激活</Button></DialogActions></Dialog> : null}
+        {rollbackTarget ? <Dialog open size="md" title="回滚上一索引版本" description={rollbackTarget.index_version_id} onClose={() => { setRollbackTarget(null); setVersionComparison(null); setError(""); }}>{error ? <ErrorBanner>{error}</ErrorBanner> : null}{versionComparison ? <><dl className="grid grid-cols-3 gap-3 text-sm max-sm:grid-cols-1"><div><dt className="text-ink-faint">目标物理范围</dt><dd className="m-0 mt-1">{versionComparison.actual_scope.documents} 份 / {versionComparison.actual_scope.chunks} Chunks</dd></div><div><dt className="text-ink-faint">配置差异</dt><dd className="m-0 mt-1">{versionComparison.config_diff.length} 项</dd></div><div><dt className="text-ink-faint">文档快照差异</dt><dd className="m-0 mt-1">+{versionComparison.document_diff.added} / -{versionComparison.document_diff.removed} / 更新 {versionComparison.document_diff.updated}</dd></div></dl><p className="rounded-md border border-warning/30 bg-warning/10 p-3 text-sm text-warning">{versionComparison.content_snapshot_note}</p>{versionComparison.config_diff.length ? <ul className="m-0 grid max-h-36 gap-1 overflow-y-auto p-0 text-sm">{versionComparison.config_diff.map((item) => <li key={item.field} className="list-none rounded border border-divider p-2"><strong>{CONFIG_FIELD_LABEL[item.field] || item.field}</strong><span className="ml-2 break-all text-ink-faint">{JSON.stringify(item.baseline) || "—"} → {JSON.stringify(item.target) || "—"}</span></li>)}</ul> : <p className="text-sm text-ink-faint">与当前 active 配置一致。</p>}<dl className="grid grid-cols-2 gap-3 text-sm max-sm:grid-cols-1"><div><dt className="text-ink-faint">目标验证报告</dt><dd className="m-0 mt-1">{String(versionComparison.validation_comparison.target?.status || "无正式报告")}</dd></div><div><dt className="text-ink-faint">当前 active 验证报告</dt><dd className="m-0 mt-1">{String(versionComparison.validation_comparison.baseline?.status || "无正式报告")}</dd></div><div><dt className="text-ink-faint">回滚后可检索资料</dt><dd className="m-0 mt-1">{versionComparison.current_content.retrievable_documents} 份 / {versionComparison.current_content.retrievable_chunks} Chunks</dd></div><div><dt className="text-ink-faint">当前内容差异</dt><dd className="m-0 mt-1">+{versionComparison.current_content.diff.added} / -{versionComparison.current_content.diff.removed} / 更新 {versionComparison.current_content.diff.updated}</dd></div></dl></> : <p className="text-sm text-ink-faint">正在读取版本差异…</p>}<DialogActions><Button variant="secondary" loading={busy} onClick={() => setRollbackTarget(null)}>取消</Button><Button loading={busy} blockedReason={versionComparison ? undefined : "版本差异尚未读取完成"} onClick={async () => { setBusy(true); setError(""); try { await api.rollbackIndexVersion(id, Boolean(versionComparison?.current_content.requires_confirmation)); setRollbackTarget(null); setVersionComparison(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "索引回滚失败。"); } finally { setBusy(false); } }}>确认回滚</Button></DialogActions></Dialog> : null}
+        {retireTarget ? <Dialog open title="退役上一索引版本" description={retireTarget.index_version_id} onClose={() => { setRetireTarget(null); setError(""); }}>{error ? <ErrorBanner>{error}</ErrorBanner> : null}<p className="text-sm text-ink-muted">退役后将失去一键回滚到该版本的能力，但物理索引仍保留；需要另行执行 Cleanup 才会删除。</p><DialogActions><Button variant="secondary" loading={busy} onClick={() => setRetireTarget(null)}>取消</Button><Button variant="destructive" loading={busy} onClick={async () => { setBusy(true); setError(""); try { await api.retireIndexVersion(id, retireTarget.index_version_id); setRetireTarget(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "索引退役失败。"); } finally { setBusy(false); } }}>确认退役</Button></DialogActions></Dialog> : null}
+        {cleanupTarget ? <Dialog open title="清理索引物理内容" description={cleanupTarget.index_version_id} onClose={() => { setCleanupTarget(null); setError(""); }}>{error ? <ErrorBanner>{error}</ErrorBanner> : null}<p className="text-sm text-ink-muted">将删除该版本全部 Chunks 与专属 HNSW 索引。版本记录和生命周期事件会保留，状态变为 cleaned，且不能再激活或回滚。</p><DialogActions><Button variant="secondary" loading={busy} onClick={() => setCleanupTarget(null)}>取消</Button><Button variant="destructive" loading={busy} onClick={async () => { setBusy(true); setError(""); try { await api.cleanupIndexVersion(id, cleanupTarget.index_version_id); setCleanupTarget(null); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "索引清理失败。"); } finally { setBusy(false); } }}>确认清理</Button></DialogActions></Dialog> : null}
         <h3 className="mt-[18px] mb-0 text-[16px] font-bold text-ink">资料版本</h3><DataTable label="资料版本" rows={versions} rowKey={(item) => item.document_version_id} columns={documentVersionColumns} emptyState={{ kind: "empty", title: "还没有资料版本", description: "上传并解析资料后，这里会显示资料版本。" }}/>
         <h3 className="mt-[18px] mb-0 text-[16px] font-bold text-ink">任务记录</h3>
         <Toolbar filters={<><label className="flex items-center gap-2 text-md">任务类型<Select size="sm" className="w-36" aria-label="任务类型筛选" value={taskTypeFilter} onChange={(event) => setTaskTypeFilter(event.target.value)}><option value="">全部类型</option>{[...new Set(operations.map((item) => item.operation_type))].map((value) => <option key={value} value={value}>{OPERATION_TYPE_LABEL[value] || value}</option>)}</Select></label><label className="flex items-center gap-2 text-md">状态<Select size="sm" className="w-32" aria-label="任务状态筛选" value={taskStatusFilter} onChange={(event) => setTaskStatusFilter(event.target.value)}><option value="">全部状态</option>{[...new Set(operations.map((item) => item.status))].map((value) => <option key={value} value={value}>{GOVERNANCE_STATUS[value] || value}</option>)}</Select></label></>}/>
@@ -272,23 +362,12 @@ export function KnowledgeBaseDetailPage({ id, onOpen }: { id: string; onOpen: (p
           { key: "updated", header: "更新时间", width: "150px", render: (item) => new Date(item.updated_at).toLocaleString("zh-CN") },
           { key: "actions", header: "操作", width: "72px", align: "right", truncate: false, render: (item) => { const build = indexBuilds.find((candidate) => candidate.operation_id === item.operation_id); return <Button variant="ghost" size="sm" onClick={() => { if (build) void openIndexBuild(build); else setOperationDetail(item); }}>详情</Button>; } },
         ]} emptyState={taskTypeFilter || taskStatusFilter ? { kind: "filtered", title: "没有符合条件的任务", description: "调整任务类型或状态筛选后重试。" } : { kind: "empty", title: "暂无任务记录", description: "索引构建、同步或资料更新后保留任务记录。" }}/>
-        {selectedBuild ? <section className="grid gap-2 border-t border-divider pt-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><h4 className="m-0 text-sm">索引构建详情 · {selectedBuild.index_build_id}</h4><small className="text-sm text-ink-faint">目标版本 {selectedBuild.index_version_id} · {selectedBuild.succeeded_documents}/{selectedBuild.total_documents} 份完成 · {selectedBuild.failed_documents} 份失败{buildDetailLoading ? " · 读取中" : ""}</small></div><Button variant="ghost" size="sm" onClick={() => setSelectedBuild(null)}>收起</Button></div><DataTable label="资料索引状态" rows={buildDocuments} rowKey={(item) => item.document_id} columns={[
-          { key: "document", header: "资料", width: "28%", render: (item) => <strong>{item.filename}</strong> },
-          { key: "vector", header: "向量索引", width: "14%", render: (item) => INDEX_LANE_STATUS_LABEL[item.vector_status] || item.vector_status },
-          { key: "keyword", header: "关键词索引", width: "14%", render: (item) => INDEX_LANE_STATUS_LABEL[item.keyword_status] || item.keyword_status },
-          { key: "metadata", header: "元数据索引", width: "14%", render: (item) => INDEX_LANE_STATUS_LABEL[item.metadata_status] || item.metadata_status },
+        {selectedBuild ? <section className="grid gap-2 border-t border-divider pt-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><h4 className="m-0 text-sm">索引构建详情 · {selectedBuild.index_build_id}</h4><small className="text-sm text-ink-faint">目标版本 {selectedBuild.index_version_id} · 第 {selectedBuild.attempt_no} 次构建 · {selectedBuild.succeeded_documents}/{selectedBuild.total_documents} 份完成 · {selectedBuild.failed_documents} 份失败{buildDetailLoading ? " · 读取中" : ""}</small></div><Button variant="ghost" size="sm" onClick={() => setSelectedBuild(null)}>收起</Button></div><DataTable label="资料索引状态" rows={buildDocuments} rowKey={(item) => item.document_id} columns={[
+          { key: "document", header: "资料", width: "50%", render: (item) => <strong>{item.filename}</strong> },
           { key: "chunks", header: "切片数", width: "10%", numeric: true, render: (item) => item.chunk_count },
-          { key: "status", header: "状态", width: "20%", render: (item) => <Badge shape="status" tone={item.overall_status === "failed" ? "danger" : item.overall_status === "ready" ? "success" : "brand"}>{INDEX_LANE_STATUS_LABEL[item.overall_status] || item.overall_status}</Badge> },
+          { key: "status", header: "索引状态", width: "40%", render: (item) => <Badge shape="status" tone={item.overall_status === "failed" ? "danger" : item.overall_status === "ready" ? "success" : "brand"}>{INDEX_LANE_STATUS_LABEL[item.overall_status] || item.overall_status}</Badge> },
         ]} emptyState={{ kind: "empty", title: "暂无资料状态", description: "旧构建批次未记录单资料状态。" }}/></section> : null}
-        {governanceConfigOpen ? <Dialog open size="lg" title="索引治理配置" description="当前知识库的索引定义，只读展示" onClose={() => setGovernanceConfigOpen(false)}><DataTable label="索引治理配置" rows={indexDefinitions} rowKey={(item) => item.index_definition_id} columns={[
-          { key: "name", header: "定义", width: "22%", render: (item) => <strong>{item.name}</strong> },
-          { key: "vector", header: "向量索引", width: "14%", render: (item) => String(item.vector_config.engine || "—") },
-          { key: "keyword", header: "关键词索引", width: "14%", render: (item) => String(item.keyword_config.engine || "—") },
-          { key: "metadata", header: "元数据索引", width: "18%", render: (item) => Object.keys(item.metadata_schema).join(" / ") || "—" },
-          { key: "embedding", header: "向量模型", width: "22%", render: (item) => `${item.embedding_model} · ${item.embedding_dimension} 维` },
-          { key: "status", header: "状态", width: "10%", render: (item) => <Badge shape="status" tone={item.active ? "success" : "neutral"}>{item.active ? "可用" : "停用"}</Badge> },
-        ]} emptyState={{ kind: "empty", title: "还没有治理配置", description: "首次重建索引时将生成索引定义。" }}/><DialogActions><Button variant="secondary" onClick={() => setGovernanceConfigOpen(false)}>关闭</Button></DialogActions></Dialog> : null}
-        {versionDetail ? <Dialog open size="md" title="索引版本详情" description={versionDetail.index_version_id} onClose={() => setVersionDetail(null)}><dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm max-sm:grid-cols-1"><div><dt className="text-ink-faint">状态</dt><dd className="m-0 mt-1">{GOVERNANCE_STATUS[versionDetail.status] || versionDetail.status}</dd></div><div><dt className="text-ink-faint">配置指纹</dt><dd className="m-0 mt-1 break-all">{versionDetail.config_fingerprint}</dd></div><div><dt className="text-ink-faint">解析器版本</dt><dd className="m-0 mt-1">{versionDetail.parser_version}</dd></div><div><dt className="text-ink-faint">切片策略版本</dt><dd className="m-0 mt-1">{versionDetail.chunking_version}</dd></div><div><dt className="text-ink-faint">向量模型</dt><dd className="m-0 mt-1">{versionDetail.embedding_model}</dd></div><div><dt className="text-ink-faint">向量维度</dt><dd className="m-0 mt-1">{versionDetail.embedding_dimension} 维</dd></div><div><dt className="text-ink-faint">质量报告</dt><dd className="m-0 mt-1">{versionDetail.evaluation_report_id || "待验证"}</dd></div><div><dt className="text-ink-faint">创建时间</dt><dd className="m-0 mt-1">{new Date(versionDetail.created_at).toLocaleString("zh-CN")}</dd></div></dl><DialogActions><Button variant="secondary" onClick={() => setVersionDetail(null)}>关闭</Button></DialogActions></Dialog> : null}
+        {versionDetail ? <IndexVersionDetailDialog version={versionDetail} reports={versionReports} events={versionEvents} onClose={() => { setVersionDetail(null); setVersionReports([]); setVersionEvents([]); }} /> : null}
         {operationDetail ? <Dialog open size="md" title="运行任务详情" description={OPERATION_TYPE_LABEL[operationDetail.operation_type] || operationDetail.operation_type} onClose={() => setOperationDetail(null)}><dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm max-sm:grid-cols-1"><div><dt className="text-ink-faint">当前阶段</dt><dd className="m-0 mt-1">{OPERATION_STAGE_LABEL[operationDetail.current_stage] || operationDetail.current_stage}</dd></div><div><dt className="text-ink-faint">状态</dt><dd className="m-0 mt-1">{GOVERNANCE_STATUS[operationDetail.status] || operationDetail.status}</dd></div><div><dt className="text-ink-faint">处理数量</dt><dd className="m-0 mt-1">{operationDetail.completed_count}/{operationDetail.total_count}</dd></div><div><dt className="text-ink-faint">失败数量</dt><dd className="m-0 mt-1">{operationDetail.failed_count}</dd></div><div><dt className="text-ink-faint">资料</dt><dd className="m-0 mt-1 break-all">{operationDetail.document_id || "—"}</dd></div><div><dt className="text-ink-faint">数据源</dt><dd className="m-0 mt-1 break-all">{operationDetail.data_source_id || "—"}</dd></div>{operationDetail.error_message ? <div className="col-span-2 max-sm:col-span-1"><dt className="text-ink-faint">失败原因</dt><dd className="m-0 mt-1 text-danger-text">{operationDetail.error_message}</dd></div> : null}</dl><DialogActions><Button variant="secondary" onClick={() => setOperationDetail(null)}>关闭</Button></DialogActions></Dialog> : null}
       </section> : null}
       {activeTab === "members" ? <section className="grid gap-3">{base.current_user_permission === "admin" ? <><p className="m-0 text-[12px] text-ink-faint">Deny 优先；未配置时继承知识库成员权限。ACL 更新后立即影响下一次检索。</p><h3 className="mt-2 mb-0 text-[13px] text-[#151a31]">数据源 ACL</h3><DataTable label="数据源 ACL" rows={dataSources} rowKey={(item) => item.data_source_id} columns={dataSourceAclColumns} emptyState={{ kind: "empty", title: "暂无数据源 ACL", description: "当前知识库没有独立数据源。" }}/><h3 className="mt-2 mb-0 text-[13px] text-[#151a31]">文档 ACL</h3><DataTable label="文档 ACL" rows={documents} rowKey={(item) => item.document_id} columns={documentAclColumns} emptyState={{ kind: "empty", title: "暂无文档 ACL", description: "当前知识库没有资料。" }}/></> : <p className="text-md text-[#737c90] leading-[1.6]">你拥有该知识库的使用权限；ACL 策略仅管理员可见。</p>}</section> : null}

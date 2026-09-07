@@ -21,7 +21,6 @@ from .data_source_sync import build_connector, enqueue_sync, retry_sync_resource
 from .pipeline_governance import (
     cancel_sync_run,
     list_document_index_states,
-    list_index_definitions,
     list_index_builds,
     list_operations,
     list_sync_resources,
@@ -31,7 +30,23 @@ from .demo import seed_demo_document
 from .errors import AppError, install_error_handlers
 from .evaluation_governance import BadCaseUpdate
 from .evaluation_reports import EvaluationReportRepository
-from .index_versions import retire_version, rollback_to_previous, switch_to_version
+from .index_validation import (
+    get_validation_policy,
+    list_reports as list_validation_reports,
+    validate_index_version,
+)
+from .index_versions import (
+    Actor,
+    active_config_drift,
+    cleanup_version,
+    compare_index_version,
+    get_index_version_creation_context,
+    list_lifecycle_events,
+    preview_index_version_candidate,
+    retire_version,
+    rollback_to_previous,
+    switch_to_version,
+)
 from .history import ConversationRepository
 from .generation_models import GenerationProviderState
 from .knowledge_bases import (
@@ -44,8 +59,10 @@ from .models import SwitchableGenerator, get_embedding_model, get_generator, get
 from .observability import MetricsRegistry, ObservabilityMiddleware, bind_actor, hash_identifier
 from .postgres_documents import (
     PostgresAsyncRAGService,
+    cancel_index_version_build,
     check_embedding_model,
-    enqueue_rebuild,
+    create_index_version_candidate,
+    retry_index_version_build,
 )
 from .postgres_evaluation import PostgresEvaluationGovernanceRepository
 from .postgres_repositories import (
@@ -101,11 +118,18 @@ from .schemas import (
     GenerationModelsResponse,
     HealthResponse,
     IndexVersionResponse,
-    IndexDefinitionResponse,
-    IndexBuildCreate,
     IndexBuildResponse,
     DocumentIndexStateResponse,
-    IndexVersionActivateRequest,
+    IndexVersionCandidatePreviewResponse,
+    IndexVersionComparisonResponse,
+    IndexDefinitionResponse,
+    IndexVersionCreateRequest,
+    IndexVersionCreateResponse,
+    IndexVersionCreationContextResponse,
+    IndexVersionPreviewRequest,
+    IndexVersionValidationRequest,
+    LifecycleEventResponse,
+    ValidationReportResponse,
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
     KnowledgeBaseUpdate,
@@ -1516,34 +1540,217 @@ def create_app() -> FastAPI:
         return _page([IndexVersionResponse(**item) for item in versions], offset, limit)
 
     @app.get(
-        "/api/knowledge-bases/{knowledge_base_id}/index-definitions",
-        response_model=list[IndexDefinitionResponse],
+        "/api/knowledge-bases/{knowledge_base_id}/index-version-creation-context",
+        response_model=IndexVersionCreationContextResponse,
     )
-    async def list_scoped_index_definitions(
+    async def get_scoped_index_version_creation_context(
         knowledge_base_id: str,
         knowledge_bases: KnowledgeBasesDependency,
         sources: DataSourcesDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
-    ) -> list[IndexDefinitionResponse]:
+    ) -> IndexVersionCreationContextResponse:
+        """读取创建向导的真实配置、文档范围与阻塞原因。"""
+
         _require_admin(current.user)
-        await _require_accessible_knowledge_base(
-            knowledge_bases, auth, current.user, knowledge_base_id
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引版本创建需要 PostgreSQL。", 503)
+        context = await run_in_threadpool(
+            get_index_version_creation_context,
+            sources.database_url,
+            knowledge_base_id,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+            reranker_model=settings.reranker_model,
+            max_concurrent_builds=settings.max_concurrent_index_builds,
+            max_documents=settings.max_index_build_documents,
         )
+        return IndexVersionCreationContextResponse(**context)
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/index-definition",
+        response_model=IndexDefinitionResponse,
+    )
+    async def get_scoped_index_definition(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> IndexDefinitionResponse:
+        """聚合当前真实配置来源；P0 阶段保持只读，不重建装饰性 Definition 表。"""
+
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         if sources is None:
             raise AppError("POSTGRES_REQUIRED", "索引定义需要 PostgreSQL。", 503)
-        rows = await run_in_threadpool(
-            list_index_definitions, sources.database_url, knowledge_base_id
+        context = await run_in_threadpool(
+            get_index_version_creation_context,
+            sources.database_url,
+            knowledge_base_id,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+            reranker_model=settings.reranker_model,
+            max_concurrent_builds=settings.max_concurrent_index_builds,
+            max_documents=settings.max_index_build_documents,
         )
-        return [IndexDefinitionResponse(**row) for row in rows]
+        return IndexDefinitionResponse(
+            effective_config=context["definition"],
+            active_version=context["active_version"],
+            config_changed=context["config_changed"],
+            document_changed=context["document_changed"],
+            document_scope=context["document_scope"],
+        )
+
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions/preview",
+        response_model=IndexVersionCandidatePreviewResponse,
+    )
+    async def preview_scoped_index_version(
+        knowledge_base_id: str,
+        payload: IndexVersionPreviewRequest,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> IndexVersionCandidatePreviewResponse:
+        """预览候选版本，不产生 Snapshot 或 Version 记录。"""
+
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引版本预览需要 PostgreSQL。", 503)
+        preview = await run_in_threadpool(
+            preview_index_version_candidate,
+            sources.database_url,
+            knowledge_base_id,
+            reason=payload.reason,
+            chunk_size=payload.chunk_size,
+            chunk_overlap=payload.chunk_overlap,
+            force=payload.force,
+            force_reason=payload.force_reason,
+            reranker_model=settings.reranker_model,
+            max_concurrent_builds=settings.max_concurrent_index_builds,
+            max_documents=settings.max_index_build_documents,
+        )
+        return IndexVersionCandidatePreviewResponse(**preview)
+
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions",
+        response_model=IndexVersionCreateResponse,
+        status_code=202,
+    )
+    async def create_scoped_index_version(
+        knowledge_base_id: str,
+        payload: IndexVersionCreateRequest,
+        request: Request,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> IndexVersionCreateResponse:
+        """按 Preview 证据创建不可变候选 Version 并排队首个 Build。"""
+
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引版本创建需要 PostgreSQL。", 503)
+        idempotency_key = (request.headers.get("Idempotency-Key") or "").strip()
+        if not idempotency_key or len(idempotency_key) > 160:
+            raise AppError(
+                "IDEMPOTENCY_KEY_REQUIRED",
+                "创建索引版本必须提供有效的 Idempotency-Key。",
+                400,
+            )
+        result = await run_in_threadpool(
+            create_index_version_candidate,
+            sources.database_url,
+            knowledge_base_id,
+            reason=payload.reason,
+            chunk_size=payload.chunk_size,
+            chunk_overlap=payload.chunk_overlap,
+            force=payload.force,
+            force_reason=payload.force_reason,
+            expected_config_fingerprint=payload.expected_config_fingerprint,
+            expected_document_set_fingerprint=payload.expected_document_set_fingerprint,
+            expected_release_fingerprint=payload.expected_release_fingerprint,
+            requested_by=current.user.user_id,
+            idempotency_key=idempotency_key,
+            reranker_model=settings.reranker_model,
+            max_concurrent_builds=settings.max_concurrent_index_builds,
+            max_documents=settings.max_index_build_documents,
+        )
+        await _record_audit(
+            audit,
+            "index_version.create",
+            current.user,
+            "index_version",
+            str(result["index_version_id"]),
+        )
+        metrics.record_index_governance("version.create")
+        return IndexVersionCreateResponse(**result)
 
     @app.post(
         "/api/knowledge-bases/{knowledge_base_id}/index-builds",
         status_code=202,
+        deprecated=True,
     )
     async def create_scoped_index_build(
         knowledge_base_id: str,
-        payload: IndexBuildCreate,
+        knowledge_bases: KnowledgeBasesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> dict[str, object]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        raise AppError(
+            "INDEX_VERSION_PREVIEW_REQUIRED",
+            "旧的直接重建入口已停用；请先预览，再通过 /index-versions 创建候选版本。",
+            410,
+        )
+
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/builds",
+        response_model=IndexVersionCreateResponse,
+        status_code=202,
+    )
+    async def retry_scoped_index_version_build(
+        knowledge_base_id: str,
+        index_version_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> IndexVersionCreateResponse:
+        """按既有配置与文档快照，为同一 Version 新建 Build attempt。"""
+
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引重建需要 PostgreSQL。", 503)
+        result = await run_in_threadpool(
+            retry_index_version_build,
+            sources.database_url,
+            knowledge_base_id,
+            index_version_id,
+            requested_by=current.user.user_id,
+            max_concurrent_builds=settings.max_concurrent_index_builds,
+        )
+        await _record_audit(
+            audit, "index_build.retry", current.user, "index_version", index_version_id
+        )
+        metrics.record_index_governance("build.retry")
+        return IndexVersionCreateResponse(**result)
+
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/builds/cancel"
+    )
+    async def cancel_scoped_index_version_build(
+        knowledge_base_id: str,
+        index_version_id: str,
         knowledge_bases: KnowledgeBasesDependency,
         sources: DataSourcesDependency,
         current: CurrentSessionDependency,
@@ -1553,20 +1760,18 @@ def create_app() -> FastAPI:
         _require_admin(current.user)
         await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         if sources is None:
-            raise AppError("POSTGRES_REQUIRED", "索引构建需要 PostgreSQL。", 503)
-        if payload.chunk_overlap >= payload.chunk_size:
-            raise AppError("CHUNKING_POLICY_INVALID", "切片重叠必须小于切片大小。", 400)
-        if not await run_in_threadpool(service.list_documents, knowledge_base_id):
-            raise AppError(
-                "INDEX_BUILD_EMPTY_KNOWLEDGE_BASE",
-                "知识库暂无可构建资料，请先添加资料。",
-                409,
-            )
-        target = chunking_version(payload.chunk_size, payload.chunk_overlap)
+            raise AppError("POSTGRES_REQUIRED", "取消索引构建需要 PostgreSQL。", 503)
         result = await run_in_threadpool(
-            enqueue_rebuild, sources.database_url, knowledge_base_id, target,
+            cancel_index_version_build,
+            sources.database_url,
+            knowledge_base_id,
+            index_version_id,
+            requested_by=current.user.user_id,
         )
-        await _record_audit(audit, "index_build.create", current.user, "knowledge_base", knowledge_base_id)
+        await _record_audit(
+            audit, "index_build.cancel", current.user, "index_version", index_version_id
+        )
+        metrics.record_index_governance("build.cancel")
         return result
 
     @app.get(
@@ -1608,14 +1813,148 @@ def create_app() -> FastAPI:
         )
         return [DocumentIndexStateResponse(**row) for row in rows]
 
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/validations",
+        status_code=201,
+    )
+    async def create_scoped_index_validation(
+        knowledge_base_id: str,
+        index_version_id: str,
+        payload: IndexVersionValidationRequest,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> dict[str, object]:
+        """只验证，不激活。
+
+        验证与激活分开，是因为它们回答不同的问题：验证问「这个版本能不能上线」，
+        激活问「现在要不要换过去」。构建失败后重新验证、或者先验证再挑时间切换，
+        此前都只能走 CLI。
+
+        门禁未通过不是 4xx——验证本身成功执行了，结论是「没通过」。这一点与激活不同：
+        激活会因为门禁未过而拒绝，那时报 409 才对。
+        """
+
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引验证需要 PostgreSQL。", 503)
+        if not any(
+            item["index_version_id"] == index_version_id
+            for item in await run_in_threadpool(service.list_index_versions, knowledge_base_id)
+        ):
+            raise AppError("INDEX_VERSION_NOT_FOUND", "未找到该知识库的索引版本。", 404)
+        report = await run_in_threadpool(
+            EvaluationReportRepository(settings.evaluation_reports_path).load_official_model,
+            payload.evaluation_report_id,
+        )
+        result = await run_in_threadpool(
+            validate_index_version, sources.database_url, index_version_id, report,
+            Actor(current.user.user_id, current.user.role),
+        )
+        await _record_audit(
+            audit, "index_version.validate", current.user, "index_version", index_version_id
+        )
+        metrics.record_index_governance("validation", str(result["status"]))
+        return result
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/index-validation-policy"
+    )
+    async def get_scoped_index_validation_policy(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> dict[str, object]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(
+            knowledge_bases, auth, current.user, knowledge_base_id
+        )
+        return get_validation_policy()
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/validations",
+        response_model=list[ValidationReportResponse],
+    )
+    async def list_scoped_index_validations(
+        knowledge_base_id: str,
+        index_version_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> list[ValidationReportResponse]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引验证需要 PostgreSQL。", 503)
+        rows = await run_in_threadpool(
+            list_validation_reports,
+            sources.database_url,
+            index_version_id,
+            knowledge_base_id,
+        )
+        return [ValidationReportResponse(**row) for row in rows]
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/events",
+        response_model=list[LifecycleEventResponse],
+    )
+    async def list_scoped_lifecycle_events(
+        knowledge_base_id: str,
+        index_version_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> list[LifecycleEventResponse]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "生命周期记录需要 PostgreSQL。", 503)
+        rows = await run_in_threadpool(
+            list_lifecycle_events,
+            sources.database_url,
+            index_version_id,
+            knowledge_base_id,
+        )
+        return [LifecycleEventResponse(**row) for row in rows]
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/diff",
+        response_model=IndexVersionComparisonResponse,
+    )
+    async def compare_scoped_index_version(
+        knowledge_base_id: str,
+        index_version_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> IndexVersionComparisonResponse:
+        """返回激活、回滚和退役确认需要的真实差异。"""
+
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引版本对比需要 PostgreSQL。", 503)
+        result = await run_in_threadpool(
+            compare_index_version, sources.database_url, knowledge_base_id, index_version_id
+        )
+        return IndexVersionComparisonResponse(**result)
+
     @app.put(
         "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/active"
     )
     async def activate_scoped_index_version(
         knowledge_base_id: str,
         index_version_id: str,
-        payload: IndexVersionActivateRequest,
         knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
         sources: DataSourcesDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
@@ -1630,13 +1969,11 @@ def create_app() -> FastAPI:
             for item in await run_in_threadpool(service.list_index_versions, knowledge_base_id)
         ):
             raise AppError("INDEX_VERSION_NOT_FOUND", "未找到该知识库的索引版本。", 404)
-        report = await run_in_threadpool(
-            EvaluationReportRepository(settings.evaluation_reports_path).load_official_model,
-            payload.evaluation_report_id,
-        )
         result = await run_in_threadpool(
-            switch_to_version, sources.database_url, index_version_id, report, audit,
+            switch_to_version, sources.database_url, index_version_id, audit,
+            Actor(current.user.user_id, current.user.role),
         )
+        metrics.record_index_governance("activate")
         return result
 
     @app.post("/api/knowledge-bases/{knowledge_base_id}/index-versions/rollback")
@@ -1647,14 +1984,48 @@ def create_app() -> FastAPI:
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
         audit: AuditRepositoryDependency,
+        confirm_content_lag: bool = False,
     ) -> dict[str, str]:
         _require_admin(current.user)
         await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         if sources is None:
             raise AppError("POSTGRES_REQUIRED", "索引回滚需要 PostgreSQL。", 503)
-        return await run_in_threadpool(
+        result = await run_in_threadpool(
             rollback_to_previous, sources.database_url, knowledge_base_id, audit,
+            Actor(current.user.user_id, current.user.role),
+            confirm_content_lag=confirm_content_lag,
         )
+        metrics.record_index_governance("rollback")
+        return result
+
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/retire"
+    )
+    async def retire_scoped_index_version(
+        knowledge_base_id: str,
+        index_version_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> dict[str, str]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "索引退役需要 PostgreSQL。", 503)
+        result = await run_in_threadpool(
+            retire_version,
+            sources.database_url,
+            index_version_id,
+            Actor(current.user.user_id, current.user.role),
+            knowledge_base_id=knowledge_base_id,
+        )
+        await _record_audit(
+            audit, "index_version.retire", current.user, "index_version", index_version_id
+        )
+        metrics.record_index_governance("retire")
+        return result
 
     @app.delete(
         "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/content"
@@ -1663,9 +2034,11 @@ def create_app() -> FastAPI:
         knowledge_base_id: str,
         index_version_id: str,
         knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
         sources: DataSourcesDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
     ) -> dict[str, int]:
         _require_admin(current.user)
         await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
@@ -1676,7 +2049,14 @@ def create_app() -> FastAPI:
             for item in await run_in_threadpool(service.list_index_versions, knowledge_base_id)
         ):
             raise AppError("INDEX_VERSION_NOT_FOUND", "未找到该知识库的索引版本。", 404)
-        deleted = await run_in_threadpool(retire_version, sources.database_url, index_version_id)
+        deleted = await run_in_threadpool(
+            cleanup_version, sources.database_url, index_version_id,
+            Actor(current.user.user_id, current.user.role),
+        )
+        await _record_audit(
+            audit, "index_version.cleanup", current.user, "index_version", index_version_id
+        )
+        metrics.record_index_governance("cleanup")
         return {"deleted_chunks": deleted}
 
     @app.get(
@@ -2500,9 +2880,22 @@ async def _knowledge_base_response(
         index_status = "failed"
     else:
         index_status = "ready"
+    settings = get_settings()
+    drift = (
+        await run_in_threadpool(
+            active_config_drift,
+            str(settings.database_url),
+            record.knowledge_base_id,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+            reranker_model=settings.reranker_model,
+        )
+        if settings.database_url
+        else None
+    )
     upload_path = KnowledgeBaseScope(
         record.knowledge_base_id,
-        get_settings().upload_path,
+        settings.upload_path,
     ).upload_path
     source_file_bytes = (
         sum(item.stat().st_size for item in upload_path.iterdir() if item.is_file())
@@ -2520,6 +2913,7 @@ async def _knowledge_base_response(
         chunk_count=sum(item.chunk_count for item in documents),
         source_file_bytes=source_file_bytes,
         index_status=index_status,
+        index_config_drift=list(drift["changes"]) if drift else [],
         current_user_permission="admin" if user.role == "admin" else "use",
         allowed_actions=allowed_actions,
     )

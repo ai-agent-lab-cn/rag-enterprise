@@ -79,6 +79,7 @@ class MetricsRegistry:
             "failures": 0,
             "duration_ms_total": 0.0,
         }
+        self._index_governance: dict[str, int] = defaultdict(int)
 
     def record_request(self, method: str, route: str, status_code: int, duration_ms: float) -> None:
         key = f"{method.upper()} {route}"
@@ -122,6 +123,14 @@ class MetricsRegistry:
                 2,
             )
 
+    def record_index_governance(self, action: str, outcome: str = "success") -> None:
+        """记录发布链动作；validation_failed 也是一次成功执行后的业务结论。"""
+
+        key = f"{action}.{outcome}"
+        with self._lock:
+            self._index_governance["events"] += 1
+            self._index_governance[key] += 1
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -133,6 +142,7 @@ class MetricsRegistry:
                 },
                 "rag": dict(self._rag),
                 "indexing": dict(self._indexing),
+                "index_governance": dict(sorted(self._index_governance.items())),
             }
 
 

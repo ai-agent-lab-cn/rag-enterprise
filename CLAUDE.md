@@ -16,6 +16,11 @@
   并且末尾留了兜底文案——宁可说得笼统，也不能什么都不说。
 - 能用「点击后报错」代替禁用时，优先报错。空表单点提交后看到「请输入分类名称」，比
   一个灰按钮清楚得多。
+- **这条不止管禁用控件，管一切「状态背后有原因」的地方。** 配置漂移提示最初写成
+  `<Badge title={差异明细}>配置已变更</Badge>`——徽章本身根本不接受 `title`，
+  类型检查直接报错；就算接受，悬停一秒才出现的明细等于没有。改成徽章下面一行可见文本
+  「当前索引建于旧配置：切片策略、切片参数已变更，重建后生效」。
+  判据是：**光标不动、手指不点，用户能不能知道为什么。**
 
 ## 二、同一个操作在不同页面必须行为一致
 
@@ -104,6 +109,15 @@
   间跳转（那是整页刷新），要走页面内导航；`storageState` 也存不下它。
 - **登录限流默认 10 次/窗口**（`LOGIN_RATE_LIMIT`）。自动化测试一页一登会在第 11 页
   撞上 429，共用一次登录。
+- **不存在的设计令牌会被静默丢弃，页面看起来「正常」但颜色没生效**。写配置漂移提示时
+  用了 `text-warning-text`，而 `tailwind.css` 里只有 `--color-warning`，没有
+  `--color-warning-text`（`--color-danger-text` 倒是有，于是想当然地类推了一个）。
+  Tailwind 不报错、typecheck 不报错、构建不报错——那行提示直接继承父级颜色，
+  告警色完全消失。**加新颜色前先 grep 令牌是否存在，用完读构建产物确认**：
+  `npm run build && grep -o 'text-warning{[^}]*}' dist/assets/*.css`
+  应当输出 `text-warning{color:var(--color-warning)}`，没有输出就是没生效。
+  这与第八条那个 `bg-[radial-gradient(...)]` 被整条丢弃是同一类失败：**CSS 层的错误不会
+  向上冒泡，只会让效果消失。**
 - **样式只有一个来源：`src/tailwind.css`**。`styles.css` 与 `legacy` layer 已于
   2026-09-02 删除，Tailwind preflight 已启用，`@layer` 只剩
   `theme, base, components, utilities`。这条改变了后续所有样式工作的前提：
@@ -178,3 +192,22 @@ cd frontend && npm test && npm run lint && npm run typecheck && npm run build
 涉及页面交互的改动，还要在真实浏览器里走一遍——组件测试通过不等于页面能用。这个仓库
 里「测试全绿但功能不可用」出现过不止一次（最近一次：`reclassify` 把状态改回 pending
 却不入队，用户点了按钮什么也不会发生）。
+
+## 十、函数体内的相对导入，通常是在绕开循环依赖
+
+`backend/app` 曾有三个环，两边都靠函数体内的延迟导入绕开。那种写法能跑，但它把「谁依赖谁」
+从 import 区挪进了函数体：读代码的人看不出层次，静态分析也帮不上忙。12 处延迟导入里
+只有 1 处（`index_versions.py` 的 `TYPE_CHECKING`）有正当理由。
+
+三个环都是「加一层却没迁移职责」的产物，删掉派生装饰层 `index_definitions` 之后，
+`index_versions ⇄ pipeline_governance` 这个环自动就消失了——**环往往是设计问题的症状，
+不是导入顺序的技术问题**。
+
+`backend/tests/test_module_boundaries.py` 是那次清理的守卫，两条检查：函数体内不得有相对
+导入（模块级 `TYPE_CHECKING` 块不算），以及每个模块都能被单独导入。它到目前抓到过 5 次，
+其中 3 次是刚写下的代码——包括写配置漂移检测时顺手写的
+`from .chunking import chunking_version`。
+
+要加延迟导入前先问：**真的存在环吗？** 三次里有三次答案是「没有，提到顶层就行」。
+确实存在环时，去掉环而不是藏起来——把被依赖的那部分抽出去，或者用协议让依赖方向单向
+（`data_source_sync.DocumentIndexer` 就是这么解开 `⇄ postgres_documents` 的）。

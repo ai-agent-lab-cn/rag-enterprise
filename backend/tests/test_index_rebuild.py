@@ -424,7 +424,8 @@ def test_read_paths_only_see_active_index_version(tmp_path: Path) -> None:
     service.index_document("profile.md", DOCUMENT_TEXT.encode("utf-8"), KNOWLEDGE_BASE_ID)
     IndexWorker(settings, FakeEmbedder()).run_once()
 
-    active_chunks = service.store.load_current_chunks(KNOWLEDGE_BASE_ID)
+    active = service.store.resolve_active_version(KNOWLEDGE_BASE_ID)
+    active_chunks = service.store.load_current_chunks(KNOWLEDGE_BASE_ID, index_version_id=active)
     active_documents = service.list_documents(KNOWLEDGE_BASE_ID)
     total_before = _chunk_count(database_url)
 
@@ -432,7 +433,10 @@ def test_read_paths_only_see_active_index_version(tmp_path: Path) -> None:
 
     # 库里的分块总数翻倍，但用户可见的一切都不能变
     assert _chunk_count(database_url) == total_before * 2
-    assert len(service.store.load_current_chunks(KNOWLEDGE_BASE_ID)) == len(active_chunks)
+    assert len(service.store.load_current_chunks(
+        KNOWLEDGE_BASE_ID,
+        index_version_id=service.store.resolve_active_version(KNOWLEDGE_BASE_ID),
+    )) == len(active_chunks)
     assert service.list_documents(KNOWLEDGE_BASE_ID)[0].chunk_count == active_documents[0].chunk_count
     candidates = service.retrieve_candidates("重建索引验证语料", [0.1, 0.2, 0.3], 50, KNOWLEDGE_BASE_ID)
     assert all(not item.chunk_id.startswith("iv_extra") for item in candidates)
@@ -456,14 +460,20 @@ def test_chunk_fingerprint_changes_when_active_index_version_switches(tmp_path: 
     # 先把另一版本的分块写进库，再取指纹：这样切换指针时分块集合完全不变，
     # 指纹若仍然变化，只能是因为 active 索引版本被计入，而不是因为行数或时间戳变了。
     other = _insert_extra_index_version(database_url, "ready")
-    before = service.store.chunk_fingerprint(KNOWLEDGE_BASE_ID)
+    before = service.store.chunk_fingerprint(
+        KNOWLEDGE_BASE_ID,
+        index_version_id=service.store.resolve_active_version(KNOWLEDGE_BASE_ID),
+    )
     with psycopg.connect(database_url) as connection, connection.transaction():
         connection.execute(
             "UPDATE knowledge_bases SET active_index_version_id=%s WHERE knowledge_base_id=%s",
             (other, KNOWLEDGE_BASE_ID),
         )
 
-    assert service.store.chunk_fingerprint(KNOWLEDGE_BASE_ID) != before
+    assert service.store.chunk_fingerprint(
+        KNOWLEDGE_BASE_ID,
+        index_version_id=service.store.resolve_active_version(KNOWLEDGE_BASE_ID),
+    ) != before
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")

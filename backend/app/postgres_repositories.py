@@ -25,6 +25,7 @@ from .knowledge_bases import (
     KnowledgeBaseRecord,
     validate_knowledge_base_id,
 )
+from .pipeline_governance import create_operation
 
 
 def _user(row: dict[str, object]) -> UserRecord:
@@ -438,8 +439,6 @@ class PostgresDataSourceRepository:
                 ).fetchone()
                 if version is None:
                     return None
-                from .pipeline_governance import create_operation
-
                 operation_id = create_operation(
                     connection,
                     operation_type="document_reprocess",
@@ -531,7 +530,7 @@ class PostgresDataSourceRepository:
                        WHERE d.data_source_id=%s AND c.knowledge_base_id=d.knowledge_base_id
                          AND c.document_version_id=d.current_version_id
                          AND iv.index_version_id=c.index_version_id
-                         AND iv.status IN ('active', 'previous', 'building')""",
+                         AND iv.status IN ('active', 'previous', 'building', 'validating', 'ready')""",
                     (Jsonb({"data_source_acl": policy}), data_source_id),
                 )
         return {"knowledge_base_id": source["knowledge_base_id"], **policy}
@@ -864,7 +863,7 @@ class PostgresCategoryRepository:
                 AND d.document_id=ANY(%s) AND c.knowledge_base_id=d.knowledge_base_id
                 AND c.document_version_id=d.current_version_id
                 AND iv.index_version_id=c.index_version_id
-                AND iv.status IN ('active', 'previous', 'building')""",
+                AND iv.status IN ('active', 'previous', 'building', 'validating', 'ready')""",
             (payload, knowledge_base_id, document_ids),
         )
         return updated

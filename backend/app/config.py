@@ -30,10 +30,16 @@ class Settings(BaseSettings):
     auth_path: Path = Path("data/auth/store.json")
     audit_path: Path = Path("data/audit/events.json")
     database_url: str | None = None
-    required_database_schema_version: int = Field(default=25, ge=1)
+    required_database_schema_version: int = Field(default=38, ge=1)
     index_worker_id: str = "worker-local"
     index_job_max_attempts: int = Field(default=3, ge=1, le=10)
     index_job_stale_seconds: int = Field(default=900, ge=60, le=86400)
+    max_concurrent_index_builds: int = Field(default=2, ge=1, le=32)
+    max_index_build_documents: int = Field(default=10000, ge=1, le=1000000)
+    index_retention_count: int = Field(default=2, ge=0, le=100)
+    index_retention_min_days: int = Field(default=7, ge=1, le=3650)
+    # 物理清理默认关闭；需要由运维显式启用并安排 retention sweep。
+    index_auto_cleanup_enabled: bool = False
     # 单次同步的删除比例超过该阈值即熔断中止，防止根目录配错被当成"全部删除"。
     sync_delete_threshold_percent: int = Field(default=30, ge=1, le=100)
     # 删除量不超过该绝对下限时不熔断：纯比例阈值在小知识库上会把日常删除全拦下。

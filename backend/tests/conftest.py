@@ -24,6 +24,14 @@ if os.getenv("CI") and not os.getenv("MINIO_ENDPOINT"):
         "CI 环境缺少 MINIO_ENDPOINT，对象存储测试会被静默跳过。"
         "请确认 workflow 里的 MinIO 已启动。"
     )
+# 数据库同理，而且面更大：整条同步与索引治理链路都挂在 TEST_DATABASE_URL 上。
+# 它此前没有守卫——CI 里靠 workflow 显式设置这个变量才没出事，谁把那一行删掉，
+# 几百条集成测试会一起变成静默跳过，日志上依然全绿。
+if os.getenv("CI") and not os.getenv("TEST_DATABASE_URL"):
+    raise RuntimeError(
+        "CI 环境缺少 TEST_DATABASE_URL，同步与索引治理的集成测试会被静默跳过。"
+        "请确认 workflow 里的 PostgreSQL service 已启动且变量已注入。"
+    )
 
 
 class FakeService:

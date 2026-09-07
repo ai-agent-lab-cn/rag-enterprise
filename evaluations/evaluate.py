@@ -86,7 +86,8 @@ def evaluate(database_url: str, embedder=None, reranker=None) -> dict[str, float
         rerank_rr: list[float] = []
         for case in cases:
             results = store.query(
-                embedder.encode([case["question"]])[0], RETRIEVE_K, knowledge_base_id
+                embedder.encode([case["question"]])[0], RETRIEVE_K, knowledge_base_id,
+                index_version_id=store.resolve_active_version(knowledge_base_id),
             )
             retrieval_rr.append(
                 reciprocal_rank(results, case["expected_filename"], case["expected_paragraph"])

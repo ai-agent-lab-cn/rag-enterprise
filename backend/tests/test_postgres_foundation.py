@@ -773,7 +773,10 @@ def test_postgres_runtime_covers_auth_indexing_and_backup(tmp_path: Path) -> Non
     with pytest.raises(ValueError, match="has documents"):
         data_sources.delete(str(source["data_source_id"]))
     assert data_sources.set_enabled(str(source["data_source_id"]), True)
-    retrieved = service.store.query([0.1, 0.2, 0.3], 5, "kb_default")
+    retrieved = service.store.query(
+        [0.1, 0.2, 0.3], 5, "kb_default",
+        index_version_id=service.store.resolve_active_version("kb_default"),
+    )
     assert retrieved
     assert retrieved[0].metadata["document_id"] == queued.document_id
     with psycopg.connect(database_url) as connection:

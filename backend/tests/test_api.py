@@ -497,3 +497,50 @@ def test_index_versions_are_admin_only_and_readable(client) -> None:
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_validation_reports_require_postgres_rather_than_returning_empty(client) -> None:
+    """JSON 形态下明确报 503，而不是返回空列表。
+
+    空列表会被读成「这个版本没有验证报告」，而事实是「这个部署形态根本不记录验证报告」。
+    两者对操作者的含义完全相反——前者暗示可以直接激活，后者说明这里做不了发布门禁。
+    """
+
+    response = client.get(
+        "/api/knowledge-bases/kb_default/index-versions/iv_missing/validations"
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "POSTGRES_REQUIRED"
+
+
+def test_activate_uses_the_version_bound_report_without_request_body(
+    client, fake_service, monkeypatch
+) -> None:
+    """Activate 只发布 ready Version，不得再次接收评测报告或创建验证记录。"""
+
+    repository = _DataSourcesStub()
+    client.app.dependency_overrides[get_data_sources] = lambda: repository
+    fake_service.list_index_versions = lambda _knowledge_base_id: [
+        {"index_version_id": "iv_ready", "status": "ready"}
+    ]
+    calls: list[tuple[str, str]] = []
+
+    def activate(database_url, index_version_id, _audit, _actor):
+        calls.append((database_url, index_version_id))
+        return {
+            "knowledge_base_id": "kb_default",
+            "active": index_version_id,
+            "previous": "iv_active",
+            "validation_report_id": "vr_bound",
+        }
+
+    monkeypatch.setattr("backend.app.main.switch_to_version", activate)
+
+    response = client.put(
+        "/api/knowledge-bases/kb_default/index-versions/iv_ready/active"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["validation_report_id"] == "vr_bound"
+    assert calls == [(repository.database_url, "iv_ready")]

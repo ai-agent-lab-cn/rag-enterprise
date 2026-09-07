@@ -203,16 +203,21 @@ class RAGService:
 
         filters = self._resolve_category_names(knowledge_base_id, filters)
         mode = retrieval_mode or self.settings.retrieval_mode
+        # 整条召回链只在这里解析一次索引版本，向量、词法与补分共用它。中途发生索引
+        # 切换时，本次请求仍完整地读同一个版本，不会出现向量 vN、词法 vN-1 的混合结果。
+        index_version_id = self.store.resolve_active_version(knowledge_base_id)
         if mode == "vector" or self.lexical is None:
             return _filter_candidates(self.store.query(
                 embedding, retrieve_k, knowledge_base_id, query_text=question,
                 **({"filters": filters} if filters else {}),
                 **({"access": access} if access else {}),
+                index_version_id=index_version_id,
             ), filters, access)
 
-        hits = self.lexical.get(knowledge_base_id).search(question, retrieve_k)
+        hits = self.lexical.get(knowledge_base_id, index_version_id).search(question, retrieve_k)
         current_chunks = self.store.load_current_chunks(
-            knowledge_base_id, **({"access": access} if access else {})
+            knowledge_base_id, **({"access": access} if access else {}),
+            index_version_id=index_version_id,
         ) if filters or access else []
         allowed_ids = {item.chunk_id for item in _filter_candidates(current_chunks, filters, access)}
         if filters or access:
@@ -226,6 +231,7 @@ class RAGService:
                 embedding, retrieve_k, knowledge_base_id, query_text=question,
                 **({"filters": filters} if filters else {}),
                 **({"access": access} if access else {}),
+                index_version_id=index_version_id,
             ), filters, access)
             fused_ids = [
                 chunk_id
@@ -246,10 +252,14 @@ class RAGService:
             wanted = set(missing)
             lookup = {
                 item.chunk_id: item
-                for item in self.store.load_current_chunks(knowledge_base_id)
+                for item in self.store.load_current_chunks(
+                    knowledge_base_id, index_version_id=index_version_id
+                )
                 if item.chunk_id in wanted
             }
-            scores = self.store.score_by_ids(missing, embedding, knowledge_base_id)
+            scores = self.store.score_by_ids(
+                missing, embedding, knowledge_base_id, index_version_id=index_version_id
+            )
 
         candidates: list[RetrievedChunk] = []
         for chunk_id in fused_ids:

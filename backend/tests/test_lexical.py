@@ -118,11 +118,11 @@ class _FakeChunkSource:
         self.data = data
         self.loads: list[str] = []
 
-    def load(self, knowledge_base_id: str) -> list[tuple[str, str]]:
+    def load(self, knowledge_base_id: str, index_version_id: str | None = None) -> list[tuple[str, str]]:
         self.loads.append(knowledge_base_id)
         return self.data.get(knowledge_base_id, [])
 
-    def fingerprint(self, knowledge_base_id: str) -> str:
+    def fingerprint(self, knowledge_base_id: str, index_version_id: str | None = None) -> str:
         return repr(self.data.get(knowledge_base_id, []))
 
 
@@ -134,9 +134,9 @@ def test_cache_builds_once_per_knowledge_base() -> None:
     source = _FakeChunkSource({"kb_a": [("c1", "备份与恢复")], "kb_b": [("c2", "索引重建")]})
     cache = _cache(source)
 
-    first = cache.get("kb_a")
-    second = cache.get("kb_a")
-    cache.get("kb_b")
+    first = cache.get("kb_a", None)
+    second = cache.get("kb_a", None)
+    cache.get("kb_b", None)
 
     assert first is second
     assert source.loads == ["kb_a", "kb_b"]
@@ -153,8 +153,8 @@ def test_cache_isolates_knowledge_bases() -> None:
     )
     cache = _cache(source)
 
-    assert [hit.chunk_id for hit in cache.get("kb_a").search("30080", limit=5)] == ["c1"]
-    assert cache.get("kb_b").search("30080", limit=5) == []
+    assert [hit.chunk_id for hit in cache.get("kb_a", None).search("30080", limit=5)] == ["c1"]
+    assert cache.get("kb_b", None).search("30080", limit=5) == []
 
 
 def test_fingerprint_change_rebuilds_without_explicit_invalidation() -> None:
@@ -162,11 +162,11 @@ def test_fingerprint_change_rebuilds_without_explicit_invalidation() -> None:
 
     source = _FakeChunkSource({"kb_a": [("c1", "旧的分块内容")]})
     cache = _cache(source)
-    cache.get("kb_a")
+    cache.get("kb_a", None)
 
     source.data["kb_a"] = [("c2", "重建之后的新分块内容")]
 
-    hits = cache.get("kb_a").search("新分块", limit=5)
+    hits = cache.get("kb_a", None).search("新分块", limit=5)
     assert [hit.chunk_id for hit in hits] == ["c2"]
     assert source.loads == ["kb_a", "kb_a"]
 
@@ -176,7 +176,7 @@ def test_unchanged_fingerprint_does_not_rebuild() -> None:
     cache = _cache(source)
 
     for _ in range(5):
-        cache.get("kb_a")
+        cache.get("kb_a", None)
 
     assert source.loads == ["kb_a"]
 
@@ -184,10 +184,10 @@ def test_unchanged_fingerprint_does_not_rebuild() -> None:
 def test_invalidate_forces_rebuild_even_when_fingerprint_is_unchanged() -> None:
     source = _FakeChunkSource({"kb_a": [("c1", "内容未变")]})
     cache = _cache(source)
-    cache.get("kb_a")
+    cache.get("kb_a", None)
 
     cache.invalidate("kb_a")
-    cache.get("kb_a")
+    cache.get("kb_a", None)
 
     assert source.loads == ["kb_a", "kb_a"]
 
@@ -203,8 +203,8 @@ def test_invalidate_is_safe_for_unknown_knowledge_base() -> None:
 def test_clear_drops_every_cached_index() -> None:
     source = _FakeChunkSource({"kb_a": [("c1", "一")], "kb_b": [("c2", "二")]})
     cache = _cache(source)
-    cache.get("kb_a")
-    cache.get("kb_b")
+    cache.get("kb_a", None)
+    cache.get("kb_b", None)
 
     assert cache.cached_knowledge_base_ids() == {"kb_a", "kb_b"}
 

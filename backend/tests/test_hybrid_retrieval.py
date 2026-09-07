@@ -37,18 +37,24 @@ class _FakeStore:
         self.vector_order = vector_order
         self.query_calls = 0
         self.scored_ids: list[str] = []
+        self.resolve_calls = 0
 
-    def query(self, embedding, limit, knowledge_base_id, query_text=None, filters=None, access=None):
+    def resolve_active_version(self, knowledge_base_id):
+        self.resolve_calls += 1
+        return "iv_fake"
+
+    def query(self, embedding, limit, knowledge_base_id, query_text=None, filters=None,
+              access=None, *, index_version_id=None):
         self.query_calls += 1
         return [
             _chunk(chunk_id, round(0.9 - 0.1 * index, 6))
             for index, chunk_id in enumerate(self.vector_order[:limit])
         ]
 
-    def load_current_chunks(self, knowledge_base_id, access=None):
+    def load_current_chunks(self, knowledge_base_id, access=None, *, index_version_id=None):
         return [_chunk(chunk_id, 0.0) for chunk_id in CHUNKS]
 
-    def score_by_ids(self, chunk_ids, embedding, knowledge_base_id):
+    def score_by_ids(self, chunk_ids, embedding, knowledge_base_id, *, index_version_id=None):
         self.scored_ids.extend(chunk_ids)
         return {chunk_id: 0.42 for chunk_id in chunk_ids}
 
@@ -65,8 +71,8 @@ def _service(vector_order: list[str], mode: str, with_lexical: bool = True) -> R
     lexical = None
     if with_lexical:
         lexical = LexicalIndexCache(
-            lambda knowledge_base_id: list(CHUNKS.items()),
-            lambda knowledge_base_id: "static",
+            lambda knowledge_base_id, index_version_id: list(CHUNKS.items()),
+            lambda knowledge_base_id, index_version_id: "static",
         )
     settings = Settings(frontend_origin="http://localhost:5173", retrieval_mode=mode)
     return RAGService(settings, store, _FakeEmbedder(), None, None, lexical)
@@ -224,3 +230,19 @@ def test_settings_only_exposes_production_retrieval_modes() -> None:
 
     with pytest.raises(ValidationError, match="retrieval_mode"):
         Settings(frontend_origin="http://localhost:5173", retrieval_mode="lexical")
+
+
+def test_one_retrieval_resolves_the_index_version_exactly_once() -> None:
+    """整条召回链共用一次版本解析，不是每个读方法各查一次。
+
+    此前 ``query``、``load_current_chunks``、``score_by_ids``、``chunk_fingerprint``
+    各自调 ``active_index_version_id``，一次混合检索最多解析六次。期间发生索引切换，
+    向量与词法两路就会落在不同版本上——那是规格 §9 明令禁止的跨版本混读，而且它不会
+    报错，只会悄悄返回一份来自两个版本的结果。
+    """
+
+    service = _service(["c1", "c3"], mode="hybrid")
+
+    service.retrieve_candidates("备份目录", [0.1, 0.2, 0.3], 5)
+
+    assert service.store.resolve_calls == 1

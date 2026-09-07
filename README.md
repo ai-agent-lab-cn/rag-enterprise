@@ -471,11 +471,13 @@ version」——否则失败的文档会被永久跳过，而列表里一直显�
 完整流程：
 
 ```bash
-# 1. 发起重建，得到 index_version_id 与 batch_id
-uv run python -m scripts.rebuild_index start \
+# 1. 先预览，再显式创建候选版本，得到 index_version_id 与 batch_id
+uv run python -m scripts.rebuild_index preview \
   --knowledge-base kb_default --chunk-size 160 --chunk-overlap 20
+uv run python -m scripts.rebuild_index start \
+  --knowledge-base kb_default --chunk-size 160 --chunk-overlap 20 --apply
 
-# 2. 跑 Worker 处理重建任务，再查状态（status 会把跑完的批次推进到 ready）
+# 2. 跑 Worker 处理重建任务，再查状态（成功后 Version 进入 validating）
 uv run python -m scripts.index_worker
 uv run python -m scripts.switch_index status --batch "$BATCH_ID"
 
@@ -487,17 +489,22 @@ uv run python -m backend.evaluation.run_corpus_baseline \
   --baseline-report backend/evaluation/reports/corpus_v2_baseline.json \
   --output /tmp/candidate.json
 
-# 4. 切换（校验不通过就拒绝），必要时回滚
-uv run python -m scripts.switch_index switch \
+# 4. 先执行三层验证，通过后再单独激活；必要时回滚
+uv run python -m scripts.switch_index validate \
   --index-version "$INDEX_VERSION_ID" --report /tmp/candidate.json
+uv run python -m scripts.switch_index activate --index-version "$INDEX_VERSION_ID"
 uv run python -m scripts.switch_index rollback --knowledge-base kb_default
+# 如果 previous 与当前资料集合存在时间点差异，先查看页面 Diff，再显式追加：
+#   --confirm-content-lag
 
-# 5. 确认不再需要旧版本后显式清理
+# 5. 确认不再需要旧版本后先退役，再显式清理物理资源
 uv run python -m scripts.switch_index retire --index-version "$OLD_INDEX_VERSION_ID"
+uv run python -m scripts.switch_index cleanup --index-version "$OLD_INDEX_VERSION_ID"
 ```
 
-切换的三道校验，任一不通过即拒绝：目标版本状态为 `ready`、三项指标**未相对基线回退**、
-**报告的配置指纹与索引版本逐位相同**。
+Validate 包含完整性、技术与检索质量三层门禁。完整配置版本还必须具备 Recall@10、nDCG@10、
+Metadata filter accuracy 与 ACL 零泄漏证据。Activate 不接收报告参数，只允许绑定了持久化
+`pass` Validation Report 的 `ready` Version，并在单个事务中切换 active / previous 指针。
 
 质量门是**相对比较**，不要求达到冻结的绝对阈值。两者回答不同问题：绝对阈值（Recall@5
 `0.70` 等）回答"这套系统能否上线"，切换要回答的是"这次换配置是变好还是变坏"。回退判定

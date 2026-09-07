@@ -48,12 +48,15 @@ class RetrievalEvaluationReport(BaseModel):
     parameters: dict[str, int | float | str | bool]
     query_count: int = Field(ge=1)
     recall_at_5: EvaluationMetric
+    # 旧报告没有 @10 指标，保持可选；新生成报告必须写入，发布门禁会明确标记旧报告缺项。
+    recall_at_10: EvaluationMetric | None = None
     vector_mrr: EvaluationMetric
     rerank_mrr: EvaluationMetric
     # 1.0.0 的历史报告没有这一项，保持可选以免旧报告失效。
     rerank_recall_at_5: EvaluationMetric | None = None
     hybrid_mrr: EvaluationMetric | None = None
     ndcg_at_5: EvaluationMetric | None = None
+    ndcg_at_10: EvaluationMetric | None = None
     metadata_filter_accuracy: EvaluationMetric | None = None
     query_rewrite_success_rate: EvaluationMetric | None = None
     query_rewrite_fallback_rate: EvaluationMetric | None = None
@@ -73,7 +76,9 @@ class RetrievalEvaluationReport(BaseModel):
     @property
     def passed(self) -> bool:
         optional = (
+            self.recall_at_10,
             self.ndcg_at_5,
+            self.ndcg_at_10,
             self.metadata_filter_accuracy,
             self.query_rewrite_success_rate,
             self.query_rewrite_fallback_rate,

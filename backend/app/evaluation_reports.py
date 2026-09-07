@@ -112,6 +112,7 @@ class EvaluationReportRepository:
             run_at=report.run_at,
             models=report.models,
             passed=report.passed,
+            config_fingerprint=report.config_fingerprint,
         )
 
     @classmethod
@@ -121,6 +122,7 @@ class EvaluationReportRepository:
             parameters=report.parameters,
             query_count=report.query_count,
             recall_at_5=report.recall_at_5.model_dump(),
+            recall_at_10=report.recall_at_10.model_dump() if report.recall_at_10 else None,
             vector_mrr=report.vector_mrr.model_dump(),
             rerank_mrr=report.rerank_mrr.model_dump(),
             rerank_recall_at_5=(
@@ -128,6 +130,7 @@ class EvaluationReportRepository:
             ),
             hybrid_mrr=report.hybrid_mrr.model_dump() if report.hybrid_mrr else None,
             ndcg_at_5=report.ndcg_at_5.model_dump() if report.ndcg_at_5 else None,
+            ndcg_at_10=report.ndcg_at_10.model_dump() if report.ndcg_at_10 else None,
             metadata_filter_accuracy=(
                 report.metadata_filter_accuracy.model_dump()
                 if report.metadata_filter_accuracy

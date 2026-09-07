@@ -191,7 +191,7 @@ def test_acl_tightening_covers_every_non_retired_index_version(tmp_path: Path) -
     """data_source ACL 收紧必须刷进 active / previous / building 三种版本的分块。
 
     只更新 active 版本的话，回滚到 previous 之后旧分块仍带着收紧前的宽松 ACL；building
-    版本漏更新则会在它被切为 active 的瞬间生效一份过期 ACL。retired 与 failed 只等清理，
+    版本漏更新则会在它被切为 active 的瞬间生效一份过期 ACL。retired 与两种 failed 只等清理，
     写入无意义。
 
     完整的"回滚后越权"端到端断言要等读路径按 active 索引版本过滤（另一任务）才能成立：
@@ -218,14 +218,17 @@ def test_acl_tightening_covers_every_non_retired_index_version(tmp_path: Path) -
         )
 
     previous_version_id = _clone_index_version(database_url, active_version_id, "previous")
-    for status in ("building", "retired", "failed"):
+    # failed 在 V31 拆成了 build_failed / validation_failed：两者的恢复路径不同
+    # （重新构建 / 重新验证），页面要能分开给按钮。两个都要覆盖到。
+    for status in ("building", "retired", "build_failed", "validation_failed"):
         _clone_index_version(database_url, active_version_id, status)
     assert _statuses_with_chunks(database_url) == {
         "active",
         "previous",
         "building",
         "retired",
-        "failed",
+        "build_failed",
+        "validation_failed",
     }
 
     # 收紧前 USER 能检索到内容，否则后面的"检索不到"是空断言。

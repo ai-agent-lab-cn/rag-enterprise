@@ -118,21 +118,27 @@ class LexicalIndexCache:
 
     def __init__(
         self,
-        loader: Callable[[str], list[tuple[str, str]]],
-        fingerprint: Callable[[str], str],
+        loader: Callable[[str, str | None], list[tuple[str, str]]],
+        fingerprint: Callable[[str, str | None], str],
     ):
         self._loader = loader
         self._fingerprint = fingerprint
         self._indexes: dict[str, tuple[str, BM25Index]] = {}
         self._lock = RLock()
 
-    def get(self, knowledge_base_id: str) -> BM25Index:
-        current = self._fingerprint(knowledge_base_id)
+    def get(self, knowledge_base_id: str, index_version_id: str | None) -> BM25Index:
+        """按知识库取回 BM25 索引；索引版本由调用方解析后传入。
+
+        版本不在这里解析：``fingerprint`` 与 ``loader`` 各查一次的话，两次之间发生
+        索引切换会让指纹与倒排内容来自不同版本，缓存会记下一个从未真实存在过的组合。
+        """
+
+        current = self._fingerprint(knowledge_base_id, index_version_id)
         with self._lock:
             cached = self._indexes.get(knowledge_base_id)
             if cached is not None and cached[0] == current:
                 return cached[1]
-            index = BM25Index(self._loader(knowledge_base_id))
+            index = BM25Index(self._loader(knowledge_base_id, index_version_id))
             self._indexes[knowledge_base_id] = (current, index)
             return index
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg.rows import dict_row
 
 from backend.app.audit import AuditRepository
 from backend.app.database import apply_migrations
@@ -13,6 +15,9 @@ from backend.app.errors import AppError
 from backend.app.index_versions import (
     active_index_version_id,
     active_or_bootstrap_version,
+    cleanup_version,
+    compare_index_version,
+    component_manifest,
     config_fingerprint,
     create_building_version,
     create_partial_vector_index,
@@ -21,9 +26,22 @@ from backend.app.index_versions import (
     get_version,
     retire_version,
     rollback_to_previous,
-    switch_to_version,
+)
+from backend.app.index_validation import (
+    activate_with_report,
+    check_retrieval_quality,
+    get_validation_policy,
+    get_report,
+    list_reports,
+    validate_index_version,
 )
 from backend.evaluation.report import RetrievalEvaluationReport, assess_metric
+from backend.app.pipeline_governance import ensure_index_build
+from backend.app.postgres_documents import (
+    cancel_index_version_build,
+    create_index_version_candidate,
+    retry_index_version_build,
+)
 
 KNOWLEDGE_BASE_ID = "kb_default"
 DATA_SOURCE_ID = "ds_default"
@@ -57,6 +75,24 @@ def test_config_fingerprint_changes_with_every_frozen_field() -> None:
     assert len(fingerprints) == len(variants) + 1
 
 
+def test_config_fingerprint_changes_with_component_manifest() -> None:
+    base = component_manifest(reranker_model="test/reranker-v1")
+    upgraded = {**base, "metadata_schema_version": "chunk-metadata-v2"}
+
+    assert config_fingerprint("v1-700-100", "test/embedding", 3, {}, base) != config_fingerprint(
+        "v1-700-100", "test/embedding", 3, {}, upgraded
+    )
+
+
+def test_validation_policy_is_explicitly_versioned() -> None:
+    policy = get_validation_policy()
+
+    assert policy["version"] == "v2"
+    assert "component_manifest" in policy["critical_checks"]["technical"]
+    assert "ndcg_at_10_present" in policy["critical_checks"]["retrieval_quality"]
+    assert policy["warning_checks"] == ["legacy_advanced_metric_missing"]
+
+
 def _reset(database_url: str) -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
@@ -79,7 +115,7 @@ def _reset(database_url: str) -> None:
 
 
 def _create(database_url: str, chunking: str = "v1-700-100") -> str:
-    return create_building_version(
+    index_version_id, _ = create_building_version(
         database_url,
         KNOWLEDGE_BASE_ID,
         chunking_version=chunking,
@@ -89,6 +125,7 @@ def _create(database_url: str, chunking: str = "v1-700-100") -> str:
         processing_options={"chunk_size": 700, "chunk_overlap": 100},
         rebuild_batch_id="rbd_test",
     )
+    return index_version_id
 
 
 def _add_document(database_url: str, name: str) -> str:
@@ -223,6 +260,7 @@ def test_bootstrap_creates_and_activates_the_first_version() -> None:
         embedding_model="test/embedding",
         embedding_dimension=EMBEDDING_DIMENSION,
         processing_options={"chunk_size": 700, "chunk_overlap": 100},
+        reranker_model="test/reranker",
     )
 
     assert index_version_id.startswith("iv_")
@@ -233,6 +271,10 @@ def test_bootstrap_creates_and_activates_the_first_version() -> None:
     # 首个版本没有可比较的基线，用固定标记满足"active 必须有放行依据"的约束。
     assert version["evaluation_report_id"] == "initial-index"
     assert version["activated_at"] is not None
+    assert version["version_no"] == 1
+    assert version["creation_reason"] == "initial_build"
+    assert version["config_completeness"] == "complete"
+    assert version["component_manifest"]["reranker_model"] == "test/reranker"
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -271,15 +313,30 @@ def test_finalize_requires_full_document_coverage() -> None:
     index_version_id = _create(database_url)
     first = _add_document(database_url, "first")
     _add_document(database_url, "second")
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO document_versions
+               (document_version_id, knowledge_base_id, document_id, version_number,
+                content_sha256, source_file_bytes, source_path, status, created_at,
+                parser_name, parser_version, parse_status)
+               VALUES ('dv_first_v2', %s, 'doc_first', 2, %s, 12, '/tmp/first-v2.md',
+                       'ready', now(), 'markdown', 'structured-1', 'ready')""",
+            (KNOWLEDGE_BASE_ID, "b" * 64),
+        )
+        connection.execute(
+            """UPDATE documents SET current_version_id='dv_first_v2'
+               WHERE knowledge_base_id=%s AND document_id='doc_first'""",
+            (KNOWLEDGE_BASE_ID,),
+        )
     _add_job(database_url, "first", "succeeded", first)
     _add_job(database_url, "second", "succeeded", None)
     # 只覆盖了一篇文档，新版本不完整，不能放行。
     _add_chunks(database_url, index_version_id, first)
 
-    assert finalize_building_version(database_url, index_version_id) == "failed"
+    assert finalize_building_version(database_url, index_version_id) == "build_failed"
     version = get_version(database_url, index_version_id)
     assert version is not None
-    assert version["status"] == "failed"
+    assert version["status"] == "build_failed"
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -307,23 +364,25 @@ def test_finalize_fails_the_version_when_a_job_failed() -> None:
     _add_job(database_url, "first", "failed", first)
     _add_chunks(database_url, index_version_id, first)
 
-    assert finalize_building_version(database_url, index_version_id) == "failed"
+    assert finalize_building_version(database_url, index_version_id) == "build_failed"
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
 def test_finalize_marks_ready_and_creates_the_partial_index() -> None:
     database_url = os.environ["TEST_DATABASE_URL"]
     _reset(database_url)
-    index_version_id = _create(database_url)
+    # 文档要先于索引版本存在：版本创建时会冻结输入快照，此后新增的文档不属于本次构建，
+    # 也就不能拿来充抵它的覆盖率。此前这里是先建版本再加文档，靠的正是那个已被修掉的漏洞。
     first = _add_document(database_url, "first")
+    index_version_id = _create(database_url)
     _add_job(database_url, "first", "succeeded", first)
     _add_chunks(database_url, index_version_id, first, count=3)
 
-    assert finalize_building_version(database_url, index_version_id) == "ready"
+    assert finalize_building_version(database_url, index_version_id) == "validating"
     assert _hnsw_index_name(database_url, index_version_id) is not None
 
     # 已经离开 building 的版本再次调用只回报当前状态，不重复推进。
-    assert finalize_building_version(database_url, index_version_id) == "ready"
+    assert finalize_building_version(database_url, index_version_id) == "validating"
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -421,7 +480,7 @@ def test_finalize_rejects_a_version_covering_no_documents() -> None:
     database_url = os.environ["TEST_DATABASE_URL"]
     _reset(database_url)
     index_version_id = _create(database_url)
-    assert finalize_building_version(database_url, index_version_id) == "failed"
+    assert finalize_building_version(database_url, index_version_id) == "build_failed"
 
 
 def _passing_report(
@@ -454,8 +513,12 @@ def _passing_report(
         parameters={"chunk_size": 700},
         query_count=12,
         recall_at_5=graded,
+        recall_at_10=assess_metric(0.90, 0.80),
         vector_mrr=assess_metric(0.90, 0.80),
         rerank_mrr=assess_metric(0.90, 0.80),
+        ndcg_at_10=assess_metric(0.90, 0.80),
+        metadata_filter_accuracy=assess_metric(1.0, 1.0),
+        acl_leak_count=0,
         config_fingerprint=fingerprint,
     )
 
@@ -478,9 +541,12 @@ def _ready_version(
     chunking: str,
     chunk_count: int = 2,
 ) -> str:
-    """建一个覆盖该文档的 ready 版本；批次内没有未完成任务，finalize 直接放行。"""
+    """建一个覆盖该文档、且已通过三层门禁的 ready 版本。
 
-    index_version_id = create_building_version(
+    finalize 现在只推进到 validating——ready 在新状态机里只有一个入口，就是门禁通过。
+    """
+
+    index_version_id, _ = create_building_version(
         database_url,
         KNOWLEDGE_BASE_ID,
         chunking_version=chunking,
@@ -491,7 +557,11 @@ def _ready_version(
         rebuild_batch_id=f"rbd_{name}",
     )
     _add_chunks(database_url, index_version_id, document_version_id, count=chunk_count)
-    assert finalize_building_version(database_url, index_version_id) == "ready"
+    assert finalize_building_version(database_url, index_version_id) == "validating"
+    result = validate_index_version(
+        database_url, index_version_id, _matching_report(database_url, index_version_id)
+    )
+    assert result["status"] == "pass", result["failure_items"]
     return index_version_id
 
 
@@ -515,7 +585,7 @@ def test_switch_rejects_an_unknown_version() -> None:
     database_url = os.environ["TEST_DATABASE_URL"]
     _reset(database_url)
     with pytest.raises(AppError) as error:
-        switch_to_version(database_url, "iv_missing", _passing_report("b" * 64))
+        activate_with_report(database_url, "iv_missing", _passing_report("b" * 64))
     assert error.value.code == "INDEX_VERSION_NOT_FOUND"
 
 
@@ -525,8 +595,8 @@ def test_switch_rejects_a_version_that_is_not_ready() -> None:
     _reset(database_url)
     index_version_id = _create(database_url)
     with pytest.raises(AppError) as error:
-        switch_to_version(database_url, index_version_id, _matching_report(database_url, index_version_id))
-    assert error.value.code == "INDEX_VERSION_NOT_READY"
+        activate_with_report(database_url, index_version_id, _matching_report(database_url, index_version_id))
+    assert error.value.code == "INDEX_VERSION_NOT_VALIDATABLE"
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -546,10 +616,14 @@ def test_switch_accepts_a_report_below_the_frozen_thresholds() -> None:
         _fingerprint_of(database_url, index_version_id), official=False, below_threshold=True
     )
 
-    result = switch_to_version(database_url, index_version_id, report)
+    result = activate_with_report(database_url, index_version_id, report)
 
     assert result["active"] == index_version_id
-    assert result["meets_frozen_thresholds"] is False
+    # 绝对阈值结论如实记进报告的检索质量层，但不参与放行判定。
+    stored = get_report(database_url, str(result["validation_report_id"]))
+    assert stored["retrieval_result"]["meets_frozen_thresholds"] is False
+    assert len(list_reports(database_url, index_version_id, KNOWLEDGE_BASE_ID)) == 1
+    assert list_reports(database_url, index_version_id, "kb_other") == []
     assert get_version(database_url, index_version_id)["status"] == "active"
 
 
@@ -563,8 +637,8 @@ def test_switch_rejects_a_report_that_regressed_against_the_baseline() -> None:
     index_version_id = _ready_version(database_url, "first", document_version_id, chunking="v1-700-100")
     report = _passing_report(_fingerprint_of(database_url, index_version_id), regressing=True)
     with pytest.raises(AppError) as error:
-        switch_to_version(database_url, index_version_id, report)
-    assert error.value.code == "INDEX_QUALITY_REGRESSED"
+        activate_with_report(database_url, index_version_id, report)
+    assert error.value.code == "VALIDATION_NOT_PASSED"
     assert "recall_at_5" in error.value.message
 
 
@@ -575,8 +649,8 @@ def test_switch_rejects_report_without_fingerprint() -> None:
     document_version_id = _add_document(database_url, "first")
     index_version_id = _ready_version(database_url, "first", document_version_id, chunking="v1-700-100")
     with pytest.raises(AppError) as error:
-        switch_to_version(database_url, index_version_id, _passing_report(None))
-    assert error.value.code == "INDEX_REPORT_INCOMPLETE"
+        activate_with_report(database_url, index_version_id, _passing_report(None))
+    assert error.value.code == "VALIDATION_NOT_PASSED"
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -590,10 +664,292 @@ def test_switch_rejects_fingerprint_mismatch() -> None:
     other = config_fingerprint("v1-160-20", "test/embedding", EMBEDDING_DIMENSION, {})
     assert other != _fingerprint_of(database_url, index_version_id)
     with pytest.raises(AppError) as error:
-        switch_to_version(database_url, index_version_id, _passing_report(other))
-    assert error.value.code == "INDEX_CONFIG_MISMATCH"
-    assert _status(database_url, index_version_id) == "ready"
+        activate_with_report(database_url, index_version_id, _passing_report(other))
+    assert error.value.code == "VALIDATION_NOT_PASSED"
+    # 门禁未过的版本进入 validation_failed，而不是停在 ready 等人再试一次——
+    # 停在 ready 的话，它和「已通过门禁」的版本又变得同形了。
+    assert _status(database_url, index_version_id) == "validation_failed"
     assert active_index_version_id(database_url, KNOWLEDGE_BASE_ID) is None
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_retrieval_quality_gate_blocks_an_acl_leak() -> None:
+    """报告即使 Recall/MRR 全过，只要出现越权召回也不能进入 ready。"""
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    document_version_id = _add_document(database_url, "first")
+    index_version_id = _create(database_url)
+    _add_job(database_url, "first", "succeeded", document_version_id)
+    _add_chunks(database_url, index_version_id, document_version_id)
+    assert finalize_building_version(database_url, index_version_id) == "validating"
+    report = _matching_report(database_url, index_version_id).model_copy(
+        update={"acl_leak_count": 1}
+    )
+
+    result = validate_index_version(database_url, index_version_id, report)
+
+    assert result["status"] == "failed"
+    assert [item["check_key"] for item in result["failure_items"]] == ["acl_leak_count"]
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_complete_version_requires_all_advanced_governance_metrics() -> None:
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    index_version_id = _create(database_url)
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """UPDATE index_versions SET config_completeness='complete'
+               WHERE index_version_id=%s""",
+            (index_version_id,),
+        )
+    legacy_shape = _matching_report(database_url, index_version_id).model_copy(
+        update={
+            "recall_at_10": None,
+            "ndcg_at_10": None,
+            "metadata_filter_accuracy": None,
+            "acl_leak_count": None,
+        }
+    )
+
+    with psycopg.connect(database_url) as connection:
+        result = check_retrieval_quality(connection, index_version_id, legacy_shape)
+
+    failed = {
+        item["check_key"]
+        for item in result["checks"]
+        if item["status"] == "fail" and item["severity"] == "critical"
+    }
+    assert failed == {
+        "recall_at_10_present",
+        "ndcg_at_10_present",
+        "metadata_filter_accuracy_present",
+        "acl_leak_count",
+    }
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_creation_context_exposes_the_effective_definition_and_real_document_scope() -> None:
+    """创建入口必须读取真实配置与文档集合，不能再由页面硬编码 500/50。"""
+
+    from backend.app.index_versions import get_index_version_creation_context
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    _add_document(database_url, "first")
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            "INSERT INTO index_settings (embedding_model, embedding_dimension) VALUES (%s,%s)",
+            ("test/embedding", EMBEDDING_DIMENSION),
+        )
+
+    context = get_index_version_creation_context(
+        database_url,
+        KNOWLEDGE_BASE_ID,
+        chunk_size=700,
+        chunk_overlap=100,
+        reranker_model="test/reranker",
+    )
+
+    assert context["scenario"] == "initial_build"
+    assert context["creation_allowed"] is True
+    assert context["document_scope"] == {
+        "included": 1,
+        "excluded": 0,
+        "source_bytes": 10,
+        "parse_failed": 0,
+        "missing_current_revision": 0,
+    }
+    assert context["document_exclusions"] == []
+    assert context["definition"]["chunking"]["chunk_size"] == 700
+    assert context["definition"]["embedding"]["model"] == "test/embedding"
+    assert context["definition"]["components"]["citation_schema_version"]
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_candidate_creation_rolls_back_if_a_document_job_started_after_preview() -> None:
+    """Preview 后出现任务竞态时，不得留下半套 Version/Snapshot/Build。"""
+
+    from backend.app.index_versions import preview_index_version_candidate
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    document_version_id = _add_document(database_url, "first")
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            "INSERT INTO index_settings (embedding_model, embedding_dimension) VALUES (%s,%s)",
+            ("test/embedding", EMBEDDING_DIMENSION),
+        )
+    preview = preview_index_version_candidate(
+        database_url,
+        KNOWLEDGE_BASE_ID,
+        reason="initial_build",
+        chunk_size=700,
+        chunk_overlap=100,
+        force=False,
+        force_reason=None,
+        reranker_model="test/reranker",
+    )
+    _add_job(database_url, "preview_race", "queued", document_version_id)
+
+    with pytest.raises(AppError) as error:
+        create_index_version_candidate(
+            database_url,
+            KNOWLEDGE_BASE_ID,
+            reason="initial_build",
+            chunk_size=700,
+            chunk_overlap=100,
+            force=False,
+            force_reason=None,
+            expected_config_fingerprint=str(preview["config_fingerprint"]),
+            expected_document_set_fingerprint=str(preview["document_set_fingerprint"]),
+            expected_release_fingerprint=str(preview["release_fingerprint"]),
+            requested_by="usr_admin",
+            idempotency_key="preview-race",
+            reranker_model="test/reranker",
+        )
+
+    assert error.value.code == "DOCUMENT_INDEX_TASK_IN_PROGRESS"
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT count(*) FROM index_versions").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM document_snapshots").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM index_builds").fetchone()[0] == 0
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_candidate_preview_rejects_an_unchanged_release_without_a_force_reason() -> None:
+    """相同配置与相同文档集合不能误创建重复版本。"""
+
+    from backend.app.document_snapshots import create_snapshot
+    from backend.app.index_versions import preview_index_version_candidate
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    _add_document(database_url, "first")
+    components = component_manifest(reranker_model="test/reranker")
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            "INSERT INTO index_settings (embedding_model, embedding_dimension) VALUES (%s,%s)",
+            ("test/embedding", EMBEDDING_DIMENSION),
+        )
+        snapshot_id = create_snapshot(
+            connection, knowledge_base_id=KNOWLEDGE_BASE_ID, reason="active-test"
+        )
+        snapshot = connection.execute(
+            "SELECT snapshot_fingerprint FROM document_snapshots WHERE document_snapshot_id=%s",
+            (snapshot_id,),
+        ).fetchone()
+        connection.execute(
+            """INSERT INTO index_versions
+               (index_version_id, knowledge_base_id, status, chunking_version, parser_version,
+                embedding_model, embedding_dimension, processing_options, config_fingerprint,
+                evaluation_report_id, validation_report_id, document_snapshot_id, activated_at,
+                component_manifest, config_completeness)
+               VALUES ('iv_active_context', %s, 'active', 'v1-700-100', 'structured-1',
+                       'test/embedding', %s, %s::jsonb, %s, 'report', NULL, %s, now(),
+                       %s::jsonb, 'complete')""",
+            (
+                KNOWLEDGE_BASE_ID,
+                EMBEDDING_DIMENSION,
+                '{"chunk_size":700,"chunk_overlap":100}',
+                config_fingerprint(
+                    "v1-700-100",
+                    "test/embedding",
+                    EMBEDDING_DIMENSION,
+                    {"chunk_size": 700, "chunk_overlap": 100},
+                    components,
+                ),
+                snapshot_id,
+                json.dumps(components),
+            ),
+        )
+        connection.execute(
+            "UPDATE knowledge_bases SET active_index_version_id='iv_active_context' WHERE knowledge_base_id=%s",
+            (KNOWLEDGE_BASE_ID,),
+        )
+
+    preview = preview_index_version_candidate(
+        database_url,
+        KNOWLEDGE_BASE_ID,
+        reason="manual_rebuild",
+        chunk_size=700,
+        chunk_overlap=100,
+        force=False,
+        force_reason=None,
+        reranker_model="test/reranker",
+    )
+
+    assert preview["document_set_fingerprint"] == snapshot[0]
+    assert preview["creation_allowed"] is False
+    assert "配置与文档集合均未变化；如需修复性重建，请填写原因。" in preview[
+        "blocked_reasons"
+    ]
+    assert "修复性或主动重建必须显式确认强制创建。" in preview["blocked_reasons"]
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_candidate_preview_allows_a_document_snapshot_change() -> None:
+    """配置未变但当前文档集合变化时仍属于有效的新版本场景。"""
+
+    from backend.app.document_snapshots import create_snapshot
+    from backend.app.index_versions import preview_index_version_candidate
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    _add_document(database_url, "first")
+    components = component_manifest(reranker_model="test/reranker")
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            "INSERT INTO index_settings (embedding_model, embedding_dimension) VALUES (%s,%s)",
+            ("test/embedding", EMBEDDING_DIMENSION),
+        )
+        snapshot_id = create_snapshot(
+            connection, knowledge_base_id=KNOWLEDGE_BASE_ID, reason="active-test"
+        )
+        connection.execute(
+            """INSERT INTO index_versions
+               (index_version_id, knowledge_base_id, status, chunking_version, parser_version,
+                embedding_model, embedding_dimension, processing_options, config_fingerprint,
+                evaluation_report_id, document_snapshot_id, activated_at,
+                component_manifest, config_completeness)
+               VALUES ('iv_active_context', %s, 'active', 'v1-700-100', 'structured-1',
+                       'test/embedding', %s, %s::jsonb, %s, 'report', %s, now(),
+                       %s::jsonb, 'complete')""",
+            (
+                KNOWLEDGE_BASE_ID,
+                EMBEDDING_DIMENSION,
+                '{"chunk_size":700,"chunk_overlap":100}',
+                config_fingerprint(
+                    "v1-700-100", "test/embedding", EMBEDDING_DIMENSION,
+                    {"chunk_size": 700, "chunk_overlap": 100},
+                    components,
+                ),
+                snapshot_id,
+                json.dumps(components),
+            ),
+        )
+        connection.execute(
+            "UPDATE knowledge_bases SET active_index_version_id='iv_active_context' WHERE knowledge_base_id=%s",
+            (KNOWLEDGE_BASE_ID,),
+        )
+    _add_document(database_url, "second")
+
+    preview = preview_index_version_candidate(
+        database_url,
+        KNOWLEDGE_BASE_ID,
+        reason="document_snapshot_changed",
+        chunk_size=700,
+        chunk_overlap=100,
+        force=False,
+        force_reason=None,
+        reranker_model="test/reranker",
+    )
+
+    assert preview["creation_allowed"] is True
+    assert preview["document_diff"]["added"] == 1
+    assert preview["document_diff"]["updated"] == 1
+    assert preview["estimated_documents"] == 2
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -604,20 +960,18 @@ def test_switch_moves_the_pointer_and_keeps_previous_chunks() -> None:
     first = _ready_version(
         database_url, "first", document_version_id, chunking="v1-700-100", chunk_count=2
     )
-    switch_to_version(database_url, first, _matching_report(database_url, first))
+    activate_with_report(database_url, first, _matching_report(database_url, first))
     assert active_index_version_id(database_url, KNOWLEDGE_BASE_ID) == first
 
     second = _ready_version(
         database_url, "second", document_version_id, chunking="v1-160-20", chunk_count=3
     )
-    result = switch_to_version(database_url, second, _matching_report(database_url, second))
+    result = activate_with_report(database_url, second, _matching_report(database_url, second))
 
-    assert result == {
-        "knowledge_base_id": KNOWLEDGE_BASE_ID,
-        "active": second,
-        "previous": first,
-        "meets_frozen_thresholds": True,
-    }
+    assert result["knowledge_base_id"] == KNOWLEDGE_BASE_ID
+    assert result["active"] == second
+    assert result["previous"] == first
+    assert result["validation_report_id"].startswith("vr_")
     assert active_index_version_id(database_url, KNOWLEDGE_BASE_ID) == second
     assert _status(database_url, second) == "active"
     assert _status(database_url, first) == "previous"
@@ -643,15 +997,15 @@ def test_three_versions_switch_without_violating_the_partial_unique_indexes() ->
     first = _ready_version(
         database_url, "first", document_version_id, chunking="v1-700-100", chunk_count=2
     )
-    switch_to_version(database_url, first, _matching_report(database_url, first))
+    activate_with_report(database_url, first, _matching_report(database_url, first))
     second = _ready_version(
         database_url, "second", document_version_id, chunking="v1-160-20", chunk_count=3
     )
-    switch_to_version(database_url, second, _matching_report(database_url, second))
+    activate_with_report(database_url, second, _matching_report(database_url, second))
     third = _ready_version(
         database_url, "third", document_version_id, chunking="v1-320-40", chunk_count=4
     )
-    switch_to_version(database_url, third, _matching_report(database_url, third))
+    activate_with_report(database_url, third, _matching_report(database_url, third))
 
     assert _status(database_url, first) == "retired"
     assert _status(database_url, second) == "previous"
@@ -669,11 +1023,11 @@ def test_rollback_restores_the_previous_version() -> None:
     first = _ready_version(
         database_url, "first", document_version_id, chunking="v1-700-100", chunk_count=2
     )
-    switch_to_version(database_url, first, _matching_report(database_url, first))
+    activate_with_report(database_url, first, _matching_report(database_url, first))
     second = _ready_version(
         database_url, "second", document_version_id, chunking="v1-160-20", chunk_count=3
     )
-    switch_to_version(database_url, second, _matching_report(database_url, second))
+    activate_with_report(database_url, second, _matching_report(database_url, second))
 
     result = rollback_to_previous(database_url, KNOWLEDGE_BASE_ID)
 
@@ -694,12 +1048,59 @@ def test_rollback_restores_the_previous_version() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_rollback_requires_confirmation_when_current_document_revisions_are_newer() -> None:
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    document_version_id = _add_document(database_url, "first")
+    first = _ready_version(
+        database_url, "first", document_version_id, chunking="v1-700-100"
+    )
+    activate_with_report(database_url, first, _matching_report(database_url, first))
+    second = _ready_version(
+        database_url, "second", document_version_id, chunking="v1-160-20"
+    )
+    activate_with_report(database_url, second, _matching_report(database_url, second))
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO document_versions
+               (document_version_id, knowledge_base_id, document_id, version_number,
+                content_sha256, source_file_bytes, source_path, status, created_at,
+                parser_name, parser_version, parse_status)
+               VALUES ('dv_first_v2', %s, 'doc_first', 2, %s, 12, '/tmp/first-v2.md',
+                       'ready', now(), 'markdown', 'structured-1', 'ready')""",
+            (KNOWLEDGE_BASE_ID, "b" * 64),
+        )
+        connection.execute(
+            """UPDATE documents SET current_version_id='dv_first_v2'
+               WHERE knowledge_base_id=%s AND document_id='doc_first'""",
+            (KNOWLEDGE_BASE_ID,),
+        )
+
+    comparison = compare_index_version(database_url, KNOWLEDGE_BASE_ID, first)
+    assert comparison["current_content"]["requires_confirmation"] is True
+    assert comparison["current_content"]["diff"]["updated"] == 1
+    assert comparison["current_content"]["retrievable_documents"] == 0
+    with pytest.raises(AppError) as error:
+        rollback_to_previous(database_url, KNOWLEDGE_BASE_ID)
+    assert error.value.code == "INDEX_ROLLBACK_CONTENT_LAG_CONFIRMATION_REQUIRED"
+    assert active_index_version_id(database_url, KNOWLEDGE_BASE_ID) == second
+
+    result = rollback_to_previous(
+        database_url,
+        KNOWLEDGE_BASE_ID,
+        confirm_content_lag=True,
+    )
+
+    assert result["active"] == first
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
 def test_rollback_without_previous_version_is_rejected() -> None:
     database_url = os.environ["TEST_DATABASE_URL"]
     _reset(database_url)
     document_version_id = _add_document(database_url, "first")
     first = _ready_version(database_url, "first", document_version_id, chunking="v1-700-100")
-    switch_to_version(database_url, first, _matching_report(database_url, first))
+    activate_with_report(database_url, first, _matching_report(database_url, first))
     with pytest.raises(AppError) as error:
         rollback_to_previous(database_url, KNOWLEDGE_BASE_ID)
     assert error.value.code == "INDEX_NO_PREVIOUS_VERSION"
@@ -711,39 +1112,169 @@ def test_retire_rejects_a_version_still_in_use() -> None:
     _reset(database_url)
     document_version_id = _add_document(database_url, "first")
     first = _ready_version(database_url, "first", document_version_id, chunking="v1-700-100")
-    switch_to_version(database_url, first, _matching_report(database_url, first))
+    activate_with_report(database_url, first, _matching_report(database_url, first))
     with pytest.raises(AppError) as error:
-        retire_version(database_url, first)
+        cleanup_version(database_url, first)
     assert error.value.code == "INDEX_VERSION_IN_USE"
     assert _chunk_count(database_url, first) == 2
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
-def test_retire_deletes_chunks_and_drops_the_partial_index() -> None:
+def test_cleanup_deletes_chunks_drops_the_index_and_marks_cleaned() -> None:
     database_url = os.environ["TEST_DATABASE_URL"]
     _reset(database_url)
     document_version_id = _add_document(database_url, "first")
     first = _ready_version(
         database_url, "first", document_version_id, chunking="v1-700-100", chunk_count=2
     )
-    switch_to_version(database_url, first, _matching_report(database_url, first))
+    activate_with_report(database_url, first, _matching_report(database_url, first))
     second = _ready_version(
         database_url, "second", document_version_id, chunking="v1-160-20", chunk_count=3
     )
-    switch_to_version(database_url, second, _matching_report(database_url, second))
+    activate_with_report(database_url, second, _matching_report(database_url, second))
     third = _ready_version(
         database_url, "third", document_version_id, chunking="v1-320-40", chunk_count=4
     )
-    switch_to_version(database_url, third, _matching_report(database_url, third))
+    activate_with_report(database_url, third, _matching_report(database_url, third))
     assert _status(database_url, first) == "retired"
     assert _hnsw_index_name(database_url, first) is not None
 
-    assert retire_version(database_url, first) == 2
+    assert cleanup_version(database_url, first) == 2
 
     assert _chunk_count(database_url, first) == 0
     assert _hnsw_index_name(database_url, first) is None
-    # 版本记录本身保留，仍是可审计的事实。
+    # 版本记录本身保留，仍是可审计的事实；但状态必须推进到 cleaned——分块已经删光，
+    # 继续显示 retired 会让它看起来还能回滚回去，实际切过去就是空索引。
+    assert _status(database_url, first) == "cleaned"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_previous_version_can_be_explicitly_retired_before_cleanup() -> None:
+    """操作者可以明确放弃唯一回滚点，但 active / ready 都不能误退役。"""
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    document_version_id = _add_document(database_url, "first")
+    first = _ready_version(
+        database_url, "first", document_version_id, chunking="v1-700-100"
+    )
+    activate_with_report(database_url, first, _matching_report(database_url, first))
+    second = _ready_version(
+        database_url, "second", document_version_id, chunking="v1-160-20"
+    )
+    activate_with_report(database_url, second, _matching_report(database_url, second))
+
+    with pytest.raises(AppError) as scoped_error:
+        retire_version(database_url, first, knowledge_base_id="kb_other")
+    assert scoped_error.value.code == "INDEX_VERSION_NOT_FOUND"
+
+    retired = retire_version(database_url, first)
+
+    assert retired["index_version_id"] == first
     assert _status(database_url, first) == "retired"
+    with pytest.raises(AppError) as error:
+        retire_version(database_url, second)
+    assert error.value.code == "INDEX_VERSION_NOT_RETIRABLE"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_retry_build_keeps_the_version_and_snapshot_but_opens_a_new_attempt() -> None:
+    """重试 Build 不是创建新 Version；失败现场与冻结输入都要保留。"""
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    document_version_id = _add_document(database_url, "first")
+    index_version_id = _create(database_url)
+    _add_chunks(database_url, index_version_id, document_version_id)
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        with connection.transaction():
+            first_build = ensure_index_build(
+                connection,
+                knowledge_base_id=KNOWLEDGE_BASE_ID,
+                index_version_id=index_version_id,
+            )
+            connection.execute(
+                "UPDATE index_builds SET status='failed' WHERE index_build_id=%s",
+                (first_build,),
+            )
+            connection.execute(
+                "UPDATE index_versions SET status='build_failed' WHERE index_version_id=%s",
+                (index_version_id,),
+            )
+            snapshot_id = connection.execute(
+                "SELECT document_snapshot_id FROM index_versions WHERE index_version_id=%s",
+                (index_version_id,),
+            ).fetchone()["document_snapshot_id"]
+
+    result = retry_index_version_build(
+        database_url,
+        KNOWLEDGE_BASE_ID,
+        index_version_id,
+        requested_by="usr_admin",
+    )
+
+    assert result["index_version_id"] == index_version_id
+    assert result["index_build_id"] != first_build
+    assert result["queued"] == 1
+    with psycopg.connect(database_url) as connection:
+        version = connection.execute(
+            "SELECT status, document_snapshot_id FROM index_versions WHERE index_version_id=%s",
+            (index_version_id,),
+        ).fetchone()
+        attempts = connection.execute(
+            "SELECT attempt_no, status FROM index_builds WHERE index_version_id=%s ORDER BY attempt_no",
+            (index_version_id,),
+        ).fetchall()
+        chunks = connection.execute(
+            "SELECT count(*) FROM chunks WHERE index_version_id=%s", (index_version_id,)
+        ).fetchone()[0]
+    assert version == ("building", snapshot_id)
+    assert attempts == [(1, "failed"), (2, "building")]
+    assert chunks == 0
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_cancel_build_stops_jobs_and_moves_the_version_to_build_failed() -> None:
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    document_version_id = _add_document(database_url, "first")
+    index_version_id = _create(database_url)
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        with connection.transaction():
+            index_build_id = ensure_index_build(
+                connection,
+                knowledge_base_id=KNOWLEDGE_BASE_ID,
+                index_version_id=index_version_id,
+            )
+            operation_id = connection.execute(
+                "SELECT operation_id FROM index_builds WHERE index_build_id=%s",
+                (index_build_id,),
+            ).fetchone()["operation_id"]
+            connection.execute(
+                """INSERT INTO index_jobs
+                   (index_job_id, knowledge_base_id, data_source_id, document_version_id,
+                    idempotency_key, status, job_type, rebuild_batch_id,
+                    target_chunking_version, operation_id)
+                   VALUES ('job_cancel',%s,%s,%s,'cancel-test','queued','rebuild',
+                           'rbd_test','v1-700-100',%s)""",
+                (KNOWLEDGE_BASE_ID, DATA_SOURCE_ID, document_version_id, operation_id),
+            )
+
+    result = cancel_index_version_build(
+        database_url, KNOWLEDGE_BASE_ID, index_version_id, requested_by="usr_admin"
+    )
+
+    assert result["cancelled_jobs"] == 1
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute(
+            "SELECT status FROM index_versions WHERE index_version_id=%s", (index_version_id,)
+        ).fetchone()[0] == "build_failed"
+        assert connection.execute(
+            "SELECT status FROM index_builds WHERE index_build_id=%s", (index_build_id,)
+        ).fetchone()[0] == "cancelled"
+        assert connection.execute(
+            "SELECT status FROM index_jobs WHERE index_job_id='job_cancel'"
+        ).fetchone()[0] == "cancelled"
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -753,9 +1284,9 @@ def test_switch_and_rollback_are_audited(tmp_path: Path) -> None:
     audit = AuditRepository(tmp_path / "audit.json")
     document_version_id = _add_document(database_url, "first")
     first = _ready_version(database_url, "first", document_version_id, chunking="v1-700-100")
-    switch_to_version(database_url, first, _matching_report(database_url, first), audit)
+    activate_with_report(database_url, first, _matching_report(database_url, first), audit)
     second = _ready_version(database_url, "second", document_version_id, chunking="v1-160-20")
-    switch_to_version(database_url, second, _matching_report(database_url, second), audit)
+    activate_with_report(database_url, second, _matching_report(database_url, second), audit)
     rollback_to_previous(database_url, KNOWLEDGE_BASE_ID, audit)
 
     events = audit.list(offset=0, limit=10)

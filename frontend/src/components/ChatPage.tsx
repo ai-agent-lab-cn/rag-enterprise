@@ -121,7 +121,10 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
       if (streamError) return;
       window.dispatchEvent(new Event("rag-generation-status-changed"));
       await loadBase(baseId);
-      if (!conversationId && finalAnswer?.conversation_id) onOpen(`/chat/${finalAnswer.conversation_id}?knowledge_base_id=${baseId}`);
+      // finalAnswer 在流式回调里赋值，TS 的控制流分析追不进闭包，会认定它此处仍是初始的
+      // null 并把类型 narrow 成 never。显式取回声明类型，不改变运行时行为。
+      const answer = finalAnswer as QueryResult | null;
+      if (!conversationId && answer?.conversation_id) onOpen(`/chat/${answer.conversation_id}?knowledge_base_id=${baseId}`);
     } catch (reason) {
       if (!(reason instanceof DOMException && reason.name === "AbortError")) setError(reason instanceof Error ? reason.message : "查询失败。");
       else setStreamingStage("已停止生成");
@@ -141,7 +144,7 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
     <aside className="flex min-h-0 min-w-0 flex-col border-b border-line bg-[rgba(255,255,255,0.98)] p-3 max-h-[260px] min-[901px]:max-h-none min-[901px]:border-b-0 min-[901px]:border-r min-[901px]:border-r-line min-[768px]:pt-5 min-[768px]:px-3.5 min-[768px]:pb-3.5 min-[1025px]:pt-3.5 min-[1025px]:px-[11px] min-[1025px]:pb-[11px]">
       <Button className="mb-[18px] w-full" onClick={newConversation}><MessageSquarePlus size={17}/> 新建对话</Button>
       <div className="mx-1.5 mb-2 flex items-center justify-between max-[768px]:hidden"><h2 className="m-0 text-[12px] font-semibold text-ink-faint">最近对话</h2><span className="grid h-[22px] min-w-[22px] place-items-center rounded-full bg-brand-subtle text-[10px] text-[#5d50cc]">{conversations.length}</span></div>
-      <div className="m-0 grid grid-cols-1 min-h-0 overflow-y-auto max-[901px]:grid-cols-2">{conversations.map((item) => { const active = item.conversation_id === conversationId; return <ListItemButton active={active} className={`relative grid min-h-[66px] gap-[7px] rounded-[7px] p-3 mb-1 max-[768px]:min-w-[190px] min-[1025px]:min-h-[58px] min-[1025px]:p-[10px] ${active ? "bg-[linear-gradient(100deg,#f0edff,#f7f5ff)] text-[#493cc4] shadow-[inset_3px_0_0_var(--color-brand)]" : "text-[#596176] hover:bg-[#f0eeff] hover:text-[#493cc4]"}`} key={item.conversation_id} onClick={() => openConversation(item.conversation_id)}><b className="overflow-hidden text-ellipsis whitespace-nowrap text-[13px] min-[1025px]:text-[12px]">{item.title}</b><small className="text-[10px] text-ink-faint">{item.turn_count} 轮 · {new Date(item.updated_at).toLocaleDateString("zh-CN")}</small></ListItemButton>; })}{conversations.length === 0 ? <p className="text-md text-[#737c90] leading-[1.6]">还没有历史会话，上传资料后开始提问。</p> : null}</div>
+      <div className="m-0 grid grid-cols-1 min-h-0 overflow-y-auto max-[901px]:grid-cols-2">{conversations.map((item) => { const active = item.conversation_id === conversationId; return <ListItemButton active={active} className={`relative grid min-h-[66px] gap-[7px] rounded-[7px] p-3 mb-1 max-[768px]:min-w-[190px] min-[1025px]:min-h-[58px] min-[1025px]:p-[10px] ${active ? "bg-[linear-gradient(100deg,#f0edff,#f7f5ff)] text-[#493cc4] shadow-[inset_3px_0_0_var(--color-brand)]" : "text-[#596176] hover:bg-[#f0eeff] hover:text-[#493cc4]"}`} key={item.conversation_id} onClick={() => openConversation(item.conversation_id)}><b className="overflow-hidden text-ellipsis whitespace-nowrap text-[13px] min-[1025px]:text-[12px]">{item.title}</b><small className="text-[10px] text-ink-faint">{item.turn_count} 轮 · {new Date(item.updated_at).toLocaleDateString("zh-CN")}</small></ListItemButton>; })}{conversations.length === 0 ? <p className="text-xs text-[#737c90] leading-[1.6]">还没有历史会话，上传资料后开始提问。</p> : null}</div>
     </aside>
     <div className="grid grid-cols-1 min-w-0 min-h-0 bg-canvas min-[901px]:grid-cols-[minmax(430px,1fr)_290px] min-[1025px]:grid-cols-[minmax(520px,1fr)_300px]">
       <section className="grid grid-rows-[auto_minmax(0,1fr)_auto] min-h-0 min-w-0 border-r border-line bg-[#fbfcff] max-[901px]:min-h-[720px] max-[901px]:border-r-0 max-[768px]:min-h-[680px]">

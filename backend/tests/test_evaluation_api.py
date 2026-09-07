@@ -59,6 +59,7 @@ def test_evaluation_list_only_exposes_official_reports_in_latest_first_order(cli
         "run_at": "2026-08-07T00:00:00Z",
         "models": older["models"],
         "passed": True,
+        "config_fingerprint": older.get("config_fingerprint"),
     }
 
 

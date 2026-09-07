@@ -70,8 +70,10 @@ API 上传只创建不可变原始文件、文档版本和幂等任务。Worker 
 分块。重建由操作者显式发起，不随应用启动或上传自动触发：
 
 ```bash
-DATABASE_URL='<目标库>' uv run python -m scripts.rebuild_index start \
+DATABASE_URL='<目标库>' uv run python -m scripts.rebuild_index preview \
   --knowledge-base kb_default --chunk-size 400 --chunk-overlap 60
+DATABASE_URL='<目标库>' uv run python -m scripts.rebuild_index start \
+  --knowledge-base kb_default --chunk-size 400 --chunk-overlap 60 --apply
 DATABASE_URL='<目标库>' uv run python -m scripts.rebuild_index status --batch <批次 ID>
 DATABASE_URL='<目标库>' uv run python -m scripts.rebuild_index inventory --knowledge-base kb_default
 ```
@@ -86,8 +88,8 @@ DATABASE_URL='<目标库>' uv run python -m scripts.rebuild_index inventory --kn
 - 续跑判定按"目标索引版本是否已覆盖该文档"，重复执行 `start` 安全；已排队或运行中的
   版本会被跳过。同一知识库只允许一个 `building` 版本，换目标配置发起会被
   `REBUILD_IN_PROGRESS` 拒绝。
-- 重建失败只把任务标记为 `failed`，上一批分块与文档状态保持不变，文档继续可检索；
-  索引版本转为 `failed`，active 指针不动。
+- 重建失败只把 Build 标记为 `failed` 或 `partial_failed`，上一批 active 分块与文档状态保持
+  不变，文档继续可检索；候选索引版本转为 `build_failed`，active 指针不动。
 - `inventory` 输出各索引版本的切分配置与覆盖文档数，并存期间会同时列出新旧两套。
 
 ## 数据源同步
@@ -137,17 +139,19 @@ grep object_skipped <worker 日志> | jq -c '{object_key, size_bytes, max_bytes}
 重建完成后需要显式切换才会生效，命令与四道校验见
 [README 的索引版本切换与回滚](../../README.md#索引版本切换与回滚)。运行要点：
 
-- `switch_index status --batch <id>` 会顺带把跑完的批次推进到 `ready` 或 `failed`。
-  停在 `building` 说明还有任务未完成；转 `failed` 说明有任务终态失败或覆盖不全，
-  此时不要切换，先用 `rebuild_index start` 续跑或排查失败原因。
-- 切换被拒时按错误码处置：`INDEX_CONFIG_MISMATCH` 表示报告不是用该版本的配置跑的，
-  重新用相同 `--chunk-size` / `--chunk-overlap` 生成报告；`INDEX_REPORT_INCOMPLETE`
-  表示报告缺配置指纹（1.0.0 的历史报告都缺，不能用于放行）；`INDEX_QUALITY_REGRESSED`
-  表示指标未达阈值或相对基线回退，属于该重新审视配置而不是绕过门禁的情形。
+- `switch_index status --batch <id>` 会顺带把跑完的批次推进到 `validating` 或
+  `build_failed`。停在 `building` 说明仍有任务；进入 `build_failed` 后应查看 Build 日志，
+  再通过页面或同 Version 的 Build retry API 新建 attempt。
+- 执行 `switch_index validate --index-version <id> --report <report.json>` 后，三层门禁通过才会
+  进入 `ready`；随后用 `switch_index activate --index-version <id>` 原子激活。报告配置指纹
+  不匹配、指标回退、ACL 泄漏或完整性/技术检查失败时，不得绕过门禁。
 - **回滚只有一次机会**：回滚把原 active 降为 `ready` 而非 `previous`，之后不再存在可回滚
-  目标。要再切回去需重新提供合格报告执行 `switch`。
-- 确认不再需要旧版本后再执行 `retire` 释放磁盘。`retired` 只表示"可以删除"，
-  数据仍在库中直到显式清理；`active` 与 `previous` 版本会被 `INDEX_VERSION_IN_USE` 拒绝清理。
+  目标。要再切回去可对已验证的 `ready` 版本执行普通 `activate`。previous 的冻结文档集合
+  与当前资料存在差异时，CLI 会拒绝直接回滚；核对 Version Diff 后显式添加
+  `--confirm-content-lag`，生命周期事件会记录这次风险确认。
+- 确认不再需要旧版本后先执行 `retire` 放弃回滚点，再执行 `cleanup` 释放磁盘。
+  `retired` 只表示“可以删除”，`cleanup` 才会删除 Chunks 与版本专属 HNSW；`active` 与
+  `previous` 会被 `INDEX_VERSION_IN_USE` 拒绝清理。
 
 更换 embedding 模型不在本流程范围。`chunks.embedding` 自 Schema V10 起按登记维度固定
 （pgvector 拒绝为无维度列建 ANN 索引），因此新旧模型维度不同时无法并存回滚，

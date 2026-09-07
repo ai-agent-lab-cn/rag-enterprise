@@ -10,7 +10,8 @@ from pydantic import ValidationError
 
 from backend.app.chunking import chunking_version, split_sections, stable_document_id
 from backend.app.database import apply_migrations
-from backend.app.index_versions import config_fingerprint
+from backend.app.config import get_settings
+from backend.app.index_versions import component_manifest, config_fingerprint
 from backend.app.parsers import parse_document
 from backend.evaluation import (
     CorpusEvaluationDataset,
@@ -140,6 +141,9 @@ def test_corpus_baseline_uses_postgres_pipeline_and_cleans_temporary_data(monkey
 
     assert report.query_count == len(dataset.queries)
     assert report.parameters["chunk_count"] > 0
+    assert report.metadata_filter_accuracy is not None
+    assert report.metadata_filter_accuracy.value == 1.0
+    assert report.acl_leak_count == 0
     with psycopg.connect(database_url) as connection:
         assert connection.execute("SELECT count(*) FROM knowledge_bases").fetchone()[0] == 0
         assert connection.execute("SELECT count(*) FROM chunks").fetchone()[0] == 0
@@ -174,6 +178,7 @@ def test_corpus_baseline_records_the_indexed_config_fingerprint(monkeypatch) -> 
         embedder.model_name,
         len(embedder.encode(["维度探测"])[0]),
         {"chunk_size": 700, "chunk_overlap": 100},
+        component_manifest(reranker_model=get_settings().reranker_model),
     )
 
 

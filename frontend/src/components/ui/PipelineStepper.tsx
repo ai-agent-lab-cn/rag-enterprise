@@ -3,14 +3,17 @@ import { cn } from "./cn";
 type PipelineKind = "file_upload" | "file_update" | "sync_run" | "index_build" | string;
 
 const PIPELINES: Record<string, Array<{ key: string; label: string; aliases?: string[] }>> = {
+  // 每条流水线的格子必须对应后端真实写入的 current_stage。多出来的格子不会显示成
+  // 「未开始」——PipelineStepper 匹配不到 stage 时会退回按 progressPercent 猜位置
+  // （见下面 currentIndex 的 inferredIndex 分支），于是进度条看着精确，其实是在猜。
+  // V25 之前 sync_run 有五个格子（parse/chunk/enrich/validate/activate）后端从来不写，
+  // 而后端写的 fetch_or_normalize / size_limit / retry_unavailable 前端一个都接不住。
+  // `backend/tests/test_module_boundaries.py` 里有一条守卫比对两边，加阶段不加别名会红。
   file_upload: [
     { key: "upload", label: "上传", aliases: ["queued", "preparing"] },
     { key: "parse", label: "解析", aliases: ["parse", "parsing"] },
     { key: "chunk", label: "切片", aliases: ["chunk", "chunking"] },
-    { key: "classify", label: "分类", aliases: ["classify", "classifying"] },
-    { key: "vector", label: "向量" },
-    { key: "keyword", label: "关键词" },
-    { key: "metadata", label: "元数据", aliases: ["enrich", "enriching"] },
+    { key: "index", label: "建索引", aliases: ["vector", "keyword", "metadata", "build", "building"] },
     { key: "validate", label: "验证", aliases: ["validate", "validating"] },
     { key: "complete", label: "完成", aliases: ["complete", "completed", "succeeded"] },
   ],
@@ -18,41 +21,33 @@ const PIPELINES: Record<string, Array<{ key: string; label: string; aliases?: st
     { key: "upload", label: "新版本", aliases: ["queued", "preparing"] },
     { key: "parse", label: "解析", aliases: ["parse", "parsing"] },
     { key: "chunk", label: "切片", aliases: ["chunk", "chunking"] },
-    { key: "classify", label: "分类", aliases: ["classify", "classifying"] },
-    { key: "vector", label: "向量" },
-    { key: "keyword", label: "关键词" },
-    { key: "metadata", label: "元数据", aliases: ["enrich", "enriching"] },
+    { key: "index", label: "建索引", aliases: ["vector", "keyword", "metadata", "build", "building"] },
     { key: "validate", label: "验证", aliases: ["validate", "validating"] },
-    { key: "activate", label: "切换版本", aliases: ["activate", "activating", "complete", "completed", "succeeded"] },
+    { key: "complete", label: "完成", aliases: ["complete", "completed", "succeeded", "activate", "activating"] },
   ],
   document_reprocess: [
     { key: "parse", label: "解析", aliases: ["queued", "preparing", "parse", "parsing"] },
     { key: "chunk", label: "切片", aliases: ["chunk", "chunking"] },
-    { key: "classify", label: "分类", aliases: ["classify", "classifying"] },
-    { key: "vector", label: "向量" },
-    { key: "keyword", label: "关键词" },
-    { key: "metadata", label: "元数据", aliases: ["enrich", "enriching"] },
+    { key: "index", label: "建索引", aliases: ["vector", "keyword", "metadata", "build", "building"] },
     { key: "validate", label: "验证", aliases: ["validate", "validating"] },
-    { key: "complete", label: "完成", aliases: ["activate", "activating", "complete", "completed", "succeeded"] },
+    { key: "complete", label: "完成", aliases: ["complete", "completed", "succeeded", "activate", "activating"] },
   ],
+  // 同步只负责「发现差异并把变化对象交给索引链路」，本身不解析、不切片、不激活——
+  // 那些阶段发生在各自独立的 index 任务里，不会写进 sync_run 的 operations 行。
   sync_run: [
     { key: "discover", label: "发现", aliases: ["queued", "discover", "discovering", "diff"] },
-    { key: "fetch", label: "获取", aliases: ["fetch", "fetching", "syncing"] },
+    { key: "fetch", label: "获取", aliases: ["fetch", "fetching", "syncing", "fetch_or_normalize", "retry_wait", "size_limit"] },
     { key: "normalize", label: "规范化", aliases: ["normalize", "normalizing"] },
-    { key: "parse", label: "解析", aliases: ["parse", "parsing"] },
-    { key: "chunk", label: "切片", aliases: ["chunk", "chunking"] },
-    { key: "enrich", label: "治理", aliases: ["enrich", "enriching"] },
-    { key: "build", label: "构建", aliases: ["build", "building", "indexing"] },
-    { key: "validate", label: "验证", aliases: ["validate", "validating"] },
-    { key: "activate", label: "激活", aliases: ["activate", "activated", "activating", "complete", "completed", "succeeded"] },
+    { key: "build", label: "交付索引", aliases: ["build", "building", "indexing", "retry_unavailable"] },
+    { key: "complete", label: "完成", aliases: ["complete", "completed", "succeeded", "complete_with_failures", "deleted", "unchanged", "skipped"] },
   ],
   index_build: [
     { key: "prepare", label: "准备", aliases: ["queued", "preparing"] },
-    { key: "vector", label: "向量" },
-    { key: "keyword", label: "关键词" },
-    { key: "metadata", label: "元数据" },
+    { key: "parse", label: "解析", aliases: ["parse", "parsing"] },
+    { key: "chunk", label: "切片", aliases: ["chunk", "chunking"] },
+    { key: "index", label: "建索引", aliases: ["vector", "keyword", "metadata", "build", "building"] },
     { key: "validate", label: "验证", aliases: ["validate", "validating"] },
-    { key: "complete", label: "完成", aliases: ["activate", "activating", "complete", "completed", "succeeded"] },
+    { key: "activate", label: "激活", aliases: ["active", "activate", "activating", "complete", "completed", "succeeded"] },
   ],
 };
 

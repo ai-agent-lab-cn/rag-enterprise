@@ -40,6 +40,8 @@ from .report import RetrievalEvaluationReport, assess_metric
 RECALL_AT_5_THRESHOLD = 0.80
 VECTOR_MRR_THRESHOLD = 0.60
 RERANK_MRR_THRESHOLD = 0.70
+RECALL_AT_10_THRESHOLD = 0.90
+NDCG_AT_10_THRESHOLD = 0.75
 
 EVALUATION_CHUNK_SIZE = 700
 EVALUATION_CHUNK_OVERLAP = 100
@@ -85,13 +87,14 @@ def run_baseline(
         for query in dataset.queries:
             # 先保存向量召回的原始顺序，向量 MRR 必须在精排改序前计算。
             candidates = store.query(
-                embedder.encode([query.question])[0], 10, knowledge_base_id
+                embedder.encode([query.question])[0], 10, knowledge_base_id,
+                index_version_id=store.resolve_active_version(knowledge_base_id),
             )
             vector_rankings[query.query_id] = [candidate.chunk_id for candidate in candidates]
 
             # CrossEncoder 只对同一批候选重新排序，不能补召回向量阶段遗漏的分块。
             scores = reranker.score(query.question, [candidate.text for candidate in candidates])
-            reranked = rank_candidates(candidates, scores, 5)
+            reranked = rank_candidates(candidates, scores, 10)
             reranked_rankings[query.query_id] = [candidate.chunk_id for candidate in reranked]
     finally:
         drop_evaluation_knowledge_base(database_url, knowledge_base_id)
@@ -112,7 +115,7 @@ def run_baseline(
         },
         parameters={
             "retrieve_k": 10,
-            "rerank_k": 5,
+            "rerank_k": 10,
             "distance": "cosine",
             "normalize_embeddings": True,
             "ranking_strategy": "minmax_weighted_fusion",
@@ -125,6 +128,11 @@ def run_baseline(
             RECALL_AT_5_THRESHOLD,
             baseline.recall_at_5.value if baseline else None,
         ),
+        recall_at_10=assess_metric(
+            metrics.recall_at_10,
+            RECALL_AT_10_THRESHOLD,
+            baseline.recall_at_10.value if baseline and baseline.recall_at_10 else None,
+        ),
         vector_mrr=assess_metric(
             metrics.vector_mrr,
             VECTOR_MRR_THRESHOLD,
@@ -136,6 +144,11 @@ def run_baseline(
             baseline.rerank_mrr.value if baseline else None,
         ),
         ndcg_at_5=assess_metric(metrics.ndcg_at_5, 0.70),
+        ndcg_at_10=assess_metric(
+            metrics.ndcg_at_10,
+            NDCG_AT_10_THRESHOLD,
+            baseline.ndcg_at_10.value if baseline and baseline.ndcg_at_10 else None,
+        ),
     )
 
 

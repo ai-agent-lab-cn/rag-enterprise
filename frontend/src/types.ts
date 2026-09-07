@@ -298,16 +298,22 @@ export interface EvaluationReportSummary {
   run_at: string;
   models: Record<string, string>;
   passed: boolean;
+  config_fingerprint?: string | null;
 }
 
 export interface EvaluationReport extends EvaluationReportSummary {
   parameters: Record<string, string | number | boolean>;
   query_count: number;
   recall_at_5: EvaluationMetric;
+  recall_at_10?: EvaluationMetric | null;
   vector_mrr: EvaluationMetric;
   rerank_mrr: EvaluationMetric;
   hybrid_mrr?: EvaluationMetric | null;
   rerank_recall_at_5?: EvaluationMetric | null;
+  ndcg_at_5?: EvaluationMetric | null;
+  ndcg_at_10?: EvaluationMetric | null;
+  metadata_filter_accuracy?: EvaluationMetric | null;
+  acl_leak_count?: number | null;
 }
 
 export interface KnowledgeBase {
@@ -321,6 +327,8 @@ export interface KnowledgeBase {
   chunk_count: number;
   source_file_bytes: number;
   index_status: "empty" | "processing" | "ready" | "degraded" | "failed";
+  /** 当前生效的索引不是用现在的配置建的；逐项列出差异，空数组表示没有漂移。 */
+  index_config_drift: Array<{ field: string; active: unknown; current: unknown }>;
   current_user_permission: "admin" | "use";
   allowed_actions: Array<"detail" | "edit" | "delete">;
 }
@@ -519,7 +527,10 @@ export interface AcceptanceRun {
 
 export interface IndexVersion {
   index_version_id: string;
-  status: "building" | "ready" | "active" | "previous" | "retired" | "failed";
+  /** 与后端 index_versions_status_check 同一套取值。ready 只由三层门禁通过产生。 */
+  status:
+    | "building" | "validating" | "ready" | "active" | "previous"
+    | "retired" | "cleaned" | "build_failed" | "validation_failed";
   chunking_version: string;
   parser_version: string;
   embedding_model: string;
@@ -527,24 +538,121 @@ export interface IndexVersion {
   processing_options: Record<string, unknown>;
   config_fingerprint: string;
   evaluation_report_id: string | null;
+  validation_report_id: string | null;
+  document_snapshot_id: string | null;
   rebuild_batch_id: string | null;
+  version_no: number | null;
+  creation_reason: IndexVersionCreationReason | "legacy";
+  force_reason: string | null;
+  requested_by: string | null;
+  config_snapshot: Record<string, unknown>;
+  component_manifest: Record<string, unknown>;
+  release_fingerprint: string | null;
+  config_completeness: "complete" | "unknown";
+  legacy_migrated: boolean;
   created_at: string;
   activated_at: string | null;
   retired_at: string | null;
+  cleaned_at: string | null;
 }
 
-export interface IndexDefinition {
-  index_definition_id: string; name: string;
-  vector_config: Record<string, unknown>; keyword_config: Record<string, unknown>;
-  metadata_schema: Record<string, unknown>; parser_schema_version: string;
-  chunking_policy: Record<string, unknown>; embedding_model: string;
-  embedding_dimension: number; reranker_config: Record<string, unknown>;
-  config_fingerprint: string; active: boolean; created_at: string; updated_at: string;
+export type IndexVersionCreationReason =
+  | "initial_build"
+  | "config_changed"
+  | "document_snapshot_changed"
+  | "component_upgraded"
+  | "consistency_repair"
+  | "manual_rebuild";
+
+export interface IndexDefinitionView {
+  chunking: { version: string; chunk_size: number; chunk_overlap: number };
+  parser: { schema_version: string };
+  embedding: { model: string | null; dimension: number | null };
+  components: Record<string, string>;
+  processing_options: Record<string, unknown>;
+  config_fingerprint: string | null;
+  capabilities: Array<{ field: string; editable: boolean; value: unknown; source?: string; reason: string | null }>;
+}
+
+export interface IndexVersionCreationContext {
+  scenario: "initial_build" | "candidate" | "no_change";
+  definition: IndexDefinitionView;
+  active_version: Record<string, unknown> | null;
+  candidate_version: Record<string, unknown> | null;
+  latest_document_snapshot: Record<string, unknown> | null;
+  document_scope: {
+    included: number;
+    excluded: number;
+    source_bytes: number;
+    parse_failed: number;
+    missing_current_revision: number;
+  };
+  document_exclusions: Array<{
+    document_id: string;
+    filename: string;
+    reason: "parse_failed" | "missing_current_revision";
+    latest_status: string;
+    parse_failure_code: string | null;
+  }>;
+  build_capacity: {
+    active_builds: number;
+    max_concurrent_builds: number;
+    remaining_build_slots: number;
+    max_documents: number;
+  };
+  document_diff: { added: number; removed: number; updated: number; unchanged: number };
+  document_set_fingerprint: string;
+  config_changed: boolean;
+  document_changed: boolean;
+  creation_allowed: boolean;
+  blocked_reasons: string[];
+}
+
+export interface IndexVersionCandidatePreview extends IndexVersionCreationContext {
+  reason: IndexVersionCreationReason;
+  force: boolean;
+  force_reason: string | null;
+  config_fingerprint: string | null;
+  release_fingerprint: string | null;
+  config_snapshot: Record<string, unknown>;
+  component_manifest: Record<string, unknown>;
+  config_diff: Array<{ field: string; active: unknown; candidate: unknown }>;
+  estimated_documents: number;
+  estimated_chunks: number;
+  estimated_embedding_units: number;
+}
+
+export interface IndexVersionBuildResult {
+  batch_id: string;
+  index_version_id: string;
+  index_build_id: string;
+  knowledge_base_id: string;
+  target_chunking_version: string;
+  queued: number;
+  reused: boolean;
+}
+
+export interface IndexVersionComparison {
+  knowledge_base_id: string;
+  target_version: Record<string, unknown>;
+  baseline_version: Record<string, unknown> | null;
+  config_diff: Array<{ field: string; baseline: unknown; target: unknown }>;
+  document_diff: { added: number; removed: number; updated: number; unchanged: number };
+  actual_scope: { documents: number; chunks: number };
+  current_content: {
+    document_set_fingerprint: string;
+    diff: { added: number; removed: number; updated: number; unchanged: number };
+    retrievable_documents: number;
+    retrievable_chunks: number;
+    requires_confirmation: boolean;
+  };
+  validation_comparison: { target: Record<string, unknown> | null; baseline: Record<string, unknown> | null };
+  content_snapshot_note: string;
 }
 
 export interface IndexBuild {
   index_build_id: string; operation_id: string; index_version_id: string;
-  index_definition_id: string | null; build_type: string; status: string;
+  attempt_no: number; build_type: string; status: string;
   total_documents: number; queued_documents: number; processing_documents: number;
   succeeded_documents: number; failed_documents: number;
   failure_code: string | null; failure_reason: string | null;
@@ -558,4 +666,56 @@ export interface DocumentIndexState {
   keyword_status: string; metadata_status: string; overall_status: string;
   chunk_count: number; failure_stage: string | null; failure_code: string | null;
   failure_reason: string | null; updated_at: string;
+}
+
+/** 三层门禁里的单项检查。页面据此指出具体哪一项没过，而不是只显示「验证失败」。 */
+export interface ValidationCheck {
+  check_key: string;
+  status: "pass" | "fail";
+  expected: unknown;
+  actual: unknown;
+  severity: string;
+  layer?: string;
+}
+
+export interface ValidationLayerResult {
+  layer: string;
+  /** unknown 表示这一层无法核对（例如快照机制之前创建的版本），不是通过。 */
+  status: "pass" | "fail" | "unknown";
+  checks: ValidationCheck[];
+  note?: string;
+  meets_frozen_thresholds?: boolean;
+}
+
+export interface ValidationReport {
+  validation_report_id: string;
+  index_version_id: string;
+  index_build_id: string | null;
+  status: "pending" | "running" | "pass" | "failed" | "cancelled";
+  policy_version: string;
+  evaluation_set_version: string | null;
+  baseline_version_id: string | null;
+  integrity_result: ValidationLayerResult | Record<string, never>;
+  technical_result: ValidationLayerResult | Record<string, never>;
+  retrieval_result: ValidationLayerResult | Record<string, never>;
+  summary: string | null;
+  failure_items: ValidationCheck[];
+  report_source: "standard" | "legacy_backfill" | "bootstrap";
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+}
+
+/** 索引版本的一次状态转换。actor_id 为空表示系统自动触发，不是「不知道是谁」。 */
+export interface LifecycleEvent {
+  event_id: string;
+  index_version_id: string;
+  event_type: string;
+  from_status: string | null;
+  to_status: string | null;
+  actor_id: string | null;
+  actor_role: string | null;
+  reason: string | null;
+  validation_report_id: string | null;
+  created_at: string;
 }

@@ -72,7 +72,11 @@ class _Store:
         self.results = results
         self.queries: list[str] = []
 
-    def query(self, embedding, limit, knowledge_base_id, query_text=None, filters=None, access=None):
+    def resolve_active_version(self, knowledge_base_id):
+        return "iv_fake"
+
+    def query(self, embedding, limit, knowledge_base_id, query_text=None, filters=None,
+              access=None, *, index_version_id=None):
         self.queries.append(query_text)
         result = self.results.get(query_text, [])
         if isinstance(result, Exception):
