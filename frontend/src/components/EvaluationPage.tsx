@@ -40,7 +40,7 @@ function MetricCard({ label, metric }: { label: string; metric: EvaluationMetric
         <span
           className="absolute -top-[3px] h-[11px] w-[2px] bg-[#f19a36]"
           style={{ left: `${metric.threshold * 100}%` }}
-          title={`冻结阈值 ${metric.threshold}`}
+          title={`发布阈值 ${metric.threshold}`}
         />
       </div>
       <div className="flex items-center gap-1.5 text-[11px] text-[#8c93a5]">

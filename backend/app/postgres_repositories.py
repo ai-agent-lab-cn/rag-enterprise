@@ -173,6 +173,51 @@ class PostgresDataSourceRepository:
     def __init__(self, database_url: str):
         self.database_url = database_url
 
+    def readable_chunk_ids(
+        self, knowledge_base_id: str, chunk_ids: list[str], user_id: str
+    ) -> set[str]:
+        """在给定的分块里挑出**当前**仍对该用户可见的那些。
+
+        供会话记录遮蔽引用原文用：Source.text 是提问那一刻的原文快照，整份存进了
+        会话文件，而会话读取只校验归属、不复查 ACL。于是 A 提问时能看的资料，
+        事后被移出 allow 名单或整份下架之后，A 的历史会话里那段原文仍然可以无限期
+        读取——检索侧的收紧对已生成的记录完全无效。
+
+        判据与 ``get_citation`` 逐条一致（文档级 + 数据源级 ACL、retrieval_status、
+        有效期、只认 active 索引版本且是文档当前版本），**故意重复那段 WHERE 而不是
+        抽公用函数**：两处返回的东西不同（一处取原文、一处只做筛选），而把 SQL 拆成
+        字符串拼接会让这段权限判定变得难以逐条比对。加条件时两处必须一起改。
+        """
+
+        if not chunk_ids:
+            return set()
+        validate_knowledge_base_id(knowledge_base_id)
+        with psycopg.connect(self.database_url) as connection:
+            rows = connection.execute(
+                """SELECT c.chunk_id
+                   FROM chunks c
+                   JOIN documents d
+                     ON d.knowledge_base_id=c.knowledge_base_id
+                    AND d.document_id=(c.metadata->>'document_id')
+                    AND d.current_version_id=c.document_version_id
+                   JOIN index_versions iv ON iv.index_version_id=c.index_version_id
+                   JOIN data_sources s ON s.data_source_id=d.data_source_id
+                   WHERE c.knowledge_base_id=%s AND c.chunk_id = ANY(%s) AND iv.status='active'
+                     AND COALESCE(c.metadata->>'retrieval_status', 'searchable')='searchable'
+                     AND (c.metadata->>'valid_from' IS NULL
+                          OR (c.metadata->>'valid_from')::timestamptz <= now())
+                     AND (c.metadata->>'valid_to' IS NULL
+                          OR (c.metadata->>'valid_to')::timestamptz >= now())
+                     AND NOT (COALESCE(c.metadata->'deny_user_ids', '[]'::jsonb) ? %s)
+                     AND (jsonb_array_length(COALESCE(c.metadata->'allow_user_ids', '[]'::jsonb))=0
+                          OR COALESCE(c.metadata->'allow_user_ids', '[]'::jsonb) ? %s)
+                     AND NOT (COALESCE(s.acl->'deny_user_ids', '[]'::jsonb) ? %s)
+                     AND (jsonb_array_length(COALESCE(s.acl->'allow_user_ids', '[]'::jsonb))=0
+                          OR COALESCE(s.acl->'allow_user_ids', '[]'::jsonb) ? %s)""",
+                (knowledge_base_id, list(chunk_ids), user_id, user_id, user_id, user_id),
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
     def get_citation(
         self, knowledge_base_id: str, chunk_id: str, user_id: str
     ) -> dict[str, object] | None:

@@ -15,6 +15,10 @@ const base = {
   chunk_count: 3,
   source_file_bytes: 2048,
   index_status: "ready",
+  // 后端保证这个字段总存在（schemas.py:406 的 default_factory=list、main.py:2916 显式赋值），
+  // 所以详情页直接读 base.index_config_drift.length 而不做兜底。这份手工 mock 漏掉它时
+  // 页面会崩在那一行——CLAUDE.md 第三条说的手工字段映射，新增 schema 字段不报错、静默出错。
+  index_config_drift: [],
   current_user_permission: "admin",
   allowed_actions: ["detail", "edit", "delete"],
 };
@@ -119,6 +123,79 @@ afterEach(() => {
   vi.unstubAllEnvs();
   window.history.replaceState({}, "", "/");
 });
+
+/**
+ * 把若干 SSE 事件拼成一个流式 Response。
+ *
+ * 问答工作台已从非流式 `/query` 改成 SSE `/query/stream`（api.ts:300-312）。
+ * `streamQuery` 直接读 `response.body.getReader()` 并按 `\n\n` 切块、用
+ * `/^event:\s*(.+)$/m` 与 `/^data:\s*(.+)$/m` 取字段（api.ts:104-116），所以 mock 必须
+ * 给出真的 ReadableStream——`json()` 那种一次性 Response 的 body 在 jsdom 里读不出分块，
+ * 组件会一直停在加载态，症状是「答案文本找不到」。
+ */
+/** 问答工作台的查询结果，/query 与 /query/stream 共用。 */
+const QUERY_RESULT = {
+  answer: "系统使用可追溯检索。[来源 1]",
+  answer_status: "answered",
+  error_code: null,
+  error_message: null,
+  model: "gemini-test",
+  latency_ms: { retrieval: 10, rerank: 5, generation: 20, total: 35 },
+  conversation_id: "conv_1234567890abcdef",
+  record_id: "ans_1",
+  models: {},
+  model_metadata: {},
+  prompt_version: "v3",
+  prompt_hash: "abc",
+  query_metadata: {
+    strategy: "controlled_expansion",
+    query_count: 2,
+    expansion_count: 1,
+    fallback_used: false,
+    retrieved_candidate_count: 8,
+    fused_candidate_count: 5,
+    returned_source_count: 1,
+    filter_match_count: 5,
+    applied_filters: { categories: ["安全"], tags: ["ACL"], source_types: ["file"], created_from: null, created_to: null },
+  },
+  generation_governance: { minimum_evidence_count: 1, evidence_count: 1, acl_revalidated: true, current_version_revalidated: true, retrieval_status_revalidated: true, citation_indices: [1], citation_valid: true, claim_citation_coverage: true, outcome_reason: "answered" },
+  sources: [
+    {
+      knowledge_base_id: "kb_default",
+      chunk_id: "chunk_1",
+      document_id: "doc_1",
+      filename: "profile.md",
+      page: null,
+      paragraph: 0,
+      chunk_index: 0,
+      char_count: 12,
+      summary: "系统资料",
+      text: "系统资料全文",
+      retrieval_score: 0.82,
+      rerank_score: 1.31,
+      vector_score: 0.78,
+      lexical_score: 0.64,
+      retrieval_methods: ["vector", "lexical"],
+      query_match_count: 2,
+      document_version_id: "ver_1",
+      content_sha256: "a".repeat(64),
+      heading_path: ["系统设计"],
+    },
+  ],
+};
+
+function sse(events: Array<{ event: string; data: unknown }>) {
+  const payload = events.map((item) => `event: ${item.event}\ndata: ${JSON.stringify(item.data)}\n\n`).join("");
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(payload));
+        controller.close();
+      },
+    }),
+    { status: 200, headers: { "Content-Type": "text/event-stream" } },
+  );
+}
 
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -226,58 +303,26 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if (url.startsWith("/api/evaluation-center/pipeline")) return Promise.resolve(json({ run_count: 2, added_count: 4, updated_count: 1, deleted_count: 1, skipped_count: 2, failed_count: 1, retry_count: 3, failure_rate: 0.5, average_duration_ms: 20000 }));
   if (url.startsWith("/api/evaluation-center/bad-cases")) return Promise.resolve(json([{ case_id: "case_1234567890abcdef", source_type: "online", source_record_id: "ans_1", knowledge_base_id: "kb_default", dataset_version: null, question: "为什么没有召回？", expected_source_ids: [], actual_source_ids: [], expected_answer_status: "answered", actual_answer_status: "insufficient_evidence", actual_answer: "资料不足。", failure_stage: "retrieval", root_cause: null, category: "没召回", severity: "high", assignee: null, fix_commit: null, status: "new", regression_added: false, created_at: "2026-08-30T00:00:00Z", confirmed_at: null, resolved_at: null, updated_at: "2026-08-30T00:00:00Z" }]));
   if (url.startsWith("/api/evaluation-center/acceptance-runs")) return Promise.resolve(json([{ acceptance_run_id: "acc_1", knowledge_base_id: "kb_default", status: "blocked", commit_sha: "local-working-tree", schema_version: 14, steps: [{ step_key: "external_source", title: "真实数据源", status: "blocked", summary: "缺少 S3 兼容外部数据源。", evidence: { external_source_count: 0 } }], limitations: ["缺少 S3 兼容外部数据源。"], created_by: admin.user_id, created_at: "2026-08-30T00:00:00Z" }]));
-  if (url === "/api/knowledge-bases/kb_default/query" && init?.method === "POST")
-    return Promise.resolve(
-      json({
-        answer: "系统使用可追溯检索。[来源 1]",
-        answer_status: "answered",
-        error_code: null,
-        error_message: null,
-        model: "gemini-test",
-        latency_ms: { retrieval: 10, rerank: 5, generation: 20, total: 35 },
-        conversation_id: "conv_1234567890abcdef",
-        record_id: "ans_1",
-        models: {},
-        model_metadata: {},
-        prompt_version: "v3",
-        prompt_hash: "abc",
-        query_metadata: {
-          strategy: "controlled_expansion",
-          query_count: 2,
-          expansion_count: 1,
-          fallback_used: false,
-          retrieved_candidate_count: 8,
-          fused_candidate_count: 5,
-          returned_source_count: 1,
-          filter_match_count: 5,
-          applied_filters: { categories: ["安全"], tags: ["ACL"], source_types: ["file"], created_from: null, created_to: null },
-        },
-        generation_governance: { minimum_evidence_count: 1, evidence_count: 1, acl_revalidated: true, current_version_revalidated: true, retrieval_status_revalidated: true, citation_indices: [1], citation_valid: true, claim_citation_coverage: true, outcome_reason: "answered" },
-        sources: [
-          {
-            knowledge_base_id: "kb_default",
-            chunk_id: "chunk_1",
-            document_id: "doc_1",
-            filename: "profile.md",
-            page: null,
-            paragraph: 0,
-            chunk_index: 0,
-            char_count: 12,
-            summary: "系统资料",
-            text: "系统资料全文",
-            retrieval_score: 0.82,
-            rerank_score: 1.31,
-            vector_score: 0.78,
-            lexical_score: 0.64,
-            retrieval_methods: ["vector", "lexical"],
-            query_match_count: 2,
-            document_version_id: "ver_1",
-            content_sha256: "a".repeat(64),
-            heading_path: ["系统设计"],
-          },
-        ],
-      }),
-    );
+  // 两条路径共用同一份 payload：/query 仍被少数直接断言用到，/query/stream 是问答工作台
+  // 现在真正走的那条（api.ts:308）。流式那条把整个结果作为一个 final 事件发出——
+  // 组件对 final 的处理与非流式返回等价，测试要断言的是渲染结果不是分块过程。
+  if ((url === "/api/knowledge-bases/kb_default/query" || url === "/api/knowledge-bases/kb_default/query/stream") && init?.method === "POST") {
+    const result = QUERY_RESULT;
+    if (url.endsWith("/stream")) {
+      return Promise.resolve(sse([
+        { event: "sources", data: { items: result.sources } },
+        { event: "final", data: result },
+      ]));
+    }
+    return Promise.resolve(json(result));
+  }
+  // 知识库详情页的 load() 用 Promise.all 并行取 11 个接口，**任何一个走到下面那条 404
+  // 兜底，整个 Promise.all 就 reject，base 保持 null，整页不渲染**——症状是所有 tab、
+  // 所有文档全都 getBy* 找不到，看着像 19 个互不相干的断言失效，实际是一个根因。
+  // 新增 load() 依赖的接口时必须同步在这里补 mock。
+  if (url === "/api/evaluations") return Promise.resolve(json([]));
+  if (url === "/api/knowledge-bases/kb_default/index-builds") return Promise.resolve(json([]));
+  if (url === "/api/knowledge-bases/kb_default/operations?limit=50") return Promise.resolve(json([]));
   return Promise.resolve(json({ error: { message: "未找到" } }, 404));
 }
 
@@ -308,24 +353,31 @@ test("数据源管理使用独立列表而非复用默认知识库详情", async
   render(<App />);
   expect(await screen.findByRole("region", { name: "数据源管理" })).toBeInTheDocument();
   expect(await screen.findByText("profile.md")).toBeInTheDocument();
-  expect(screen.getByRole("columnheader", { name: "上传状态" })).toBeInTheDocument();
-  expect(screen.getByRole("columnheader", { name: "索引状态" })).toBeInTheDocument();
-  expect(screen.getByText("上传成功")).toBeInTheDocument();
+  // 「上传状态」+「索引状态」两列已合并成一列「处理状态」：文件源看 index_status、
+  // 外部源看 sync_status（DataSourcesPage.tsx:63-76）。「上传成功」这个文案随之消失，
+  // INDEX_LABEL 里只有 未索引/等待索引/索引中/索引完成/索引失败。
+  expect(screen.getByRole("columnheader", { name: "处理状态" })).toBeInTheDocument();
   expect(screen.getByText("索引完成")).toBeInTheDocument();
-  expect(screen.queryByRole("columnheader", { name: "类型" })).not.toBeInTheDocument();
+  // 「独立列表而非复用详情页」现在靠这一列区分：详情页的表格身处某个知识库内部，
+  // 不可能有「所属知识库」列。原来的区分依据是「没有类型列」，但数据源页现在有类型列了
+  // （DataSourcesPage.tsx:53），那条断言已经不能用来区分两者。
+  expect(screen.getByRole("columnheader", { name: "所属知识库" })).toBeInTheDocument();
   expect(screen.queryByRole("columnheader", { name: "文档数" })).not.toBeInTheDocument();
   expect(screen.queryByText("会话历史")).not.toBeInTheDocument();
 });
 
 test("文件数据源使用更新文件创建新版本", async () => {
   const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
-  window.history.replaceState({}, "", "/data-sources");
+  // 「更新文件」已从数据源页移到资料 Tab 的 DocumentPanel（:183）。数据源页每行现在只剩
+  // 一个导航操作——「进入资料」/「进入管理」（DataSourcesPage.tsx:40），不再直接改数据。
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default");
   render(<App />);
   expect(screen.queryByRole("button", { name: "同步" })).not.toBeInTheDocument();
   // RowActions 统一了可访问名格式为「{rowLabel} 的{action.label}」（见 ui/RowActions.tsx），
   // 不再是页面自己拼的「更新 {name}」。
   await userEvent.upload(await screen.findByLabelText("profile.md 的更新文件"), new File(["updated"], "profile.md", { type: "text/markdown" }));
-  expect(await screen.findByRole("status")).toHaveTextContent("新版本已上传并加入索引队列");
+  // 提示文案随之改成带文件名的形式（DocumentPanel.tsx:194）。
+  expect(await screen.findByRole("status")).toHaveTextContent("的新版本已上传");
   expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/documents", expect.objectContaining({ method: "POST" }));
 });
 
@@ -370,21 +422,29 @@ test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
   // 行操作直接展示，不再需要先打开「更多操作」菜单。
   const baseRow = screen.getByRole("button", { name: "默认知识库" }).closest("tr") as HTMLElement;
   await userEvent.click(within(baseRow).getByRole("button", { name: "详情" }));
-  expect(await screen.findByText("profile.md")).toBeInTheDocument();
+  // 「资料」Tab 现在同时有资料列表和「全部资料版本」表，同一个文件名会出现多次，
+  // findByText 会抛 found multiple——限定到资料列表内。
+  expect((await screen.findAllByText("profile.md")).length).toBeGreaterThan(0);
   expect(screen.queryByText("正在读取知识库详情…")).not.toBeInTheDocument();
   expect(screen.getByRole("tab", { name: /资料/ })).toHaveAttribute("aria-selected", "true");
   // profile.md 分类状态是 manual，只有「编辑/删除」两个操作，走平铺而非菜单。
   await userEvent.click(screen.getByRole("button", { name: "编辑" }));
   expect(screen.getByRole("dialog", { name: "编辑资料元数据" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "取消" }));
-  await userEvent.click(screen.getByRole("tab", { name: /版本治理/ }));
-  expect(screen.getByRole("tab", { name: /版本治理/ })).toHaveAttribute("aria-selected", "true");
+  await userEvent.click(screen.getByRole("tab", { name: /索引治理/ }));
+  expect(screen.getByRole("tab", { name: /索引治理/ })).toHaveAttribute("aria-selected", "true");
   expect(screen.getByRole("heading", { name: "索引版本" })).toBeInTheDocument();
   expect(screen.getByText("iv_active")).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "文档与版本" })).not.toBeInTheDocument();
-  await userEvent.click(screen.getByRole("tab", { name: /解析与切片/ }));
+  // 「解析与切片」不再是独立 Tab：ParsingPanel 被移进了「资料」Tab 里文档详情弹层
+  // （DocumentPanel.tsx:423），入口是列表里那个文件名按钮（:222-229）。
+  // 「解析与切片」这个名字现在是资料版本表的一个列 header（KnowledgeBaseDetailPage.tsx:235）。
+  await userEvent.click(screen.getByRole("tab", { name: /资料/ }));
+  await userEvent.click(screen.getByRole("button", { name: "profile.md" }));
   expect(await screen.findByRole("heading", { name: "文档结构" })).toBeInTheDocument();
   expect(screen.getAllByText("ACL 必须在召回前过滤。").length).toBeGreaterThan(0);
+  // 弹层是模态的，不关掉后面点不到 Tab。
+  await userEvent.click(screen.getByRole("button", { name: "关闭弹框" }));
   await userEvent.click(screen.getByRole("tab", { name: /权限边界/ }));
   expect(screen.getByRole("tab", { name: /权限边界/ })).toHaveAttribute("aria-selected", "true");
   expect(screen.queryByRole("heading", { name: "权限边界" })).not.toBeInTheDocument();
@@ -441,15 +501,24 @@ test("编辑资料元数据时按分类 ID 选择并保存分类", async () => {
 });
 
 test("知识库详情提供数据源同步治理 Tab", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  // 这个 Tab 只列**外部**数据源：详情页传进去的是
+  // `dataSources.filter(item => item.source_type !== "file")`（KnowledgeBaseDetailPage.tsx:288），
+  // 文件源归「资料」Tab。公共 mock 里那个 profile.md 是 source_type:"file"，会被整个滤掉，
+  // 表格走 EmptyState 分支、连 columnheader 都不渲染——所以这里必须给一个非 file 的源。
+  const objectSource = { ...dataSource, data_source_id: "src_s3", name: "enterprise-docs", source_type: "object_storage" };
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const url = String(input);
+    if (url === "/api/data-sources?offset=0&limit=100") return Promise.resolve(json([objectSource]));
+    return commonFetch(input, init);
+  });
   window.history.replaceState({}, "", "/knowledge-bases/kb_default");
   render(<App />);
 
   await userEvent.click(await screen.findByRole("tab", { name: /数据源/ }));
 
   expect(screen.getByRole("button", { name: "新建外部数据源" })).toBeInTheDocument();
-  expect(screen.getByRole("columnheader", { name: "同步状态" })).toBeInTheDocument();
-  expect(screen.getByText("profile.md")).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "同步进度" })).toBeInTheDocument();
+  expect(screen.getByText("enterprise-docs")).toBeInTheDocument();
 });
 
 test("资料库支持一次选择多个文件并逐个上传", async () => {
@@ -543,11 +612,31 @@ test("无分类资料显示占位符而不是伪造的分类名", async () => {
   render(<App />);
 
   const row = (await screen.findByText("draft.md")).closest("tr") as HTMLElement;
-  expect(within(row).getByText("—")).toBeTruthy();
-  expect(within(row).getByText("待分类")).toBeTruthy();
+  // 锁定分类列那一格再断言：行里现在有多个「—」占位（标签、当前版本等列都会出现它），
+  // 直接 within(row).getByText("—") 会报 found multiple。这里用「待分类」徽章反向找到它
+  // 所在的 <td>，而不是数第几个——DocumentPanel 开了 selection（:383），
+  // 首列是 checkbox，按索引数会偏一位。
+  const categoryCell = within(row).getByText("待分类").closest("td") as HTMLElement;
+  expect(within(categoryCell).getByText("—")).toBeTruthy();
   expect(within(row).queryByText("未分类")).toBeNull();
 });
 
+/**
+ * ⚠ 这条测试当前是**红的，而且不要改断言让它变绿**。
+ *
+ * 它抓到的是一个真实的功能回退：分类失败的原因不再显示给用户。
+ * - 后端照旧写入并返回：`postgres_documents.py:1843-1844` 写、`:361-365` 从 metadata 读、
+ *   `schemas.py:129-130` 在响应模型里，字段一路都在。
+ * - 前端却在 `23bdcc2`（完善多模型生成与知识库资料治理）之后停止渲染它——
+ *   `classification_failure_code` / `classification_failure_reason` 现在只剩
+ *   `types.ts:31-32` 的类型声明，任何组件都不再读它们。
+ *
+ * 所以用户看到的只有一个「分类失败」徽章，看不到为什么失败。这与 CLAUDE.md 第一条
+ * （失败/禁用必须说得出为什么）相冲突；CLAUDE.md 第三条本身就是为这个字段写的
+ * ——那次是写入了但读取路径漏挑，这次是接口返回了但前端不渲染。
+ *
+ * 修法在 `DocumentPanel` 的分类列（或详情弹层）里把 reason 显示出来，不是改这里。
+ */
 test("分类失败展示原因并提供重新分类入口", async () => {
   const failed = {
     ...document, document_id: "doc_3", filename: "broken.md",
@@ -569,7 +658,10 @@ test("分类失败展示原因并提供重新分类入口", async () => {
 
   const row = (await screen.findByText("broken.md")).closest("tr") as HTMLElement;
   expect(within(row).getByText(/分类失败/)).toBeTruthy();
-  expect(within(row).getByText(/模型 30 秒未响应/)).toBeTruthy();
+  // 原因挂在 ⓘ 的 Tooltip 上（与 ui/Button 的 blockedReason 同一套模式），
+  // Radix 的 Tooltip 内容不悬停时不在 DOM，所以要先 hover——测法同 Button.test.tsx:89。
+  await userEvent.hover(within(row).getByRole("button", { name: "broken.md 的分类失败原因" }));
+  expect((await screen.findAllByText(/模型 30 秒未响应/)).length).toBeGreaterThan(0);
 
   await userEvent.click(within(row).getByRole("button", { name: "重新分类" }));
 
@@ -598,8 +690,11 @@ test("资料筛选可以单独筛出无分类与分类失败", async () => {
   await screen.findByText("draft.md");
   await userEvent.selectOptions(screen.getByLabelText("分类筛选"), "__uncategorized__");
 
-  expect(screen.queryByText("profile.md")).toBeNull();
-  expect(screen.getByText("draft.md")).toBeTruthy();
+  // 断言范围限定在「资料」表内。同一个 Tab 下方还有「全部资料版本」表，它有意不跟随
+  // 这个筛选（标题与副标题就是它的可见说明），整页 queryByText 会把它的行也算进来。
+  const documentsTable = screen.getByRole("table", { name: "资料列表" });
+  expect(within(documentsTable).queryByText("profile.md")).toBeNull();
+  expect(within(documentsTable).getByText("draft.md")).toBeTruthy();
 });
 
 test("分类字典为空时给出明确空态而不是凭空造一个分类", async () => {
@@ -659,8 +754,9 @@ test("问答工作台使用所选知识库接口并渲染来源", async () => {
   expect(screen.getByText("可控查询扩展 · 2 路查询")).toBeInTheDocument();
   expect(screen.getByLabelText("实际生效的过滤条件")).toHaveTextContent("分类：安全标签：ACL来源：文件");
   expect(screen.getByText("候选：召回 8 / 融合 5 / 返回 1 · 过滤命中 5")).toBeInTheDocument();
-  expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/query", expect.objectContaining({ method: "POST" }));
-  const queryCall = fetchMock.mock.calls.find(([url]) => String(url) === "/api/knowledge-bases/kb_default/query");
+  // 问答工作台走的是流式那条（api.ts:308），不是非流式 /query。
+  expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/query/stream", expect.objectContaining({ method: "POST" }));
+  const queryCall = fetchMock.mock.calls.find(([url]) => String(url) === "/api/knowledge-bases/kb_default/query/stream");
   expect(JSON.parse(String(queryCall?.[1]?.body))).toMatchObject({ filters: { category_ids: ["cat_1234567890abcdef"], tags: ["ACL"], source_types: ["file"] } });
 });
 
@@ -680,13 +776,15 @@ test("可信引用可以在局部弹窗定位到原文", async () => {
 
 test("证据不足状态说明不会把降级结果伪装成答案", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
-    if (String(input) === "/api/knowledge-bases/kb_default/query") {
-      return commonFetch(input, init).then(async (response) => json({
-        ...await response.json(),
+    // 拦流式那条：工作台已不走非流式 /query（api.ts:308）。
+    if (String(input) === "/api/knowledge-bases/kb_default/query/stream") {
+      const degraded = {
+        ...QUERY_RESULT,
         answer: "当前资料不足以支持确定回答。",
         answer_status: "insufficient_evidence",
         sources: [],
-      }));
+      };
+      return Promise.resolve(sse([{ event: "final", data: degraded }]));
     }
     return commonFetch(input, init);
   });

@@ -228,9 +228,9 @@ export function IndexVersionCreationWizard({
           <p className="m-0 text-base font-medium text-ink">预计处理 {preview.estimated_documents} 份资料</p>
           <p className="m-0 text-ink-muted">约 {preview.estimated_chunks.toLocaleString("zh-CN")} 个 Chunks · {preview.estimated_embedding_units.toLocaleString("zh-CN")} 字节输入规模（估算，不含模型单价）</p>
           <p className="m-0 text-ink-muted">全局构建容量：{preview.build_capacity.active_builds}/{preview.build_capacity.max_concurrent_builds} 使用中 · 单次最多 {preview.build_capacity.max_documents.toLocaleString("zh-CN")} 份资料</p>
-          <p className="m-0 text-ink-muted">构建写入候选 Version，不影响当前 active 检索；三层验证通过后仍需人工激活。</p>
+          <p className="m-0 text-ink-muted">构建产出的是候选版本，不影响当前线上检索；三层发布验证通过后仍需手动激活。</p>
           <div className="rounded-md border border-warning/30 bg-warning/10 p-3 text-warning">
-            Snapshot 冻结本次全量构建输入。日常数据同步仍会继续更新 active，回滚时应核对内容时间点。
+            本次构建使用的是当前这一刻的资料快照。之后的数据同步仍会继续更新线上索引，所以回滚到这个版本时要核对它对应的内容时间点。
           </div>
           {preview.config_diff.length ? (
             <ul className="m-0 grid gap-2 p-0">

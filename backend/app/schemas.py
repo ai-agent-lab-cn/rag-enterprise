@@ -649,6 +649,10 @@ class Source(BaseModel):
     query_match_count: int = Field(default=1, ge=1)
     document_version_id: str | None = None
     content_sha256: str | None = None
+    # 会话记录里的引用原文按当前 ACL 遮蔽时置 true，text 同时被清空。
+    # 需要显式声明而不是靠 extra：前端要能区分「被遮蔽」与「原文本来就是空的」，
+    # 否则历史会话看起来像记录损坏。见 main.py 的 _redact_unreadable_sources。
+    redacted: bool = False
     heading_path: list[str] = Field(default_factory=list)
     sheet_name: str | None = None
     row_start: int | None = None

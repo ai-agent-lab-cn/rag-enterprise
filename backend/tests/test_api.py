@@ -5,6 +5,7 @@ from backend.app.config import get_settings
 from backend.app.errors import AppError
 from backend.app.main import _data_source_response, get_data_sources, get_service
 from backend.app.models import get_generator
+from backend.app.schemas import DocumentInfo
 
 
 class _DataSourcesStub:
@@ -544,3 +545,68 @@ def test_activate_uses_the_version_bound_report_without_request_body(
     assert response.status_code == 200
     assert response.json()["validation_report_id"] == "vr_bound"
     assert calls == [(repository.database_url, "iv_ready")]
+
+
+def test_document_listing_filters_by_acl_for_members_but_not_admins(
+    client, fake_service
+) -> None:
+    """资料清单对普通成员按 ACL 过滤，对管理员不过滤。
+
+    此前这个接口只校验知识库可访问，一条 ACL 判据都没有：被 deny 的成员照样拿到整份
+    清单，而 DocumentInfo 带着 filename、owner_user_id、department、sensitivity，
+    以及 allow_user_ids / deny_user_ids 本身——授权名单原样外泄。
+
+    管理员必须**不**过滤：ACL 管理入口就在这份清单上，过滤掉的话一份被 deny 到没人
+    可见的资料就再也改不回来了。
+
+    直接往替身里放两份文档，不走上传接口——FakeService.index_document 给所有文档写死
+    document_id="doc_test"，两次上传会互相覆盖。
+    """
+
+    member = client.post(
+        "/api/members",
+        json={
+            "username": "plain-member",
+            "password": "correct-horse-battery-staple",
+            "display_name": "普通成员",
+            "role": "member",
+        },
+    )
+    assert member.status_code == 201
+    member_id = member.json()["user_id"]
+
+    # 泄漏的前提正是「已授权访问知识库、但个别资料被 deny」。
+    assert client.put(f"/api/knowledge-bases/kb_default/members/{member_id}").status_code == 204
+
+    fake_service.documents["kb_default"] = {
+        "doc_public": DocumentInfo(
+            document_id="doc_public", filename="public.md", chunk_count=2
+        ),
+        "doc_secret": DocumentInfo(
+            document_id="doc_secret",
+            filename="secret.md",
+            chunk_count=2,
+            allow_user_ids=["usr_0123456789abcdef"],
+            deny_user_ids=[member_id],
+            sensitivity="restricted",
+        ),
+    }
+
+    token = client.post(
+        "/api/auth/login",
+        json={"username": "plain-member", "password": "correct-horse-battery-staple"},
+    )
+    assert token.status_code == 200
+
+    as_member = client.get(
+        "/api/knowledge-bases/kb_default/documents",
+        headers={"Authorization": f"Bearer {token.json()['access_token']}"},
+    )
+    assert as_member.status_code == 200
+    member_names = {item["filename"] for item in as_member.json()}
+    assert member_names == {"public.md"}, f"被 deny 的成员拿到了受限资料的清单：{member_names}"
+
+    admin_names = {
+        item["filename"] for item in client.get("/api/knowledge-bases/kb_default/documents").json()
+    }
+    assert admin_names == {"public.md", "secret.md"}, f"管理员被过滤了，没法管理 ACL：{admin_names}"

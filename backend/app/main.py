@@ -2073,7 +2073,18 @@ def create_app() -> FastAPI:
         limit: PageLimit = 50,
     ) -> list[DocumentInfo]:
         await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
-        documents = await run_in_threadpool(service.list_documents, knowledge_base_id)
+        # 普通成员按检索侧同一套 ACL 判据过滤；管理员看全量。
+        #
+        # 此前这里完全不过滤，只校验知识库可访问：被 deny 的成员照样拿到整份清单，
+        # 而 DocumentInfo 带着 filename、owner_user_id、department、sensitivity 以及
+        # allow_user_ids / deny_user_ids 本身——授权名单原样外泄。
+        #
+        # 管理员必须不过滤：ACL 管理入口就在这份清单上，过滤掉的话一份被 deny 到
+        # 没人可见的资料就再也改不回来了。
+        access = None if current.user.role == "admin" else RetrievalAccessContext(current.user.user_id)
+        documents = await run_in_threadpool(
+            service.list_documents, knowledge_base_id, access
+        )
         return _page(documents, offset, limit)
 
     @app.patch(
@@ -2689,6 +2700,7 @@ def create_app() -> FastAPI:
         conversation_id: str,
         knowledge_bases: KnowledgeBasesDependency,
         conversations: ConversationsDependency,
+        sources: DataSourcesDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
     ) -> ConversationDetailResponse:
@@ -2704,6 +2716,13 @@ def create_app() -> FastAPI:
             raise AppError("CONVERSATION_NOT_FOUND", "未找到该会话。", 404) from exc
         if item is None:
             raise AppError("CONVERSATION_NOT_FOUND", "未找到该会话。", 404)
+        await run_in_threadpool(
+            _redact_unreadable_sources,
+            item.get("records") or [],
+            knowledge_base_id,
+            current.user.user_id,
+            sources,
+        )
         return ConversationDetailResponse(**item)
 
     @app.delete(
@@ -2740,6 +2759,7 @@ def create_app() -> FastAPI:
         record_id: str,
         knowledge_bases: KnowledgeBasesDependency,
         conversations: ConversationsDependency,
+        sources: DataSourcesDependency,
         current: CurrentSessionDependency,
         auth: AuthRepositoryDependency,
     ) -> AnswerRecordResponse:
@@ -2755,6 +2775,9 @@ def create_app() -> FastAPI:
             raise AppError("ANSWER_RECORD_NOT_FOUND", "未找到该回答记录。", 404) from exc
         if item is None:
             raise AppError("ANSWER_RECORD_NOT_FOUND", "未找到该回答记录。", 404)
+        await run_in_threadpool(
+            _redact_unreadable_sources, [item], knowledge_base_id, current.user.user_id, sources
+        )
         return AnswerRecordResponse(**item)
 
     return app
@@ -2819,6 +2842,46 @@ def _client_key(request: Request) -> str:
 
 def _page[T](items: list[T], offset: int, limit: int) -> list[T]:
     return items[offset : offset + limit]
+
+
+def _redact_unreadable_sources(
+    records: list[dict[str, object]],
+    knowledge_base_id: str,
+    user_id: str,
+    sources: object,
+) -> None:
+    """按**当前** ACL 遮蔽会话记录里已不可读的引用原文。就地修改 records。
+
+    Source.text 是提问那一刻的原文快照，整份存进了会话文件；而会话读取只校验归属
+    （history.py 的 _owned_by），不复查 ACL。于是提问时能看的资料，事后被移出 allow
+    名单、下架或删除之后，历史会话里那段原文仍可无限期读取——检索侧的收紧对已生成的
+    记录完全无效。
+
+    只遮蔽 ``text``，保留 filename / 定位信息与分数：用户需要知道「当时引用过这份资料」，
+    否则历史会话会变成一段没有出处的答案，看起来像记录损坏。这也是为什么不整条删掉。
+
+    ``sources`` 为 None（非 PostgreSQL 运行时）时不遮蔽——那种部署没有 ACL 数据可查，
+    静默放行比静默清空更可预期。
+    """
+
+    if sources is None:
+        return
+    chunk_ids = [
+        str(item["chunk_id"])
+        for record in records
+        for item in (record.get("sources") or [])
+        if isinstance(item, dict) and item.get("chunk_id")
+    ]
+    if not chunk_ids:
+        return
+    readable = sources.readable_chunk_ids(knowledge_base_id, chunk_ids, user_id)
+    for record in records:
+        for item in record.get("sources") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("chunk_id")) not in readable:
+                item["text"] = ""
+                item["redacted"] = True
 
 
 def _require_admin(user: UserRecord) -> None:

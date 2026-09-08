@@ -1123,6 +1123,49 @@ def test_a_long_running_sync_keeps_its_lease(tmp_path: Path, monkeypatch: pytest
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_recovering_a_stale_sync_also_releases_its_sync_run(tmp_path: Path) -> None:
+    """回收僵死的同步任务时必须连 sync_runs 一起拉回队列。
+
+    worker 被 SIGKILL 时留下 index_jobs.status='running' 与 sync_runs.status='syncing'。
+    只把 index_job 改回 queued 是不够的：下一次 run_sync 开头的 _ensure_sync_active
+    读到 sync_runs 仍是活动状态就直接抛 SYNC_CANCELLED，任务立刻被打死，等于没回收；
+    而 sync_runs_one_active_source_idx 仍占着，管理员再点「立即同步」还是 409。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "a.md").write_text("资料", encoding="utf-8")
+    settings = _settings(tmp_path, database_url)
+    source_id = _create_directory_source(database_url, root)
+    enqueue_sync(database_url, source_id)
+
+    # 模拟 worker 领了任务然后被 SIGKILL：两张表都停在活动状态，租约已过期。
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """UPDATE index_jobs SET status='running', locked_by='dead-worker',
+                      locked_at = now() - interval '2 hours'
+               WHERE job_type='sync'"""
+        )
+        connection.execute("UPDATE sync_runs SET status='syncing'")
+
+    assert IndexWorker(settings, _FakeEmbedder()).recover_stale_jobs() == 1
+
+    with psycopg.connect(database_url) as connection:
+        job_status = connection.execute(
+            "SELECT status FROM index_jobs WHERE job_type='sync'"
+        ).fetchone()[0]
+        run_status = connection.execute("SELECT status FROM sync_runs").fetchone()[0]
+
+    assert job_status == "queued", f"index_job 没回队：{job_status}"
+    assert run_status == "queued", (
+        f"sync_run 仍是 {run_status}——下一次 run_sync 会被 _ensure_sync_active 判成"
+        "已取消并立刻失败，且唯一索引仍占着，新同步永远 409"
+    )
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
 def test_keys_differing_only_in_case_do_not_silently_share_one_document(
     tmp_path: Path,
 ) -> None:
@@ -1356,3 +1399,222 @@ def test_sync_status_mapping_covers_every_domain() -> None:
                 f"{status} 映射到 {target} 得到 {mapped!r}，不在该表的取值域里："
                 f"写入会违反 CHECK，聚合事务整体回滚"
             )
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_sync_does_not_undo_a_manual_takedown(tmp_path: Path) -> None:
+    """同步不得撤销管理员的人工下架。
+
+    「源文件不能删（别的系统还在用），但要立刻停止被检索」是产品提供的能力：
+    PATCH /documents/{id}/metadata 把 retrieval_status 置为 deleted。
+
+    而 _reconcile_present 原先把「所有在源对象」无条件刷回 searchable——于是任何一次
+    同步（哪怕零变化）都会把这份资料重新放进检索，页面上没有任何提示。再设一次、
+    再同步一次，又回来。
+
+    墓碑是「被本流程软删过」的唯一凭据：只有它能区分「同步删掉后又回来了，该恢复」
+    与「人工下架，不该碰」。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "compliance.md").write_text("# 合规\n\n合规文件正文。" * 20, encoding="utf-8")
+    source_id = _create_directory_source(database_url, root)
+    settings = _settings(tmp_path, database_url)
+
+    _run_full_sync(settings, database_url, source_id)
+    assert _searchable_count(database_url) == 1
+
+    # 人工下架：源文件保持不动
+    service = PostgresAsyncRAGService(settings, _FakeEmbedder(), None, None)
+    with psycopg.connect(database_url) as connection:
+        document_id = connection.execute("SELECT document_id FROM documents").fetchone()[0]
+    assert service.update_document_metadata(
+        document_id, {"retrieval_status": "deleted"}, knowledge_base_id=KNOWLEDGE_BASE_ID
+    ) is True
+    assert _searchable_count(database_url) == 0, "前置条件：人工下架已生效"
+
+    # 零变化的一次同步
+    _run_full_sync(settings, database_url, source_id)
+
+    assert _searchable_count(database_url) == 0, (
+        "同步把人工下架的资料刷回了 searchable——管理员设一次、同步撤一次，"
+        "而页面上没有任何提示"
+    )
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_sync_restores_an_object_that_came_back(tmp_path: Path) -> None:
+    """被同步软删过的对象重新出现时仍要恢复可检索——收窄恢复集不能把这条弄丢。"""
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    root = tmp_path / "docs"
+    root.mkdir()
+    target = root / "seasonal.md"
+    body = "# 季度\n\n季度报告正文。" * 20
+    target.write_text(body, encoding="utf-8")
+    source_id = _create_directory_source(database_url, root)
+    settings = _settings(tmp_path, database_url)
+
+    _run_full_sync(settings, database_url, source_id)
+    assert _searchable_count(database_url) == 1
+
+    # 远端删掉 → 同步软删并立墓碑
+    target.unlink()
+    _run_full_sync(settings, database_url, source_id)
+    assert _searchable_count(database_url) == 0
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT count(*) FROM data_source_tombstones").fetchone()[0] == 1
+
+    # 原样放回去 → 同步必须把它恢复成可检索
+    target.write_text(body, encoding="utf-8")
+    _run_full_sync(settings, database_url, source_id)
+
+    assert _searchable_count(database_url) == 1, "对象回来了却没恢复可检索"
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT count(*) FROM data_source_tombstones").fetchone()[0] == 0, (
+            "对象回来了，墓碑该撤掉"
+        )
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_a_failed_object_is_refetched_after_the_source_file_is_fixed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上次索引失败的对象，源文件改好之后必须重新拉取，不能继续重试旧字节。
+
+    retry 与 updated 在 _plan 里互斥，而 retry 的判据原先只看「有记录且当前版本未
+    ready」，完全不看 version 是否变化。于是业务方按提示把损坏的源文件修好之后：
+    该键仍然只进 retry，而 _process_retries 从头到尾不调用 connector.fetch，
+    _retry_object 挑出的是承载**旧内容**的那个失败版本。data_source_objects.version
+    也不会更新（只有 _process_object 会写），于是「修源文件 + 重跑同步」这个恢复动作
+    被静默无效化——页面上永远显示「重试过、又失败了」。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    root = tmp_path / "docs"
+    root.mkdir()
+    target = root / "report.md"
+    target.write_text("# 报告\n\n" + "会失败的正文。" * 20, encoding="utf-8")
+    source_id = _create_directory_source(database_url, root)
+    settings = _settings(tmp_path, database_url).model_copy(
+        update={"index_job_max_attempts": 1}
+    )
+
+    # 第一次同步：让它索引失败，制造「有记录、当前版本未 ready」
+    enqueue_sync(database_url, source_id)
+    _drain_with(settings, _FailOnKeyEmbedder("会失败"))
+    assert _count(
+        database_url, "SELECT count(*) FROM document_versions WHERE status='failed'"
+    ) == 1, "前置条件：索引确实失败了"
+    with psycopg.connect(database_url) as connection:
+        old_version = str(
+            connection.execute(
+                "SELECT version FROM data_source_objects WHERE data_source_id = %s", (source_id,)
+            ).fetchone()[0]
+        )
+
+    # 业务方把源文件修好：内容变了，哈希也变了，而且不再触发失败
+    target.write_text("# 报告\n\n" + "修好之后的正文。" * 20, encoding="utf-8")
+
+    fetched: list[str] = []
+    real_fetch = LocalDirectoryConnector.fetch
+
+    def tracking_fetch(self, key: str) -> bytes:
+        fetched.append(key)
+        return real_fetch(self, key)
+
+    monkeypatch.setattr(LocalDirectoryConnector, "fetch", tracking_fetch)
+    _run_full_sync(settings, database_url, source_id)
+    monkeypatch.undo()
+
+    assert fetched == ["report.md"], (
+        f"源文件已改但同步没有重新拉取（fetch 调用：{fetched}）——"
+        "它被判成 retry 而不是 updated，于是一直在重试旧字节"
+    )
+    with psycopg.connect(database_url) as connection:
+        new_version = str(
+            connection.execute(
+                "SELECT version FROM data_source_objects WHERE data_source_id = %s", (source_id,)
+            ).fetchone()[0]
+        )
+    assert new_version != old_version, "对象记录的 version 没更新，下次同步还会重判一遍"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_deleting_a_synced_document_keeps_its_data_source(tmp_path: Path) -> None:
+    """删除同步来的资料不能顺带删掉它所属的数据源。
+
+    delete_document 末尾无条件 `DELETE FROM data_sources WHERE data_source_id = ...`。
+    这对**上传**场景是对的：上传会按文件名自建一个 source_type='file' 的伪数据源，
+    一份资料独占一个，删资料时清掉它是应有的收尾。
+
+    但同步来的资料挂在真实数据源上（local_directory / object_storage），而接口层
+    不区分来源。于是：
+    - 该数据源下还有别的资料时，documents 的 ON DELETE RESTRICT 会拒绝，
+      整个删除事务回滚——用户点删除只看到一个外键错误
+    - 它是最后一份时，数据源连同配置、同步游标、墓碑一起消失，
+      而用户以为自己只删了一份资料
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "keep.md").write_text("# 留下\n\n保留的正文。" * 20, encoding="utf-8")
+    (root / "drop.md").write_text("# 删除\n\n要删的正文。" * 20, encoding="utf-8")
+    source_id = _create_directory_source(database_url, root)
+    settings = _settings(tmp_path, database_url)
+    _run_full_sync(settings, database_url, source_id)
+    assert _document_count(database_url) == 2
+
+    service = PostgresAsyncRAGService(settings, _FakeEmbedder(), None, None)
+    with psycopg.connect(database_url) as connection:
+        drop_id = connection.execute(
+            "SELECT document_id FROM documents WHERE filename = 'drop.md'"
+        ).fetchone()[0]
+
+    assert service.delete_document(drop_id, knowledge_base_id=KNOWLEDGE_BASE_ID) is True
+
+    with psycopg.connect(database_url) as connection:
+        remaining = connection.execute("SELECT count(*) FROM documents").fetchone()[0]
+        source_alive = connection.execute(
+            "SELECT count(*) FROM data_sources WHERE data_source_id = %s", (source_id,)
+        ).fetchone()[0]
+
+    assert remaining == 1, f"另一份资料受了牵连：剩余 {remaining}"
+    assert source_alive == 1, "同步数据源被顺带删掉了——配置、同步游标与墓碑一起消失"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_deleting_the_last_synced_document_still_keeps_the_source(tmp_path: Path) -> None:
+    """删掉同步数据源下最后一份资料时，数据源仍要保留。
+
+    这是上一条的边界：RESTRICT 拦不住这种情况（没有别的 documents 引用它了），
+    于是数据源被真的删掉，用户完全看不出自己顺带删了一份数据源配置。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "only.md").write_text("# 唯一\n\n唯一的正文。" * 20, encoding="utf-8")
+    source_id = _create_directory_source(database_url, root)
+    settings = _settings(tmp_path, database_url)
+    _run_full_sync(settings, database_url, source_id)
+
+    service = PostgresAsyncRAGService(settings, _FakeEmbedder(), None, None)
+    with psycopg.connect(database_url) as connection:
+        only_id = connection.execute("SELECT document_id FROM documents").fetchone()[0]
+
+    assert service.delete_document(only_id, knowledge_base_id=KNOWLEDGE_BASE_ID) is True
+
+    with psycopg.connect(database_url) as connection:
+        source_alive = connection.execute(
+            "SELECT count(*) FROM data_sources WHERE data_source_id = %s", (source_id,)
+        ).fetchone()[0]
+    assert source_alive == 1, "同步数据源被顺带删掉了，而用户只是删了一份资料"

@@ -10,6 +10,7 @@ import { BadCasePage } from "./components/BadCasePage";
 import { EvaluationCenterPage } from "./components/EvaluationCenterPage";
 import { DataSourcesPage } from "./components/DataSourcesPage";
 import { KnowledgeBaseDetailPage } from "./components/KnowledgeBaseDetailPage";
+import { IndexVersionDetailPage } from "./components/IndexVersionDetailPage";
 import { KnowledgeBasesPage } from "./components/KnowledgeBasesPage";
 import { MembersPage } from "./components/MembersPage";
 import { ModelSwitcher } from "./components/ModelSwitcher";
@@ -110,6 +111,9 @@ export default function App() {
     body = <AuthGate checking={auth.checking} bootstrapRequired={auth.bootstrapRequired} onAuthenticated={(user) => setAuth({ checking: false, bootstrapRequired: false, user })} />;
   } else {
     const detailMatch = pathname.match(/^\/knowledge-bases\/([^/]+)$/);
+    // 索引版本详情是独立页面而不是弹层（实施计划 Step 6）：它装五块内容，
+    // 弹层放不下；独立 URL 还让「这个版本为什么没发布」可以被链接分享。
+    const versionMatch = pathname.match(/^\/knowledge-bases\/([^/]+)\/index-versions\/([^/]+)$/);
     const conversationMatch = pathname.match(/^\/chat\/(conv_[a-f0-9]{16})$/);
     const adminPath = pathname === "/system" || pathname.startsWith("/settings/");
     let content;
@@ -117,6 +121,7 @@ export default function App() {
     else if (pathname === "/system") content = <SystemPage />;
     else if (pathname === "/settings/members") content = <MembersPage currentUser={auth.user} />;
     else if (pathname === "/settings/audit") content = <AuditPage />;
+    else if (versionMatch) content = <IndexVersionDetailPage knowledgeBaseId={versionMatch[1]} versionId={versionMatch[2]} onOpen={navigate} />;
     else if (detailMatch) content = <KnowledgeBaseDetailPage id={detailMatch[1]} onOpen={navigate} />;
     else if (pathname === "/knowledge-bases") content = <KnowledgeBasesPage isAdmin={auth.user.role === "admin"} onOpen={navigate} showCreate={showKnowledgeBaseCreate} onCloseCreate={() => setShowKnowledgeBaseCreate(false)} />;
     else if (pathname === "/data-sources") content = <DataSourcesPage onOpen={navigate} />;

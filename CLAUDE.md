@@ -148,9 +148,8 @@
 
 ## 八、视觉基线
 
-`frontend/e2e/visual-baseline.spec.ts` 覆盖 22 个页面状态，**不进 CI**——截图绑定数据集，
-放进 CI 只会因数据漂移天天误报。它是迁移期工具：改样式前后各跑一次，让每处像素变化都
-必须被显式接受。
+`frontend/e2e/visual-baseline.spec.ts` 覆盖 21 个页面状态，**不进 CI**——截图绑定数据集，
+放进 CI 只会因数据漂移天天误报。它是迁移期工具：改样式前后各跑一次。
 
 ```bash
 cd frontend

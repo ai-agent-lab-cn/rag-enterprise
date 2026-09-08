@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from backend.app.config import Settings
 from backend.app.data_source_sync import (
@@ -307,3 +308,337 @@ def test_soft_delete_survives_index_version_rollback(tmp_path: Path) -> None:
     _simulate_rollback(database_url, previous_version_id, active_version_id)
 
     assert service.retrieve_candidates("备份根目录", [0.1, 0.2, 0.3], 5, KNOWLEDGE_BASE_ID) == []
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_reindexing_a_document_preserves_manual_acl(tmp_path: Path) -> None:
+    """重新索引同一份资料不能抹掉手工设的 ACL。
+
+    ACL 就存在 ``documents.metadata`` 里（``update_document_acl`` 写
+    ``metadata = metadata || {acl_version, allow_user_ids, deny_user_ids}``）。
+    而 ``index_document`` 的 upsert 曾经是 ``DO UPDATE SET metadata = EXCLUDED.metadata``
+    ——**替换而不是合并**，于是同步更新一个对象、或者重新上传同名文件，都会把
+    allow_user_ids 清空；检索侧把空 allow 列表判为「不限人」，一份限定给某人的资料
+    就此对全知识库可见。
+
+    这条同时守住 retrieval_status：人工下架（置 deleted）也存在同一份 metadata 里，
+    被替换掉就等于悄悄恢复上架。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    settings = _settings(tmp_path, database_url)
+    service = PostgresAsyncRAGService(settings, _FakeEmbedder(), None, None)
+
+    indexed = service.index_document("payroll.md", DOCUMENT_TEXT.encode(), KNOWLEDGE_BASE_ID)
+    assert IndexWorker(settings, _FakeEmbedder()).run_once() is True
+
+    assert service.update_document_acl(
+        indexed.document_id, [USER], [OTHER], knowledge_base_id=KNOWLEDGE_BASE_ID
+    ) is not None
+    assert service.update_document_metadata(
+        indexed.document_id, {"retrieval_status": "deleted"}, knowledge_base_id=KNOWLEDGE_BASE_ID
+    ) is True
+
+    def governance() -> dict[str, object]:
+        with psycopg.connect(database_url) as connection:
+            row = connection.execute(
+                "SELECT metadata FROM documents WHERE knowledge_base_id = %s AND document_id = %s",
+                (KNOWLEDGE_BASE_ID, indexed.document_id),
+            ).fetchone()
+        data = dict(row[0] or {})
+        return {key: data.get(key) for key in ("acl_version", "allow_user_ids", "deny_user_ids", "retrieval_status")}
+
+    before = governance()
+    assert before["allow_user_ids"] == [USER], "前置条件：ACL 已写入"
+    assert before["retrieval_status"] == "deleted", "前置条件：已人工下架"
+
+    # 同名文件重新上传一次（走 index_document 的 upsert 分支）
+    service.index_document("payroll.md", (DOCUMENT_TEXT + "\n\n新增一段。").encode(), KNOWLEDGE_BASE_ID)
+
+    after = governance()
+    assert after["allow_user_ids"] == [USER], f"重新索引抹掉了 allow_user_ids：{after}"
+    assert after["deny_user_ids"] == [OTHER], f"重新索引抹掉了 deny_user_ids：{after}"
+    assert after["acl_version"] == before["acl_version"], f"重新索引重置了 acl_version：{after}"
+    assert after["retrieval_status"] == "deleted", f"重新索引把人工下架恢复成上架：{after}"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_chunks_written_by_a_worker_pick_up_governance_changes(tmp_path: Path) -> None:
+    """索引任务写分块时必须用库里当下的治理状态，不能用任务启动时的快照。
+
+    索引任务在开头一次性读走 ``d.metadata AS document_metadata``，算完 embedding 才
+    DELETE+INSERT 分块。这中间可能几十分钟（大文件解析 + 向量化），而这期间管理员
+    完全可能收紧 ACL 或把资料下架，或者一次同步把远端已删的对象软删掉。
+
+    软删除/撤权走的是 ``UPDATE chunks ... WHERE document_version_id = current_version_id``
+    ——只作用于**已存在**的行。所以在这个窗口里它有两种死法：打不到还没写入的行，
+    或者打到了也被随后的 INSERT 用旧快照覆盖。两种都会让分块带着过期的宽松 ACL /
+    searchable 状态上线，而检索侧只看分块（见本文件其它用例），不校验 documents。
+
+    这里用「任务已入队、worker 还没跑」来站在那个窗口里：入队时 metadata 是宽松的，
+    worker 跑之前把它收紧，跑完之后分块必须是收紧后的样子。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    settings = _settings(tmp_path, database_url)
+    service = PostgresAsyncRAGService(settings, _FakeEmbedder(), None, None)
+
+    # 入队但先不跑 worker：此刻 documents.metadata 还是宽松的（无 ACL 限制）
+    indexed = service.index_document("secret.md", DOCUMENT_TEXT.encode(), KNOWLEDGE_BASE_ID)
+
+    # 真正站进窗口：embedding 是最耗时那一步，它跑的时候快照已经读走、分块还没写。
+    # 在 encode() 里改治理状态，等价于「管理员在解析/向量化进行中收紧了权限」。
+    class _TighteningEmbedder:
+        model_name = "test/embedding"
+
+        def __init__(self) -> None:
+            self.tightened = False
+
+        def encode(self, texts: list[str]) -> list[list[float]]:
+            if not self.tightened:
+                self.tightened = True
+                assert service.update_document_acl(
+                    indexed.document_id, [USER], [], knowledge_base_id=KNOWLEDGE_BASE_ID
+                ) is not None
+                assert service.update_document_metadata(
+                    indexed.document_id,
+                    {"retrieval_status": "deleted"},
+                    knowledge_base_id=KNOWLEDGE_BASE_ID,
+                ) is True
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    embedder = _TighteningEmbedder()
+    assert IndexWorker(settings, embedder).run_once() is True
+    assert embedder.tightened, "前置条件：确实在窗口里改了治理状态"
+
+    with psycopg.connect(database_url) as connection:
+        rows = connection.execute(
+            """SELECT metadata -> 'allow_user_ids' AS allow,
+                      metadata ->> 'retrieval_status' AS status
+               FROM chunks WHERE knowledge_base_id = %s""",
+            (KNOWLEDGE_BASE_ID,),
+        ).fetchall()
+
+    assert rows, "前置条件：worker 确实写了分块"
+    for allow, status in rows:
+        assert allow == [USER], f"分块带着收紧前的宽松 ACL 上线：allow={allow}"
+        assert status == "deleted", f"分块带着下架前的 searchable 状态上线：status={status}"
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_document_listing_hides_documents_the_user_cannot_retrieve(tmp_path: Path) -> None:
+    """资料清单必须按 ACL 过滤，不能只校验知识库可访问。
+
+    检索路径有严格的 ACL 判据（can_retrieve_metadata：deny 优先、非空 allow 列表要求
+    命中、软删/过期一律排除），而清单路径 list_documents 的 WHERE 只有
+    knowledge_base_id。于是被 deny 的成员照样能拿到整份清单，而 DocumentInfo 里带着
+    filename、owner_user_id、department、sensitivity，以及 **allow_user_ids /
+    deny_user_ids 本身**——授权名单原样外泄。
+
+    「知道有这份文件、它叫什么、归谁、多敏感、谁能看」在企业场景里本身就是信息泄漏，
+    哪怕正文取不到。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    settings = _settings(tmp_path, database_url)
+    service = PostgresAsyncRAGService(settings, _FakeEmbedder(), None, None)
+
+    public = service.index_document("public.md", DOCUMENT_TEXT.encode(), KNOWLEDGE_BASE_ID)
+    secret = service.index_document("secret-payroll.md", DOCUMENT_TEXT.encode(), KNOWLEDGE_BASE_ID)
+    while IndexWorker(settings, _FakeEmbedder()).run_once():
+        pass
+
+    # 只有 USER 能看 secret；OTHER 被显式 deny
+    assert service.update_document_acl(
+        secret.document_id, [USER], [OTHER], knowledge_base_id=KNOWLEDGE_BASE_ID
+    ) is not None
+
+    names_for_user = {
+        item.filename
+        for item in service.list_documents(
+            KNOWLEDGE_BASE_ID, access=RetrievalAccessContext(USER)
+        )
+    }
+    names_for_other = {
+        item.filename
+        for item in service.list_documents(
+            KNOWLEDGE_BASE_ID, access=RetrievalAccessContext(OTHER)
+        )
+    }
+
+    assert names_for_user == {"public.md", "secret-payroll.md"}, f"授权用户看不全：{names_for_user}"
+    assert names_for_other == {"public.md"}, (
+        f"被 deny 的用户拿到了受限资料的清单：{names_for_other}"
+    )
+
+    # 管理路径（不传 access）仍要能看全，否则管理员没法管理 ACL
+    names_for_admin = {item.filename for item in service.list_documents(KNOWLEDGE_BASE_ID)}
+    assert names_for_admin == {"public.md", "secret-payroll.md"}, (
+        f"不传 access 时应当不过滤（管理视图）：{names_for_admin}"
+    )
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_document_listing_also_honours_data_source_acl(tmp_path: Path) -> None:
+    """清单过滤要用检索侧的完整判据，数据源级 ACL 同样算。
+
+    检索侧 can_retrieve_metadata 先看文档 ACL、再看 data_source_acl（deny 优先）。
+    清单侧只带文档 ACL 的话，一份「文档级没限制、但整个数据源只给某人」的资料
+    仍会出现在别人的清单里。
+
+    顺带守住一件事：data_source_acl 本身**不能出现在 API 响应里**——它是内部授权数据，
+    DocumentInfo 的 extra 策略是默认 ignore，所以 store 返回它、模型丢掉它。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    settings = _settings(tmp_path, database_url)
+    service = PostgresAsyncRAGService(settings, _FakeEmbedder(), None, None)
+
+    doc = service.index_document("dept-only.md", DOCUMENT_TEXT.encode(), KNOWLEDGE_BASE_ID)
+    while IndexWorker(settings, _FakeEmbedder()).run_once():
+        pass
+
+    # 文档级不设限，只在数据源级 deny 掉 OTHER
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """UPDATE data_sources
+               SET acl = %s
+               WHERE data_source_id = (
+                 SELECT data_source_id FROM documents WHERE document_id = %s)""",
+            (Jsonb({"version": 2, "allow_user_ids": [USER], "deny_user_ids": [OTHER]}), doc.document_id),
+        )
+
+    for_user = service.list_documents(KNOWLEDGE_BASE_ID, access=RetrievalAccessContext(USER))
+    for_other = service.list_documents(KNOWLEDGE_BASE_ID, access=RetrievalAccessContext(OTHER))
+
+    assert [item.filename for item in for_user] == ["dept-only.md"]
+    assert for_other == [], "数据源级 ACL 没生效，被 deny 的用户仍看到清单"
+
+    # 授权数据不得外泄到响应里
+    assert "data_source_acl" not in for_user[0].model_dump()
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_readable_chunk_ids_reflects_current_acl(tmp_path: Path) -> None:
+    """批量可读判定必须反映**当前**的 ACL，供会话记录里的引用原文做遮蔽。
+
+    会话记录把 Source.text（分块原文）整份存进 JSON 文件，而读取时只校验会话归属，
+    不复查 ACL。于是 A 提问时能看的资料，事后被移出 allow 名单或整份下架之后，
+    A 的历史会话里那段原文仍然可以无限期读取——检索侧的收紧对已生成的记录完全无效。
+
+    判据必须与 get_citation 同源（文档级 + 数据源级 ACL、retrieval_status、有效期、
+    只认 active 索引版本），不能在会话那边另写一套。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    settings = _settings(tmp_path, database_url)
+    service = PostgresAsyncRAGService(settings, _FakeEmbedder(), None, None)
+    sources = PostgresDataSourceRepository(database_url)
+
+    indexed = service.index_document("evidence.md", DOCUMENT_TEXT.encode(), KNOWLEDGE_BASE_ID)
+    assert IndexWorker(settings, _FakeEmbedder()).run_once() is True
+
+    with psycopg.connect(database_url) as connection:
+        chunk_ids = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT chunk_id FROM chunks WHERE knowledge_base_id = %s", (KNOWLEDGE_BASE_ID,)
+            ).fetchall()
+        ]
+    assert chunk_ids, "前置条件：分块已写入"
+
+    # 提问时两人都能看
+    assert sources.readable_chunk_ids(KNOWLEDGE_BASE_ID, chunk_ids, USER) == set(chunk_ids)
+    assert sources.readable_chunk_ids(KNOWLEDGE_BASE_ID, chunk_ids, OTHER) == set(chunk_ids)
+
+    # 事后收紧：只留 USER
+    assert service.update_document_acl(
+        indexed.document_id, [USER], [], knowledge_base_id=KNOWLEDGE_BASE_ID
+    ) is not None
+
+    assert sources.readable_chunk_ids(KNOWLEDGE_BASE_ID, chunk_ids, USER) == set(chunk_ids)
+    assert sources.readable_chunk_ids(KNOWLEDGE_BASE_ID, chunk_ids, OTHER) == set(), (
+        "撤权之后仍判为可读——历史会话里的原文会继续对他可见"
+    )
+
+    # 整份下架：连 USER 也不该再读到
+    assert service.update_document_metadata(
+        indexed.document_id, {"retrieval_status": "deleted"}, knowledge_base_id=KNOWLEDGE_BASE_ID
+    ) is True
+    assert sources.readable_chunk_ids(KNOWLEDGE_BASE_ID, chunk_ids, USER) == set()
+
+    # 空输入不该打库
+    assert sources.readable_chunk_ids(KNOWLEDGE_BASE_ID, [], USER) == set()
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_conversation_sources_are_redacted_after_access_is_revoked(tmp_path: Path) -> None:
+    """撤权后历史会话里的引用原文必须被遮蔽，但要保留「引用过这份资料」的痕迹。"""
+
+    from backend.app.history import ConversationRepository
+    from backend.app.main import _redact_unreadable_sources
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    settings = _settings(tmp_path, database_url)
+    service = PostgresAsyncRAGService(settings, _FakeEmbedder(), None, None)
+    sources = PostgresDataSourceRepository(database_url)
+
+    indexed = service.index_document("evidence.md", DOCUMENT_TEXT.encode(), KNOWLEDGE_BASE_ID)
+    assert IndexWorker(settings, _FakeEmbedder()).run_once() is True
+    with psycopg.connect(database_url) as connection:
+        chunk_id, chunk_text = connection.execute(
+            "SELECT chunk_id, content FROM chunks WHERE knowledge_base_id = %s LIMIT 1",
+            (KNOWLEDGE_BASE_ID,),
+        ).fetchone()
+
+    # 提问时把原文快照存进会话记录
+    history = ConversationRepository(tmp_path / "records.json")
+    conversation = history.resolve_conversation(KNOWLEDGE_BASE_ID, "问题", None, OTHER)
+    history.record(
+        conversation_id=conversation["conversation_id"],
+        knowledge_base_id=KNOWLEDGE_BASE_ID,
+        question="问题",
+        status="success",
+        answer="带引用的答案",
+        sources=[{"chunk_id": str(chunk_id), "filename": "evidence.md", "text": str(chunk_text)}],
+        latency_ms={"total": 1.0},
+        models={},
+        model_metadata={},
+        prompt_version="v1",
+        prompt_hash="h",
+        answer_status="answered",
+        generation_governance={},
+        query_metadata={},
+    )
+    detail = history.get_conversation(KNOWLEDGE_BASE_ID, conversation["conversation_id"], OTHER)
+    assert detail is not None
+
+    # 撤权前：原文可读，不遮蔽
+    _redact_unreadable_sources(detail["records"], KNOWLEDGE_BASE_ID, OTHER, sources)
+    assert detail["records"][0]["sources"][0]["text"] == str(chunk_text)
+    assert detail["records"][0]["sources"][0].get("redacted") is not True
+
+    # 撤权：只留 USER
+    assert service.update_document_acl(
+        indexed.document_id, [USER], [], knowledge_base_id=KNOWLEDGE_BASE_ID
+    ) is not None
+
+    detail = history.get_conversation(KNOWLEDGE_BASE_ID, conversation["conversation_id"], OTHER)
+    _redact_unreadable_sources(detail["records"], KNOWLEDGE_BASE_ID, OTHER, sources)
+    source = detail["records"][0]["sources"][0]
+    assert source["text"] == "", "撤权后历史会话仍能读到原文"
+    assert source["redacted"] is True, "前端需要能区分「被遮蔽」与「原文为空」"
+    assert source["filename"] == "evidence.md", (
+        "文件名与定位信息要保留——否则历史会话变成一段没有出处的答案，看起来像记录损坏"
+    )
+
+    # 非 PostgreSQL 运行时（sources 为 None）不遮蔽
+    detail2 = history.get_conversation(KNOWLEDGE_BASE_ID, conversation["conversation_id"], OTHER)
+    _redact_unreadable_sources(detail2["records"], KNOWLEDGE_BASE_ID, OTHER, None)
+    assert detail2["records"][0]["sources"][0]["text"] == str(chunk_text)

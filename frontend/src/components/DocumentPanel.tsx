@@ -12,6 +12,7 @@ import { PipelineStepper } from "./ui/PipelineStepper";
 import { RowAction, RowActions } from "./ui/RowActions";
 import { Select } from "./ui/Select";
 import { Toolbar } from "./ui/Toolbar";
+import { ReasonHint } from "./ui/ReasonHint";
 import { Tooltip } from "./ui/Tooltip";
 import { useConfirm } from "./ui/useConfirm";
 import { useToast } from "./ui/Toast";
@@ -242,6 +243,15 @@ export function DocumentPanel({ knowledgeBaseId, documents, versions, categories
               ? `${STATUS_LABEL.review_required} ${Math.round((document.classification_confidence || 0) * 100)}%`
               : STATUS_LABEL[document.classification_status]}
           </Badge>
+          {/* 失败原因必须看得见：一个说不出为什么的「分类失败」徽章，用户只会当成功能坏了
+              （CLAUDE.md 第一条）。后端一直在返回这两个字段
+              （postgres_documents.py:1843-1844 写、:361-365 读），是前端在 23bdcc2 之后漏了渲染。 */}
+          {document.classification_status === "failed" ? (
+            <ReasonHint
+              reason={document.classification_failure_reason || document.classification_failure_code}
+              label={`${document.filename} 的分类失败原因`}
+            />
+          ) : null}
         </div>
       ),
     },

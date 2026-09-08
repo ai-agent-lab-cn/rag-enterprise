@@ -1,9 +1,9 @@
 import json
 import re
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
-from collections.abc import Callable
 from typing import Any, Protocol
 
 from .config import Settings
@@ -86,7 +86,9 @@ class RAGServiceProtocol(Protocol):
         metadata: dict[str, object] | None = None,
     ) -> DocumentInfo: ...
     def list_documents(
-        self, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
+        self,
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        access: RetrievalAccessContext | None = None,
     ) -> list[DocumentInfo]: ...
     def delete_document(
         self, document_id: str, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
@@ -135,8 +137,26 @@ class RAGService:
     def list_documents(
         self,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        access: RetrievalAccessContext | None = None,
     ) -> list[DocumentInfo]:
-        return [DocumentInfo(**item) for item in self.store.list_documents(knowledge_base_id)]
+        """列出知识库里的资料。
+
+        ``access`` 给了就按检索侧同一套 ACL 判据过滤，用于普通成员的资料视图；
+        不给表示管理视图（管理员要能看到并管理受限资料的 ACL，否则一份被 deny 到
+        没人可见的资料就再也改不回来了）。
+
+        **过滤必须用 can_retrieve_metadata，不能在这里另写一套。** 清单与检索对
+        「谁能看见这份资料」给出不同答案，本身就是漏洞：此前清单侧一条 ACL 判据都没有，
+        被 deny 的成员照样拿到整份清单，而 DocumentInfo 里带着 filename、
+        owner_user_id、department、sensitivity，以及 allow_user_ids / deny_user_ids
+        本身——授权名单原样外泄。「知道有这份文件、它叫什么、归谁、多敏感、谁能看」
+        在企业场景里就是泄漏，哪怕正文取不到。
+        """
+
+        items = self.store.list_documents(knowledge_base_id)
+        if access is not None:
+            items = [item for item in items if can_retrieve_metadata(item, access)]
+        return [DocumentInfo(**item) for item in items]
 
     def delete_document(
         self,

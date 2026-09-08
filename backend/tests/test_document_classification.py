@@ -281,6 +281,57 @@ def test_classification_failure_keeps_document_searchable(tmp_path: Path) -> Non
 
 
 @requires_postgres
+def test_classification_outage_does_not_fail_the_index_job(tmp_path: Path) -> None:
+    """首次上传时分类模型不可用，不得把整份资料标成解析失败。
+
+    上一条测的是 classify 任务，那条路径本来就与正文无关。首次索引走的是 index 任务，
+    分类跑在解析与切分之间：``_classify`` 抛出的 ``_RetryableClassification`` 会一路
+    冒到 ``run_once``，整个 index 任务连带重试——重新解析、重新切分、重新 Embedding
+    各付三遍代价——次数耗光后资料被标成 ``failed`` 且 ``parse_failure_code``
+    记成 ``PARSER_FAILED``。解析明明成功了，页面上却显示解析失败。
+
+    企业里这不是抖动而是常态：分类模型是外部服务，它挂半小时，这半小时上传的资料
+    全部变成「解析失败」，而运维照着这个原因去查解析器，永远查不到。
+    """
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    settings = _settings(tmp_path, database_url)
+    categories = PostgresCategoryRepository(database_url)
+    categories.create(KNOWLEDGE_BASE_ID, "运维文档", "", 100)
+
+    service = PostgresAsyncRAGService(settings, _FakeEmbedder(), None, None)
+    document = service.index_document(
+        "guide.md", ("# 指南\n\n正文段落。" * 20).encode(), KNOWLEDGE_BASE_ID
+    )
+    generator = _Generator(TimeoutError("30s"))
+    _drain(settings, generator)
+
+    with psycopg.connect(database_url) as connection:
+        status, parse_failure_code, chunk_count = connection.execute(
+            """SELECT v.status, v.parse_failure_code,
+                      (SELECT count(*) FROM chunks c
+                       WHERE c.document_version_id = v.document_version_id)
+               FROM document_versions v WHERE v.document_id = %s""",
+            (document.document_id,),
+        ).fetchone()
+    assert status == "ready", "解析、切分、Embedding 都成功了，版本必须是 ready"
+    assert parse_failure_code is None, "解析没有失败，不得记 PARSER_FAILED"
+    assert chunk_count > 0, "分块必须写进去"
+
+    assert [job["status"] for job in _jobs(database_url, "index")] == ["succeeded"]
+    assert generator.calls == 1, "分类失败只该重试分类，不得连带整个索引重跑"
+
+    retries = _jobs(database_url, "classify")
+    assert len(retries) == 1, "分类要靠独立的 classify 任务重试"
+    assert retries[0]["due"] > datetime.now(UTC), "重试要退避，不能立刻撞上同一个故障"
+
+    metadata = _document_metadata(database_url, document.document_id)
+    assert metadata["classification_failure_code"] == "MODEL_TIMEOUT"
+    assert metadata["classification_retry_count"] == 1
+
+
+@requires_postgres
 def test_deleting_a_category_releases_its_documents(tmp_path: Path) -> None:
     """删掉分类不删掉资料：被引用的资料退回「没有分类」，仍然可检索。
 

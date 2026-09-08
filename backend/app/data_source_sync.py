@@ -618,12 +618,29 @@ def _plan(context: SyncContext, discovery: Discovery) -> SyncPlan:
     # 分四类而不是三类。多出来的 retry 是「有记录但当前版本没到 ready」——解析或嵌入
     # 失败过的对象。它们不能当新增处理：index_document 查到相同 content_sha256 的既有
     # 版本会幂等短路，不会重新入队，于是文档永远停在 failed 而同步毫无反应。
+    #
+    # **retry 必须同时要求远端内容没变。** 判据原先只看「有记录且未 ready」，于是业务方
+    # 按提示把损坏的源文件修好之后，该键仍然只进 retry；而 _process_retries 从头到尾
+    # 不调用 connector.fetch，_retry_object 挑出的是承载旧内容的那个失败版本，
+    # data_source_objects.version 也不会更新（只有 _process_object 会写）。
+    # 结果是「修源文件 + 重跑同步」这个恢复动作被静默无效化，页面上永远显示
+    # 「重试过、又失败了」。内容已经变了的一律走 updated 的完整 fetch → index_document
+    # 路径——那条路径本来就能处理「旧版本是 failed」的情况。
     added = [item for item in discovery.remote if item.key not in known]
-    retry = [item for item in discovery.remote if item.key in known and item.key not in indexed]
+    retry = [
+        item
+        for item in discovery.remote
+        if item.key in known
+        and item.key not in indexed
+        and str(known[item.key]["version"]) == item.version
+    ]
+    retry_keys = {item.key for item in retry}
     updated = [
         item
         for item in discovery.remote
-        if item.key in indexed and str(indexed[item.key]["version"]) != item.version
+        if item.key in known
+        and item.key not in retry_keys
+        and str(known[item.key]["version"]) != item.version
     ]
     deleted = sorted(
         key for key in known if key not in remote_keys and key not in skipped_keys
@@ -872,31 +889,61 @@ def _apply_deletions(context: SyncContext, discovery: Discovery, plan: SyncPlan)
 
 
 def _reconcile_present(context: SyncContext) -> None:
-    """把当前仍在数据源里的对象恢复为可检索，并撤掉它们的墓碑。
+    """把「曾被本流程软删、现在又回到数据源」的对象恢复为可检索，并撤掉它们的墓碑。
 
-    恢复覆盖三种情况：本次新索引的、内容未变的、以及曾被软删后重新出现的——最后那种走的是
-    「新增」路径，而 index_document 对相同内容哈希会幂等短路、不碰 metadata。
+    **只恢复有墓碑的那些。** 恢复集曾经是「所有仍在源的对象」，那样会撤销管理员的
+    人工下架——细节见函数体里的注释。墓碑是「被本流程软删过」的唯一凭据，也正好把
+    「同步删了又回来」与「人工置成别的状态」分开。
+
+    这类对象走的是「新增」路径，而 index_document 对相同内容哈希会幂等短路、不碰
+    metadata，所以必须在这里显式恢复，不能指望重新索引顺带把状态带回来。
 
     放在 ``_apply_deletions`` 之后是为了让 ``present`` 成为一份真正的「剩下什么」快照：
-    此时被软删的对象已从 data_source_objects 移走，不会进入恢复集。**实测反转顺序不会
-    改变最终状态**（反转时它们先被标 searchable，随后又被删除阶段标回 deleted；墓碑那侧
-    要撤的记录尚未写入，是空操作），所以这不是一条承重顺序——但依赖「后一次写覆盖前一次」
-    比依赖一份干净的快照脆弱，故保持现序。
+    此时本次被软删的对象已从 data_source_objects 移走，不会进入恢复集。**实测反转顺序
+    不会改变最终状态**（反转时本次要删的对象墓碑尚未写入，这一步查不到它们，恢复集为空），
+    所以这不是一条承重顺序——但依赖一份干净的快照比依赖「另一步还没跑」更清晰，故保持现序。
     """
 
     present = _known_objects(context.database_url, context.data_source_id)
-    if present:
-        # 墓碑表达的是「远端已经没有它了」，对象回来之后这句话不再成立。
-        with psycopg.connect(context.database_url) as connection, connection.transaction():
+    if not present:
+        return
+
+    # 恢复集只能是「本流程软删过、现在又回来了」的对象，墓碑就是那个凭据。
+    #
+    # 原先这里把 present 里全部对象无条件刷成 searchable，于是撤销了管理员的人工下架：
+    # 「源文件不能删（别的系统还在用），但要立刻停止被检索」是产品提供的能力
+    # （PATCH /documents/{id}/metadata 置 retrieval_status=deleted），而任何一次同步
+    # ——哪怕零变化——都会把它刷回可检索，页面上没有任何提示。设一次、同步撤一次。
+    #
+    # 没有墓碑的对象有两种：一直正常在源的（本来就是 searchable，刷它是空操作），
+    # 和被人工置成别的状态的（不该碰）。两种都不需要恢复，所以按墓碑收窄是安全的。
+    with psycopg.connect(context.database_url) as connection, connection.transaction():
+        revived = [
+            str(row[0])
+            for row in connection.execute(
+                """SELECT object_key FROM data_source_tombstones
+                   WHERE data_source_id = %s AND object_key = ANY(%s)""",
+                (context.data_source_id, list(present.keys())),
+            ).fetchall()
+        ]
+        if revived:
+            # 墓碑表达的是「远端已经没有它了」，对象回来之后这句话不再成立。
             connection.execute(
                 """DELETE FROM data_source_tombstones
                    WHERE data_source_id = %s AND object_key = ANY(%s)""",
-                (context.data_source_id, list(present.keys())),
+                (context.data_source_id, revived),
             )
+
+    if not revived:
+        return
     mark_documents_searchable(
         context.database_url,
         context.knowledge_base_id,
-        [str(item["document_id"]) for item in present.values() if item.get("document_id")],
+        [
+            str(present[key]["document_id"])
+            for key in revived
+            if present.get(key) and present[key].get("document_id")
+        ],
     )
 
 

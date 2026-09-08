@@ -14,6 +14,7 @@ from backend.app.main import (
     get_knowledge_bases,
     get_service,
 )
+from backend.app.retrieval_access import RetrievalAccessContext, can_retrieve_metadata
 from backend.app.schemas import DocumentInfo, QueryResponse, Source
 
 # 依赖外部服务的测试在本地缺服务时跳过，在 CI 里缺服务必须直接失败。
@@ -62,8 +63,14 @@ class FakeService:
     def list_documents(
         self,
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        access: RetrievalAccessContext | None = None,
     ) -> list[DocumentInfo]:
-        return list(self.documents.get(knowledge_base_id, {}).values())
+        # 过滤逻辑跟真实实现走同一个判据函数，不在这里另写一套——CLAUDE.md 第四条：
+        # 双实现只测一个等于没测。替身若不过滤，接口层的 ACL 过滤就永远测不出来。
+        items = list(self.documents.get(knowledge_base_id, {}).values())
+        if access is None:
+            return items
+        return [item for item in items if can_retrieve_metadata(item.model_dump(), access)]
 
     def delete_document(
         self,

@@ -38,7 +38,25 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+
+    # 周期性回收，不能只靠上面启动时那一次。worker 被 SIGKILL / OOMKill 时
+    # locked_at 是刚续过的，新进程几秒后起来算出的 cutoff 判不到它；而循环里不再
+    # 调用的话，那行 running 任务就此永远没有回收路径——两个部分唯一索引都把它算作
+    # 活动记录，管理员再点「立即同步」永远得到 409，页面一直显示「同步中」，
+    # 唯一出路是人想到去点「取消同步」。
+    #
+    # 间隔取 stale_seconds 的四分之一（默认 900s → 225s）：比租约短得多才能保证
+    # 「过期后一个间隔内必被发现」，又不至于频繁到给数据库添无谓的写。
+    recover_interval = max(30.0, settings.index_job_stale_seconds / 4)
+    next_recover = time.monotonic() + recover_interval
+
     while not stopping:
+        now = time.monotonic()
+        if now >= next_recover:
+            recovered = worker.recover_stale_jobs()
+            if recovered:
+                logging.info('{"event":"stale_jobs_recovered","count":%d}', recovered)
+            next_recover = now + recover_interval
         if not worker.run_once():
             time.sleep(args.poll_seconds)
 

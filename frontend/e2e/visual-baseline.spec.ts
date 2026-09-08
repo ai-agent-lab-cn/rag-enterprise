@@ -176,9 +176,14 @@ test.describe("视觉基线", () => {
     await page.unroute("**/api/knowledge-bases");
     await page.unroute("**/api/evaluations/answers/reports");
 
-    // 知识库详情的全部 7 个 Tab。这个页面横跨四个组件文件（详情页本体 + DocumentPanel
-    // + KnowledgeBaseDataSourcesPanel + ParsingPanel），只拍其中两个 Tab 的话，
+    // 知识库详情的全部 Tab。这个页面横跨多个组件文件（详情页本体 + DocumentPanel
+    // + KnowledgeBaseDataSourcesPanel），只拍其中两个 Tab 的话，
     // 另外几个的视觉回归就无人守护——迁移时正是靠这些截图发现操作列换行的。
+    //
+    // **这个列表必须与 KnowledgeBaseDetailPage.tsx 的 tabs 数组保持一致。** 它已经错过一次：
+    // 「解析与切片」Tab 连同 ParsingPanel 在 1c9e27b 被删掉，而这里还在循环它，
+    // getByRole("tab") 等不到就整条测试超时——而 kb-detail-parsing.png 那张快照
+    // 因此成了永远不会再被比较的孤儿。改 Tab 结构时同步改这里，别只改页面。
     await page.getByRole("button", { name: "知识库管理", exact: true }).first().click();
     await page.getByText("企业知识库").first().click();
     await expect(page.getByRole("tab", { name: /资料/ })).toBeVisible();
@@ -189,8 +194,7 @@ test.describe("视觉基线", () => {
       ["documents", "资料"],
       ["data-sources", "数据源"],
       ["categories", "分类管理"],
-      ["parsing", "解析与切片"],
-      ["versions", "版本治理"],
+      ["versions", "索引治理"],
       ["members", "权限边界"],
       ["conversations", "会话"],
     ] as const) {

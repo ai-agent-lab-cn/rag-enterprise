@@ -300,7 +300,7 @@ class PostgresVectorStore:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             rows = connection.execute(
                 """SELECT d.document_id, d.data_source_id, d.filename, d.current_version_id, d.metadata,
-                          d.created_at, s.source_type,
+                          d.created_at, s.source_type, s.acl AS data_source_acl,
                           current_version.status AS current_status,
                           count(c.chunk_id) AS chunk_count,
                           pending.status AS pending_status,
@@ -321,7 +321,7 @@ class PostgresVectorStore:
                    ) pending ON true
                    WHERE d.knowledge_base_id = %s
                    GROUP BY d.document_id, d.data_source_id, d.filename, d.current_version_id, d.metadata,
-                            d.created_at, s.source_type, current_version.status, pending.status,
+                            d.created_at, s.source_type, s.acl, current_version.status, pending.status,
                             pending.failure_reason
                    ORDER BY lower(d.filename)""",
                 (self.resolve_active_version(knowledge_base_id), knowledge_base_id),
@@ -350,6 +350,10 @@ class PostgresVectorStore:
                 "valid_from": dict(row["metadata"] or {}).get("valid_from"),
                 "valid_to": dict(row["metadata"] or {}).get("valid_to"),
                 "retrieval_status": dict(row["metadata"] or {}).get("retrieval_status", "searchable"),
+                # 供 service.list_documents 按检索侧同一套判据过滤。DocumentInfo 的
+                # extra 策略是默认的 ignore，所以它不会进 API 响应——数据源 ACL 本身
+                # 也是不该外泄的东西。
+                "data_source_acl": dict(row["data_source_acl"] or {}),
                 "acl_version": dict(row["metadata"] or {}).get("acl_version", 1),
                 "allow_user_ids": dict(row["metadata"] or {}).get("allow_user_ids", []),
                 "deny_user_ids": dict(row["metadata"] or {}).get("deny_user_ids", []),
@@ -490,7 +494,27 @@ class PostgresVectorStore:
                 "DELETE FROM documents WHERE knowledge_base_id = %s AND document_id = %s",
                 (knowledge_base_id, document_id),
             )
-            connection.execute("DELETE FROM data_sources WHERE data_source_id = %s", (source[0],))
+            # 只清理上传自建的那种「一份资料独占一个」的伪数据源。
+            #
+            # 上传路径在 index_document 里按文件名自建一条 source_type='file' 的数据源
+            # （见那里 `if data_source_id is None` 的分支），一份资料一个，删资料时把它
+            # 一起清掉是应有的收尾。而同步来的资料挂在真实数据源上
+            # （local_directory / object_storage / web / connector），那是用户配置的实体，
+            # 承载着同步游标、凭据引用与墓碑，删一份资料绝不该把它带走。
+            #
+            # 原先这里是无条件删除。对同步来的资料，实测直接抛
+            # ForeignKeyViolation（index_jobs_data_source_id_fkey 仍引用它），
+            # 整个删除事务回滚——用户点删除只看到一个外键错误，而资料删不掉；
+            # 即便绕过那个引用，documents 的 ON DELETE RESTRICT 也会在「还有别的资料」
+            # 时拒绝，而在「这是最后一份」时放行，让数据源连配置一起静默消失。
+            connection.execute(
+                """DELETE FROM data_sources
+                   WHERE data_source_id = %s AND source_type = 'file'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM documents d WHERE d.data_source_id = data_sources.data_source_id
+                     )""",
+                (source[0],),
+            )
         upload_root = self.upload_root.resolve()
         for relative in source_paths:
             path = (upload_root / relative).resolve()
@@ -747,7 +771,32 @@ class PostgresAsyncRAGService(RAGService):
                         metadata, created_at, updated_at)
                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (knowledge_base_id, document_id)
-                       DO UPDATE SET filename = EXCLUDED.filename, metadata = EXCLUDED.metadata,
+                       DO UPDATE SET filename = EXCLUDED.filename,
+                                     -- 合并而不是替换，并且**治理字段以库里的为准**。
+                                     -- ACL 与人工下架状态都存在这份 metadata 里
+                                     -- （update_document_acl / update_document_metadata 都写
+                                     -- `metadata || {...}`），而本次调用方给的 metadata 是
+                                     -- 上传表单或 _build_metadata() 拼出来的，压根不含这些键：
+                                     -- 原先 `metadata = EXCLUDED.metadata` 是整体替换，于是
+                                     -- 重新上传同名文件、或同步更新一个对象，都会把
+                                     -- allow_user_ids/deny_user_ids/acl_version/retrieval_status
+                                     -- 一起清空。检索侧把空 allow 列表当作「不限人」
+                                     -- （见本文件 retrieve 的 jsonb_array_length 判据），
+                                     -- 一份限定给某人的资料就此对全知识库可见；
+                                     -- 人工下架也会被悄悄恢复上架。
+                                     -- 也不能反过来无脑 `documents.metadata || EXCLUDED.metadata`
+                                     -- ——那样调用方仍能覆盖这四个键。所以先合并，再把治理字段
+                                     -- 用库里的值盖回去。
+                                     metadata = (documents.metadata || EXCLUDED.metadata)
+                                         || COALESCE(
+                                              jsonb_strip_nulls(jsonb_build_object(
+                                                'acl_version', documents.metadata -> 'acl_version',
+                                                'allow_user_ids', documents.metadata -> 'allow_user_ids',
+                                                'deny_user_ids', documents.metadata -> 'deny_user_ids',
+                                                'retrieval_status', documents.metadata -> 'retrieval_status'
+                                              )),
+                                              '{}'::jsonb
+                                            ),
                                      -- 显式给定归属时（同步路径）由本次调用认领该文档。
                                      -- 此前 data_source_id 只在 INSERT 时写、之后永不更新：
                                      -- 同一份资料先经上传（自建 'file' 源）再进同步目录时，
@@ -1726,16 +1775,37 @@ class IndexWorker:
         self._indexer = PostgresAsyncRAGService(settings, embedder, None, None)
 
     def recover_stale_jobs(self) -> int:
+        """把租约过期的 running 任务放回队列。
+
+        **必须周期性调用，不能只在进程启动时调一次。** worker 被 SIGKILL / OOMKill 时
+        locked_at 是刚刚续过的，新进程几秒后起来算出的 cutoff 判不到它；而循环体里
+        如果不再调用，这行 running 任务就此没有任何回收路径——两个部分唯一索引
+        （index_jobs_one_active_sync_idx、sync_runs_one_active_source_idx）都把它算作
+        活动记录，管理员再点「立即同步」永远得到 409，页面一直显示「同步中」。
+        见 scripts/index_worker.py 的循环。
+
+        同步任务要连 sync_runs 一起拉回来：index_job 回了队而 sync_runs 仍是 syncing，
+        下一次 run_sync 开头的 _ensure_sync_active 读到的仍是活动状态，任务会被
+        SYNC_CANCELLED 直接打死，等于没回收。
+        """
         cutoff = datetime.now(UTC) - timedelta(seconds=self.settings.index_job_stale_seconds)
         with psycopg.connect(self.database_url) as connection, connection.transaction():
-            result = connection.execute(
+            stale = connection.execute(
                 """UPDATE index_jobs SET status = 'queued', locked_at = NULL, locked_by = NULL,
                           available_at = now(), updated_at = now(),
                           failure_reason = 'stale worker lease recovered'
-                   WHERE status = 'running' AND locked_at < %s""",
+                   WHERE status = 'running' AND locked_at < %s
+                   RETURNING sync_run_id""",
                 (cutoff,),
-            )
-        return result.rowcount
+            ).fetchall()
+            sync_run_ids = [row[0] for row in stale if row[0]]
+            if sync_run_ids:
+                connection.execute(
+                    """UPDATE sync_runs SET status = 'queued', updated_at = now()
+                       WHERE sync_run_id = ANY(%s) AND status = 'syncing'""",
+                    (sync_run_ids,),
+                )
+        return len(stale)
 
     def run_once(self) -> bool:
         job = self._claim()
@@ -1863,6 +1933,36 @@ class IndexWorker:
                 f"{classification.failure_code}: {classification.reason}"
             )
 
+    def _enqueue_classification_retry(
+        self, job: dict[str, Any], version: dict[str, Any], reason: str
+    ) -> None:
+        """索引流程里分类可重试地失败了，把重试拆成独立的 classify 任务。
+
+        ``data_source_id`` 从当前任务上取：``document_versions`` 没有这一列，而
+        ``index_jobs.data_source_id`` 是同步任务与配额统计的依据，留空会让这条重试
+        在按数据源筛选的地方消失。
+        """
+
+        with psycopg.connect(self.database_url) as connection:
+            connection.execute(
+                """INSERT INTO index_jobs
+                   (index_job_id, knowledge_base_id, data_source_id, document_version_id,
+                    idempotency_key, status, max_attempts, job_type, available_at,
+                    failure_reason)
+                   VALUES (%s, %s, %s, %s, %s, 'queued', 3, 'classify',
+                           now() + make_interval(secs => %s), %s)
+                   ON CONFLICT DO NOTHING""",
+                (
+                    f"job_{uuid4().hex[:20]}",
+                    version["knowledge_base_id"],
+                    job.get("data_source_id"),
+                    version["document_version_id"],
+                    f"classify:{version['document_version_id']}:{uuid4().hex[:8]}",
+                    RETRY_BACKOFF_SECONDS,
+                    reason[:1000],
+                ),
+            )
+
     def _classification_summary(self, version: dict[str, Any]) -> str:
         """给分类器看的摘要。
 
@@ -1962,7 +2062,18 @@ class IndexWorker:
         parsed = parse_structured_document(str(version["filename"]), content)
         sections = parsed.sections
         # 分类抽成独立方法：重新分类任务要在不重新解析、不重新切分的情况下再跑一次。
-        self._classify(version)
+        classification_retry: str | None = None
+        try:
+            self._classify(version)
+        except _RetryableClassification as error:
+            # 分类抖动不得连累索引。让异常冒到 run_once 的话，整个 index 任务连带重试：
+            # 重新解析、重新切分、重新 Embedding 各付一遍，次数耗光后资料被标成 failed
+            # 且 parse_failure_code 记成 PARSER_FAILED——解析明明成功了，页面上却显示
+            # 解析失败，运维照着这个原因去查解析器永远查不到。分类模型是外部服务，它挂
+            # 半小时，这半小时上传的资料就全军覆没。
+            # _classify 在抛出前已经把失败码与下次重试时间写进 metadata，这里只记下原因，
+            # 到本任务收尾后补一个独立的 classify 任务重试（原因见入队处）。
+            classification_retry = str(error)
         mark_stage("chunking")
         with psycopg.connect(self.database_url) as connection:
             connection.execute(
@@ -2036,6 +2147,31 @@ class IndexWorker:
                     ).fetchone()
                     if sync_state is None or str(sync_state[0]) in {"aborted", "failed"}:
                         raise RuntimeError("sync run cancelled")
+                # 治理字段以**写入这一刻**库里的值为准，不用任务开头那份快照。
+                #
+                # 快照是在 _process 最开始读的（`d.metadata AS document_metadata`），
+                # 而分块要等解析 + 向量化跑完才写，中间可能几十分钟。这期间管理员完全
+                # 可能收紧 ACL 或把资料下架，一次同步也可能把远端已删的对象软删掉。
+                # 而软删除/撤权走的是 `UPDATE chunks ... WHERE document_version_id = ...`
+                # ——只作用于**已存在**的行，于是在这个窗口里它有两种死法：打不到还没
+                # 写入的行，或者打到了也被下面的 INSERT 用旧快照覆盖。两种都会让分块
+                # 带着过期的宽松 ACL / searchable 状态上线，而检索侧只看分块
+                # （见本文件 retrieve 的判据），不校验 documents——页面上显示已删除、
+                # 检索却照样返回原文，且不会自愈：对象已进墓碑，下一次同步不再碰它。
+                current = connection.execute(
+                    """SELECT metadata FROM documents
+                       WHERE knowledge_base_id = %s AND document_id = %s FOR SHARE""",
+                    (version["knowledge_base_id"], version["document_id"]),
+                ).fetchone()
+                if current is not None:
+                    live = dict(current[0] or {})
+                    for key in ("acl_version", "allow_user_ids", "deny_user_ids", "retrieval_status"):
+                        if key in live:
+                            for chunk in chunks:
+                                chunk.governance_metadata[key] = live[key]
+                        else:
+                            for chunk in chunks:
+                                chunk.governance_metadata.pop(key, None)
                 # 只删本索引版本自己的分块（供任务重试幂等），其他版本必须原样保留，
                 # 否则回滚无从谈起。V5-4 之前这里是无条件删除同文档版本的全部分块。
                 connection.execute(
@@ -2132,6 +2268,12 @@ class IndexWorker:
                                   finished_at=%s, updated_at=%s WHERE operation_id=%s""",
                         (now, now, job["operation_id"]),
                     )
+        # 分类重试要等本任务落地成 succeeded 之后再入队：index_jobs_one_active_version_idx
+        # 限制同一文档版本只能有一个 queued/running 任务，无论 job_type。上面那条
+        # UPDATE ... status='succeeded' 就在同一个事务里，所以放在这里才插得进去；
+        # 写在 except 分支里会被 ON CONFLICT DO NOTHING 静默吞掉。
+        if classification_retry is not None:
+            self._enqueue_classification_retry(job, version, classification_retry)
 
     def _succeed(self, job_id: str) -> None:
         with psycopg.connect(self.database_url) as connection, connection.transaction():

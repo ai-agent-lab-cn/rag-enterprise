@@ -47,7 +47,10 @@ const PREVIEW: IndexVersionCandidatePreview = {
   force_reason: null,
   config_fingerprint: "a".repeat(64),
   release_fingerprint: "c".repeat(64),
-  config_snapshot: CONTEXT.definition,
+  // 展开而不是直接赋值：config_snapshot 声明为 Record<string, unknown>（对应后端的
+  // dict[str, object]），而 IndexDefinitionView 是 interface——interface 没有隐式索引签名，
+  // 不能赋给 Record。展开后是匿名对象类型，有隐式索引签名，检查通过且数据不变。
+  config_snapshot: { ...CONTEXT.definition },
   component_manifest: CONTEXT.definition.components,
   config_diff: [{ field: "chunking_version", active: "v1-500-50", candidate: "v1-700-100" }],
   estimated_documents: 12,
