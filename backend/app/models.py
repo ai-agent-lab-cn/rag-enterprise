@@ -1,9 +1,9 @@
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from functools import lru_cache
 from threading import RLock
-from collections.abc import Iterator
 from typing import Any, Protocol
 from urllib.request import Request, urlopen
 
@@ -153,7 +153,11 @@ class OpenAICompatibleGenerator:
 
     def generate(self, prompt: str) -> tuple[str, dict[str, Any]]:
         if not self.api_key:
-            return f"未配置 {self.provider_name} API Key，已完成检索但无法生成答案。请根据下方来源查看相关内容。", {}
+            return (
+                f"未配置 {self.provider_name} API Key，"
+                "已完成检索但无法生成答案。请根据下方来源查看相关内容。",
+                {},
+            )
 
         from openai import APITimeoutError, OpenAI
 
@@ -276,8 +280,11 @@ def _model_error(provider: str, exc: Exception, status_code: int | None = None) 
         response_status = 0
     if "location is not supported" in raw or "region" in raw and "not supported" in raw:
         return AppError("MODEL_REGION_UNSUPPORTED", f"当前国家或地区不支持 {provider_label} API。", 409)
-    if any(term in raw for term in ("insufficient balance", "quota", "resource_exhausted", "insufficient_quota")) or response_status == 402:
-        return AppError("MODEL_QUOTA_EXHAUSTED", f"{provider_label} 模型额度不足，请检查 Billing 或配额。", 409)
+    quota_terms = ("insufficient balance", "quota", "resource_exhausted", "insufficient_quota")
+    if any(term in raw for term in quota_terms) or response_status == 402:
+        return AppError(
+            "MODEL_QUOTA_EXHAUSTED", f"{provider_label} 模型额度不足，请检查 Billing 或配额。", 409
+        )
     if response_status in {401, 403}:
         return AppError("MODEL_AUTH_FAILED", f"{provider_label} API Key 无效或无模型调用权限。", 409)
     if response_status == 404:

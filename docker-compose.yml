@@ -33,7 +33,10 @@ services:
       dockerfile: backend/Dockerfile
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rag_enterprise}"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "38"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "40"
+      # Backend 自己不跑评测，只据此判断「运行正式评测」能不能入队；缺这一项时创建
+      # 评测任务返回 503 EVALUATION_DATABASE_NOT_CONFIGURED，其余接口不受影响。
+      EVALUATION_DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/rag_enterprise_evaluation"
       MAX_CONCURRENT_INDEX_BUILDS: "${MAX_CONCURRENT_INDEX_BUILDS:-2}"
       MAX_INDEX_BUILD_DOCUMENTS: "${MAX_INDEX_BUILD_DOCUMENTS:-10000}"
       INDEX_RETENTION_COUNT: "${INDEX_RETENTION_COUNT:-2}"
@@ -89,7 +92,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rag_enterprise}"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "38"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "40"
       EMBEDDING_MODEL: "${EMBEDDING_MODEL:-shibing624/text2vec-base-chinese}"
       INDEX_WORKER_ID: "${INDEX_WORKER_ID:-worker-compose}"
       OMP_NUM_THREADS: "${OMP_NUM_THREADS:-1}"
@@ -98,6 +101,37 @@ services:
       TOKENIZERS_PARALLELISM: "false"
     volumes:
       - uploads_data:/app/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+  # 正式检索评测与索引构建分开跑：一次评测要建整份临时语料再跑召回与精排，
+  # 放进同一个 Worker 会让上传的文档在评测期间一直排不上队。
+  evaluation-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "scripts.evaluation_worker"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rag_enterprise}"
+      # 库名固定为 rag_enterprise_evaluation：Worker 只允许自动创建这一个专用库，
+      # 指到别处会拒绝启动，避免把临时语料写进开发或生产业务库。
+      EVALUATION_DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/rag_enterprise_evaluation"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "40"
+      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-shibing624/text2vec-base-chinese}"
+      RERANKER_MODEL: "${RERANKER_MODEL:-cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}"
+      EVALUATION_WORKER_ID: "${EVALUATION_WORKER_ID:-evaluation-worker-compose}"
+      OMP_NUM_THREADS: "${OMP_NUM_THREADS:-1}"
+      MKL_NUM_THREADS: "${MKL_NUM_THREADS:-1}"
+      OPENBLAS_NUM_THREADS: "${OPENBLAS_NUM_THREADS:-1}"
+      TOKENIZERS_PARALLELISM: "false"
     depends_on:
       postgres:
         condition: service_healthy

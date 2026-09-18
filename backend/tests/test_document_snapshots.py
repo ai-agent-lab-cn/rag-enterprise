@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -18,13 +19,15 @@ from psycopg.rows import dict_row
 
 from backend.app.document_snapshots import (
     create_snapshot,
+    current_document_set,
     get_snapshot,
     list_members,
+    require_present_sources,
     snapshot_fingerprint,
+    validate_snapshot_sources,
 )
 from backend.app.index_validation import get_report
 from backend.app.index_versions import create_building_version, finalize_building_version
-
 from backend.tests.test_index_versions import (
     DATA_SOURCE_ID,
     EMBEDDING_DIMENSION,
@@ -299,6 +302,12 @@ def test_cleanup_marks_the_version_cleaned_and_blocks_rollback_to_it() -> None:
     assert status[1] is not None
 
     with psycopg.connect(database_url) as connection, connection.transaction():
+        # 上一次回滚把 iv_current 推成了 previous，而一个知识库只能有一个 previous
+        # （index_versions_one_previous_idx）。要让已清理的版本重新成为回滚目标，
+        # 得先把它腾开，否则这行 UPDATE 直接撞唯一索引。
+        connection.execute(
+            "UPDATE index_versions SET status='retired' WHERE index_version_id='iv_current'"
+        )
         connection.execute(
             "UPDATE index_versions SET status='previous' WHERE index_version_id=%s",
             (index_version_id,),
@@ -771,7 +780,9 @@ def test_lifecycle_events_record_who_did_what() -> None:
     ]
 
     # 回滚是追加一条方向相反的事件，不是撤销记录。
-    rollback_to_previous(database_url, KNOWLEDGE_BASE_ID, None, operator)
+    # first 的文档快照里只有 alpha，而当前资料集合已经多了 beta，所以要显式确认这段
+    # 内容时间点差异——不确认时回滚会以 409 拒绝，这正是那条保护要做的事。
+    rollback_to_previous(database_url, KNOWLEDGE_BASE_ID, None, operator, confirm_content_lag=True)
     types = [item["event_type"] for item in list_lifecycle_events(database_url, first)]
     assert types == ["rolled_back", "deactivated", "activated", "created"], types
 
@@ -1053,10 +1064,249 @@ def test_failed_versions_can_be_cleaned(failed_status: str) -> None:
             (failed_status, index_version_id),
         )
 
-    assert cleanup_version(database_url, index_version_id) == 2
+    # 返回值是删掉的分块数，而 `_cover` 只为这一份资料写了一个分块。
+    assert cleanup_version(database_url, index_version_id) == 1
     with psycopg.connect(database_url) as connection:
         status = connection.execute(
             "SELECT status FROM index_versions WHERE index_version_id=%s",
             (index_version_id,),
         ).fetchone()[0]
     assert status == "cleaned"
+
+
+def _governance_counts(database_url: str) -> dict[str, int]:
+    """一次创建尝试可能留下的全部治理行。
+
+    「失败要整体回滚」只能用「一行都没多」来证明。单看某一张表不够：此前的失败形态正是
+    Version 建好了、Build 建好了、Jobs 也排上了，只有 Worker 那一步炸——每张表单独看都
+    「正常」，合起来才是一个卡死的候选版本。
+    """
+
+    tables = ("index_versions", "index_builds", "operations", "index_jobs", "document_snapshots")
+    with psycopg.connect(database_url) as connection:
+        return {
+            table: int(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+            for table in tables
+        }
+
+
+def test_source_precheck_only_passes_files_that_really_exist(tmp_path: Path) -> None:
+    """四种「文件不可读」形态都必须算缺失，且回报里不能出现宿主路径。
+
+    只判 `exists()` 会放过目录与越界路径，而它们同样让 Worker 在读文件那一步炸掉——
+    炸的时候 Version / Build / Operation / Jobs 已经全部建好，用户看到的是一个卡在
+    build_failed 的版本，真正该做的动作（重新上传或删掉失效资料）页面上完全看不出来。
+
+    返回项只含 document_id 与 filename：这份清单会进接口响应与 Operation 文案，
+    宿主上的绝对路径没有理由出现在那里。
+    """
+
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    (upload_root / "present.md").write_text("# present", encoding="utf-8")
+    (upload_root / "adir").mkdir()
+    # 真实存在，但在 upload_root 之外。越界路径必须按缺失处理，而不是按「文件在」放行。
+    (tmp_path / "outside.md").write_text("# outside", encoding="utf-8")
+
+    present = [{"document_id": "doc_ok", "filename": "present.md", "source_path": "present.md"}]
+    assert validate_snapshot_sources(upload_root, present) == []
+
+    missing = validate_snapshot_sources(
+        upload_root,
+        [
+            *present,
+            {"document_id": "doc_gone", "filename": "gone.md", "source_path": "gone.md"},
+            {"document_id": "doc_blank", "filename": "blank.md", "source_path": ""},
+            {"document_id": "doc_escape", "filename": "escape.md", "source_path": "../outside.md"},
+            {"document_id": "doc_dir", "filename": "adir", "source_path": "adir"},
+        ],
+    )
+
+    assert [item["document_id"] for item in missing] == [
+        "doc_gone", "doc_blank", "doc_escape", "doc_dir",
+    ]
+    assert [item["filename"] for item in missing] == ["gone.md", "blank.md", "escape.md", "adir"]
+    for item in missing:
+        assert set(item) == {"document_id", "filename"}, "回报里多了字段——路径不该出接口"
+    assert not any(str(upload_root) in value for item in missing for value in item.values())
+
+
+def test_missing_sources_are_rejected_with_a_stable_code(tmp_path: Path) -> None:
+    """源文件丢失有自己的错误码，不能混进 PARSER_FAILED。
+
+    「解析器坏了」和「文件没了」是两件事：前者该修代码，后者该重新上传或删掉这条记录。
+    码、状态码、文案与 details 形状一起构成前端能据此给出动作的契约，缺一个就退化成
+    「有问题」三个字。
+    """
+
+    from backend.app.errors import AppError
+
+    (tmp_path / "present.md").write_text("# present", encoding="utf-8")
+    present = {"document_id": "doc_ok", "filename": "present.md", "source_path": "present.md"}
+
+    # 文件都在时不抛，也不返回任何东西。
+    assert require_present_sources(tmp_path, [present]) is None
+
+    with pytest.raises(AppError) as error:
+        require_present_sources(
+            tmp_path,
+            [present, {"document_id": "doc_gone", "filename": "gone.md", "source_path": "gone.md"}],
+        )
+
+    assert error.value.code == "SOURCE_FILE_MISSING"
+    assert error.value.status_code == 409
+    assert error.value.message == "源文件已丢失，无法构建索引。"
+    assert error.value.details == {
+        "documents": [{"document_id": "doc_gone", "filename": "gone.md"}]
+    }
+
+
+def _prepare_missing_source(database_url: str) -> None:
+    """造一个「库里是 ready、磁盘上没有」的文档，并登记向量模型。
+
+    `_add_document` 写的 source_path 是 `/tmp/<name>.md`（绝对路径，且在不在全看宿主）。
+    改成相对路径之后，缺失与否只由传入的 upload_root 决定，测试不再依赖 /tmp 的内容。
+    """
+
+    _add_document(database_url, "alpha")
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            "INSERT INTO index_settings (embedding_model, embedding_dimension) VALUES (%s,%s)",
+            ("test/embedding", EMBEDDING_DIMENSION),
+        )
+        connection.execute(
+            "UPDATE document_versions SET source_path='gone.md' WHERE document_id='doc_alpha'"
+        )
+
+
+def test_preview_blocks_creation_when_a_source_file_is_gone(tmp_path: Path) -> None:
+    """预览必须直接说出是哪份资料的源文件丢了，并且自己什么都不创建。
+
+    这条挡的是「禁用说不出原因」那类失败的服务端版本（见 CLAUDE.md 第一条）：光标不动、
+    手指不点，用户就要知道为什么建不了。`creation_allowed=False` 配一句笼统的「不可创建」
+    等于没说——文件名是操作者据以决定「重新上传还是删掉」的唯一依据。
+    """
+
+    from backend.app.index_versions import preview_index_version_candidate
+
+    database_url = _database_url()
+    _reset(database_url)
+    _prepare_missing_source(database_url)
+
+    before = _governance_counts(database_url)
+    preview = preview_index_version_candidate(
+        database_url,
+        KNOWLEDGE_BASE_ID,
+        reason="initial_build",
+        chunk_size=700,
+        chunk_overlap=100,
+        force=False,
+        force_reason=None,
+        reranker_model="test/reranker",
+        upload_root=tmp_path,
+    )
+
+    assert preview["creation_allowed"] is False
+    assert [item for item in preview["blocked_reasons"] if "alpha.md" in item] == [
+        "以下资料的源文件已丢失，需重新上传或删除后再创建：alpha.md。"
+    ]
+    # 预览是只读的：它不能顺手把版本建出来，否则「预览」与「创建」就没有分别了。
+    assert _governance_counts(database_url) == before
+
+
+def test_create_leaves_nothing_behind_when_a_source_file_is_gone(tmp_path: Path) -> None:
+    """预检必须在事务里，失败要整体回滚。
+
+    这条是本组用例的关键。预检放在事务外或放在建 Version 之后，失败现场就是：一个
+    building 的 Version、一个 queued 的 Build、一批排好的 Jobs，外加一个永远走不完的
+    Operation——而它们全部来自一次本就不该开始的构建。用户既没法继续，也没法理解。
+
+    断言五张表调用前后完全相等，而不是只看 index_versions：Version 回滚了但 Jobs 留下，
+    同样会让下一次创建撞上「文档任务尚未结束」。
+    """
+
+    from backend.app.errors import AppError
+    from backend.app.index_versions import preview_index_version_candidate
+    from backend.app.postgres_documents import create_index_version_candidate
+
+    database_url = _database_url()
+    _reset(database_url)
+    _prepare_missing_source(database_url)
+
+    # 指纹只由配置与文档集合算出，与文件在不在无关；因此被阻塞的预览照样给得出这三个值。
+    preview = preview_index_version_candidate(
+        database_url,
+        KNOWLEDGE_BASE_ID,
+        reason="initial_build",
+        chunk_size=700,
+        chunk_overlap=100,
+        force=False,
+        force_reason=None,
+        reranker_model="test/reranker",
+        upload_root=tmp_path,
+    )
+    before = _governance_counts(database_url)
+
+    with pytest.raises(AppError) as error:
+        create_index_version_candidate(
+            database_url,
+            KNOWLEDGE_BASE_ID,
+            reason="initial_build",
+            chunk_size=700,
+            chunk_overlap=100,
+            force=False,
+            force_reason=None,
+            expected_config_fingerprint=str(preview["config_fingerprint"]),
+            expected_document_set_fingerprint=str(preview["document_set_fingerprint"]),
+            expected_release_fingerprint=str(preview["release_fingerprint"]),
+            requested_by="usr_0123456789abcdef",
+            idempotency_key="source-missing",
+            reranker_model="test/reranker",
+            upload_root=tmp_path,
+        )
+
+    assert error.value.code == "SOURCE_FILE_MISSING"
+    assert error.value.details == {
+        "documents": [{"document_id": "doc_alpha", "filename": "alpha.md"}]
+    }
+    assert before == {
+        "index_versions": 0,
+        "index_builds": 0,
+        "operations": 0,
+        "index_jobs": 0,
+        "document_snapshots": 0,
+    }
+    assert _governance_counts(database_url) == before
+
+
+def test_current_document_set_carries_the_source_path_the_precheck_reads(tmp_path: Path) -> None:
+    """读取路径要吐出预检真正会读的那个字段，字段名也要对得上。
+
+    预检是纯函数，靠 `current_document_set` 喂给它的字典取值。这两处是两段代码：
+    只测其中一头，就会出现「库里有 source_path、预检永远读到空串」——那样每份资料都被
+    判为缺失，索引再也建不出来，而两边的单测都是绿的（见 CLAUDE.md 第三条）。
+    """
+
+    database_url = _database_url()
+    _reset(database_url)
+    document_version_id = _add_document(database_url, "alpha")
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            "UPDATE document_versions SET source_path=%s WHERE document_version_id=%s",
+            ("uploads/alpha.md", document_version_id),
+        )
+
+    with psycopg.connect(database_url) as connection:
+        stored = connection.execute(
+            "SELECT source_path FROM document_versions WHERE document_version_id=%s",
+            (document_version_id,),
+        ).fetchone()[0]
+        document_set = current_document_set(connection, KNOWLEDGE_BASE_ID)
+
+    assert stored == "uploads/alpha.md"
+    assert [item["source_path"] for item in document_set["included"]] == [stored]
+
+    # 把两头接起来跑一遍：文件真的建在 upload_root 下时，预检必须放行。
+    (tmp_path / "uploads").mkdir()
+    (tmp_path / "uploads" / "alpha.md").write_text("# alpha", encoding="utf-8")
+    assert validate_snapshot_sources(tmp_path, document_set["included"]) == []

@@ -203,7 +203,7 @@ def test_generation_failure_keeps_ranked_sources(
     assert response.answer_status == "generation_failed"
     assert response.error_code == "MODEL_TIMEOUT"
     assert response.sources
-    assert response.prompt_version == "v5-8-grounded-governance-1"
+    assert response.prompt_version == "v5-stream-grounded-governance-2"
     assert len(response.prompt_hash or "") == 64
 
 
@@ -286,7 +286,7 @@ def test_retrieval_api_uses_a_real_pgvector_service(
         assert queried.status_code == 200
         assert queried.json()["sources"][0]["document_id"] == document_id
         assert queried.json()["sources"][0]["filename"] == "retrieval-evidence.md"
-        assert queried.json()["prompt_version"] == "v5-8-grounded-governance-1"
+        assert queried.json()["prompt_version"] == "v5-stream-grounded-governance-2"
         assert len(queried.json()["prompt_hash"]) == 64
         assert queried.json()["models"] == {
             "embedding": "deterministic-embedding-v1",

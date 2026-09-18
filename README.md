@@ -515,8 +515,45 @@ Metadata filter accuracy 与 ACL 零泄漏证据。Activate 不接收报告参�
 配置指纹是这里真正的牙齿：报告里的任何布尔字段都可以被伪造，指纹不行——它必须由被测
 配置本身算出来，因此能挡住"用 A 配置跑出的合格报告去放行 B 配置的索引"。
 
-不再检查 `official`：它在 `run_corpus_baseline` 里就等于 `passed`，检查它等于又查一遍
-绝对阈值。
+`official` 与 `passed` 是两件事，验证只看前者。`official` 表示"这次运行本身受控、可信"，
+`passed` 表示"指标达到了冻结阈值"。两者曾被绑在一起（`official = passed`），后果是未达标的
+报告根本不标 official，于是"跑过但没达标"在页面上显示成"缺少可用报告"，把操作者引去重跑
+评测，而真正该看的是哪项指标没到线。能否发布由三层门禁给结论，不由绝对阈值提前筛掉证据。
+命令行手跑默认 `official=false`，要显式加 `--official`；产品内的正式评测由 Evaluation Worker
+置 `official=true`。
+
+### 产品内正式评测（Evaluation Worker）
+
+上面那套 CLI 是运维通道。产品内的正式评测走独立进程，报告直接回写业务库，页面可以直接
+拿它做三层验证。
+
+```bash
+# 1. 配置隔离的评测库。必须与 DATABASE_URL 不同，且不含任何业务数据
+#    留空表示本部署不开启正式评测：Backend 照常启动，创建评测任务返回 503
+EVALUATION_DATABASE_URL=postgresql://user:pass@host:5432/rag_enterprise_evaluation
+EVALUATION_WORKER_ID=evaluation-worker-local
+
+# 2. 启动 Worker。它会自检评测库：与业务库同址则拒绝启动；库不存在时只允许创建
+#    专用库 rag_enterprise_evaluation；库里有业务数据则拒绝使用
+uv run python -m scripts.evaluation_worker
+
+# 只领一次任务就退出（排查用）
+uv run python -m scripts.evaluation_worker --once
+```
+
+- **Compose 服务名 `evaluation-worker`，Kubernetes Deployment 名 `rag-evaluation-worker`**，
+  与 Index Worker 同一个应用镜像、不同 command。
+- **并发恒为 1**：两个评测同时跑会在同一个评测库里互相看见对方的临时语料。
+- **任务失败重试**：失败的任务留在 `evaluation_runs` 里，`attempt_count < max_attempts`（默认 3）
+  时可以在页面上重试，也可以 `POST /api/knowledge-bases/{kb}/evaluation-runs/{run}/retry`。
+  重试不新建记录，历史留在同一行的 `attempt_count` 上。只有 `queued` 能取消；运行中的取消
+  本轮不实现，返回稳定 `409`。
+- **租约恢复**：被 SIGKILL / OOMKill 的进程会留下 `running` 记录，Worker 每隔
+  `EVALUATION_JOB_STALE_SECONDS / 4`（下限 60 秒）把过期租约拉回队列。不回收的话部分唯一索引
+  会把它算作活动运行，管理员再点「运行正式评测」永远得到 409。
+- **报告恢复**：成功的评测把完整报告写进 `evaluation_runs.report_payload`，页面与
+  `/api/evaluations` 都从这里读。评测库只承载临时语料，**可以随时整库重建**，不需要备份；
+  要保的是业务库里的 `evaluation_runs`。
 
 **质量门的口径边界**：它验证的是"该配置在冻结语料上不回退"，不代表验证了生产数据的
 检索质量——生产语料没有段落标注，算不出 Recall。评测入口本身要求隔离空库，本就不能

@@ -10,11 +10,14 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import psycopg
 from psycopg.rows import dict_row
+
+from .errors import AppError
 
 
 def snapshot_fingerprint(members: list[tuple[str, str]]) -> str:
@@ -31,6 +34,59 @@ def snapshot_fingerprint(members: list[tuple[str, str]]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# 源文件已经不在磁盘上。数据库里的 document_version 仍是 ready，Worker 走到读文件那
+# 一步才会炸，而失败原因此前被记成 PARSER_FAILED——「解析器坏了」和「文件没了」是两
+# 件事：前者该修代码，后者该重新上传或删掉这条记录。
+SOURCE_FILE_MISSING = "SOURCE_FILE_MISSING"
+SOURCE_FILE_MISSING_MESSAGE = "源文件已丢失，无法构建索引。"
+
+
+def validate_snapshot_sources(
+    upload_root: Path, members: list[dict[str, Any]]
+) -> list[dict[str, str]]:
+    """检查文档集合成员的源文件是否还在磁盘上，返回缺失清单。
+
+    这一步放在创建版本之前，是因为源文件缺失在 Worker 里表现为整批构建部分失败：
+    Version、Build、Operation 和 Jobs 都已经建好，用户看到的是一个卡在 build_failed
+    的版本，而真正该做的动作（重新上传或删掉失效资料）在页面上完全看不出来。
+
+    路径逃逸防御照抄删除路径（postgres_documents 里删除文档时的写法）：先 resolve()
+    再确认仍在 upload_root 内。source_path 是库里的相对路径，正常情况下不会越界，
+    但它不该是「因为正常情况下不会」才安全。
+
+    返回项只含 document_id 与 filename：宿主绝对路径不进接口，也不进 Operation 文案。
+    """
+
+    root = upload_root.resolve()
+    missing: list[dict[str, str]] = []
+    for member in members:
+        relative = str(member.get("source_path") or "")
+        document = {
+            "document_id": str(member.get("document_id") or ""),
+            "filename": str(member.get("filename") or ""),
+        }
+        if not relative:
+            missing.append(document)
+            continue
+        path = (root / relative).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            missing.append(document)
+    return missing
+
+
+def require_present_sources(upload_root: Path, members: list[dict[str, Any]]) -> None:
+    """缺失即以稳定错误码拒绝，不创建任何版本、构建、任务或 Operation。"""
+
+    missing = validate_snapshot_sources(upload_root, members)
+    if missing:
+        raise AppError(
+            SOURCE_FILE_MISSING,
+            SOURCE_FILE_MISSING_MESSAGE,
+            409,
+            {"documents": missing},
+        )
+
+
 def current_document_set(
     connection: psycopg.Connection[Any], knowledge_base_id: str
 ) -> dict[str, Any]:
@@ -43,7 +99,7 @@ def current_document_set(
     with connection.cursor(row_factory=dict_row) as cursor:
         rows = cursor.execute(
             """SELECT d.document_id, d.filename, d.current_version_id, v.content_sha256,
-                      v.source_file_bytes, latest.status AS latest_status,
+                      v.source_file_bytes, v.source_path, latest.status AS latest_status,
                       latest.parse_status AS latest_parse_status,
                       latest.parse_failure_code
                FROM documents d
@@ -67,6 +123,8 @@ def current_document_set(
             "document_version_id": str(row["current_version_id"]),
             "content_sha256": str(row["content_sha256"] or ""),
             "source_file_bytes": int(row["source_file_bytes"] or 0),
+            # 源文件相对路径，只用于构建前的存在性预检；它不进快照成员表，也不出接口。
+            "source_path": str(row["source_path"] or ""),
         }
         for row in rows
         if row["current_version_id"]

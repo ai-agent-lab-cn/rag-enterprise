@@ -59,11 +59,18 @@ const ACTIVE = version({
   activated_at: "2026-09-01T00:00:00Z", release_fingerprint: "c".repeat(64),
 });
 
+/**
+ * 一份可用于发布的正式报告。
+ *
+ * `official` 必须显式给 true：页面筛的是「这份报告来自受控的正式运行」，不是
+ * 「它达到了阈值」。两者解耦后（Task 4 Step 4），只有 `passed: true` 的报告不再
+ * 进「正式质量评测」表——这条 fixture 漏掉 official 时，四个用例会看到空态。
+ */
 function passedReport(fingerprint: string | null) {
   return {
     report_id: "qr_case", dataset_id: "rag-corpus", dataset_version: "2.0",
     commit: "abc1234", run_at: "2026-09-07T00:00:00Z", models: {},
-    passed: true, config_fingerprint: fingerprint,
+    official: true, passed: true, config_fingerprint: fingerprint,
   };
 }
 
@@ -148,10 +155,10 @@ test.describe("索引治理状态回归", () => {
     await stub(page, [version({ status: "build_failed" }), ACTIVE], []);
     await openGovernance(page);
 
-    expect(await stage(page, "构建")).toContain("未通过");
+    expect(await stage(page, "索引构建")).toContain("未通过");
     // 构建都失败了还提示缺报告，用户不知道先处理哪个——这个组合曾真实出现过
     expect(await stage(page, "正式评测")).toContain("未开始");
-    expect(await stage(page, "发布验证")).toContain("未开始");
+    expect(await stage(page, "三层验证")).toContain("未开始");
     await expect(page.getByRole("table", { name: "索引版本" }).getByRole("button", { name: "重新构建" })).toBeVisible();
   });
 
@@ -190,7 +197,7 @@ test.describe("索引治理状态回归", () => {
     await stub(page, [version({ status: "ready", validation_report_id: "vr_case" }), ACTIVE], [passedReport(FP)]);
     await openGovernance(page);
 
-    expect(await stage(page, "发布验证")).toContain("已完成");
+    expect(await stage(page, "三层验证")).toContain("已完成");
     const pending = await stage(page, "待激活");
     expect(pending).toContain("进行中");
     expect(pending).toContain("手动");
@@ -201,7 +208,7 @@ test.describe("索引治理状态回归", () => {
     await stub(page, [version({ status: "validation_failed" }), ACTIVE], [passedReport(FP)]);
     await openGovernance(page);
 
-    const validation = await stage(page, "发布验证");
+    const validation = await stage(page, "三层验证");
     expect(validation).toContain("未通过");
     expect(validation).toContain("重新验证");
     await expect(page.getByRole("table", { name: "索引版本" }).getByRole("button", { name: "重新验证" })).toBeVisible();
@@ -293,7 +300,7 @@ test.describe("索引治理状态回归", () => {
     const table = page.getByRole("table", { name: "索引版本" });
     await expect(table.locator("tr", { hasText: "iv_new" }).getByText("当前生效")).toBeVisible();
     await expect(table.locator("tr", { hasText: "iv_old" }).getByText("上一版本")).toBeVisible();
-    const live = await stage(page, "生效");
+    const live = await stage(page, "当前生效");
     expect(live).toContain("已完成");
     expect(live).toContain("v2");
   });

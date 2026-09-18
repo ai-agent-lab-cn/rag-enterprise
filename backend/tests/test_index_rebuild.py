@@ -493,10 +493,12 @@ def test_list_index_versions_reports_both_versions_during_rebuild(tmp_path: Path
 
     versions = service.list_index_versions(KNOWLEDGE_BASE_ID)
     by_status = {str(item["status"]): item for item in versions}
-    assert set(by_status) == {"active", "building"}
-    assert by_status["building"]["index_version_id"] == result["index_version_id"]
-    assert by_status["building"]["chunking_version"] == chunking_version(160, 20)
+    # 构建跑完后新版本停在 validating——ready 在当前状态机里只有三层验证一个入口，
+    # finalize 不再直接给出「可发布」的结论。
+    assert set(by_status) == {"active", "validating"}
+    assert by_status["validating"]["index_version_id"] == result["index_version_id"]
+    assert by_status["validating"]["chunking_version"] == chunking_version(160, 20)
     assert by_status["active"]["chunking_version"] == chunking_version(700, 100)
     # 首个版本用固定标记放行，不参与指纹比对
     assert by_status["active"]["evaluation_report_id"] == "initial-index"
-    assert by_status["building"]["evaluation_report_id"] is None
+    assert by_status["validating"]["evaluation_report_id"] is None

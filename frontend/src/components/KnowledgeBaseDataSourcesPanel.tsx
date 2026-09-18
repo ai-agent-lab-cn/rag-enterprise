@@ -15,13 +15,6 @@ import { Toolbar } from "./ui/Toolbar";
 import { useConfirm } from "./ui/useConfirm";
 import { useToast } from "./ui/Toast";
 
-const SYNC_LABEL: Record<DataSource["sync_status"], string> = {
-  idle: "未同步", queued: "等待同步", running: "同步中", succeeded: "同步完成", failed: "同步失败", aborted: "已熔断",
-};
-const RESOURCE_STATUS: Record<string, string> = { discovered: "已发现", fetching: "读取中", normalizing: "规范化中", parsing: "解析中", chunking: "切片中", enriching: "治理中", building: "构建索引", validating: "验证中", activated: "已激活", succeeded: "已完成", unchanged: "无变化", skipped: "已跳过", deleted: "已删除", failed: "失败", dead_letter: "死信", cancelled: "已取消" };
-const RUN_STATUS: Record<string, string> = { queued: "等待同步", discovering: "资源发现中", syncing: "差异处理中", indexing: "索引处理中", succeeded: "同步完成", partial_failed: "部分失败", aborted: "已取消或熔断", failed: "同步失败" };
-const STAGE_LABEL: Record<string, string> = { discover: "资源发现", diff: "差异计算", fetch: "内容获取", normalize: "内容规范化", build: "索引构建", retry: "重试", complete: "完成", complete_with_failures: "失败收口", cancelled: "已取消", dead_letter: "死信", retry_wait: "等待重试", size_limit: "超过大小限制" };
-const CHANGE_LABEL: Record<string, string> = { add: "新增", update: "更新", delete: "删除", acl_update: "权限更新", metadata_update: "元数据更新", unchanged: "无变化", skip: "跳过", retry: "重试" };
 /**
  * 有意继续用 `sync_status`，不跟 DataSourcesPage 换成 `index_status`。
  * `index_status` 的合法集合不含 `aborted`（见 backend/app/main.py:2043-2045），熔断态会被
@@ -29,9 +22,13 @@ const CHANGE_LABEL: Record<string, string> = { add: "新增", update: "更新", 
  * 不同的信息（前者是 `SYNC_DELETE_CIRCUIT_BREAKER` 触发的保护性中止，见
  * backend/app/data_source_sync.py:532），跟着换会丢状态，不是单纯的样式迁移。
  */
-const SYNC_TONE: Record<DataSource["sync_status"], "neutral" | "brand" | "success" | "danger"> = {
-  idle: "neutral", queued: "brand", running: "brand", succeeded: "success", failed: "danger", aborted: "danger",
+const SYNC_LABEL: Record<DataSource["sync_status"], string> = {
+  idle: "未同步", queued: "等待同步", running: "同步中", succeeded: "同步完成", failed: "同步失败", aborted: "已熔断",
 };
+const RESOURCE_STATUS: Record<string, string> = { discovered: "已发现", fetching: "读取中", normalizing: "规范化中", parsing: "解析中", chunking: "切片中", enriching: "治理中", building: "构建索引", validating: "验证中", activated: "已激活", succeeded: "已完成", unchanged: "无变化", skipped: "已跳过", deleted: "已删除", failed: "失败", dead_letter: "死信", cancelled: "已取消" };
+const RUN_STATUS: Record<string, string> = { queued: "等待同步", discovering: "资源发现中", syncing: "差异处理中", indexing: "索引处理中", succeeded: "同步完成", partial_failed: "部分失败", aborted: "已取消或熔断", failed: "同步失败" };
+const STAGE_LABEL: Record<string, string> = { discover: "资源发现", diff: "差异计算", fetch: "内容获取", normalize: "内容规范化", build: "索引构建", retry: "重试", complete: "完成", complete_with_failures: "失败收口", cancelled: "已取消", dead_letter: "死信", retry_wait: "等待重试", size_limit: "超过大小限制" };
+const CHANGE_LABEL: Record<string, string> = { add: "新增", update: "更新", delete: "删除", acl_update: "权限更新", metadata_update: "元数据更新", unchanged: "无变化", skip: "跳过", retry: "重试" };
 const EMPTY_DRAFT = { sourceType: "object_storage" as "object_storage" | "web" | "connector", name: "", endpoint: "", bucket: "", prefix: "", region: "", credentialEnv: "", secure: true, urls: "", sitemapUrl: "", maxObjects: 1000, databaseUrlEnv: "", view: "", idColumn: "id", contentColumn: "content", updatedColumn: "updated_at", metadataMapping: "", aclMapping: "", categoryId: "", department: "" };
 type Props = { knowledgeBaseId: string; items: DataSource[]; categories: DocumentCategory[]; onRefresh: () => Promise<void> };
 
@@ -93,7 +90,7 @@ export function KnowledgeBaseDataSourcesPanel({ knowledgeBaseId, items, categori
       if (!target || !column || rest.length) throw new Error("字段映射请使用“目标字段=来源列”，每行一项。");
       return [target, column];
     }));
-    let metadataMapping: Record<string, string> = {}; let aclMapping: Record<string, string> = {};
+    let metadataMapping: Record<string, string>; let aclMapping: Record<string, string>;
     try { metadataMapping = parseMapping(draft.metadataMapping); aclMapping = parseMapping(draft.aclMapping); }
     catch (reason) { const message = reason instanceof Error ? reason.message : "字段映射格式无效。"; setFormError(message); setBusyId(""); return; }
     const configuration = draft.sourceType === "web"

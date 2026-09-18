@@ -161,12 +161,12 @@ spec:
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
           startupProbe:
             exec:
-              command: [python, -m, scripts.database_migrate, check, --required-version, "38"]
+              command: [python, -m, scripts.database_migrate, check, --required-version, "39"]
             periodSeconds: 5
             failureThreshold: 60
           readinessProbe:
             exec:
-              command: [python, -m, scripts.database_migrate, check, --required-version, "38"]
+              command: [python, -m, scripts.database_migrate, check, --required-version, "39"]
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
@@ -186,6 +186,73 @@ spec:
       volumes:
         - name: uploads
           persistentVolumeClaim: {claimName: rag-uploads}
+---
+# 正式检索评测与索引构建分开跑：评测要建整份临时语料再跑召回与精排，共用一个 Worker
+# 会让上传的文档在评测期间排不上队。镜像与 rag-worker 相同，只有 command 不同。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-evaluation-worker
+  namespace: rag-enterprise
+  labels:
+    app.kubernetes.io/part-of: rag-enterprise
+    app.kubernetes.io/component: evaluation-worker
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/component: evaluation-worker}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: rag-enterprise
+        app.kubernetes.io/component: evaluation-worker
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: evaluation-worker
+          image: rag-enterprise-backend:issue-84
+          imagePullPolicy: Never
+          args: [python, -m, scripts.evaluation_worker]
+          envFrom:
+            - configMapRef: {name: rag-enterprise-config}
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: rag-enterprise-secrets, key: DATABASE_URL}}
+            - name: EVALUATION_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: rag-enterprise-secrets, key: EVALUATION_DATABASE_URL}
+            - name: EVALUATION_WORKER_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+          startupProbe:
+            exec:
+              command: [python, -m, scripts.database_migrate, check, --required-version, "39"]
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: [python, -m, scripts.database_migrate, check, --required-version, "39"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: [sh, -c, "kill -0 1"]
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 500m, memory: 1Gi}
+            limits: {cpu: "3", memory: 3Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
 ---
 apiVersion: apps/v1
 kind: Deployment

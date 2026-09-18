@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import os
 import json
+import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,6 +13,14 @@ from psycopg.rows import dict_row
 from backend.app.audit import AuditRepository
 from backend.app.database import apply_migrations
 from backend.app.errors import AppError
+from backend.app.index_validation import (
+    activate_with_report,
+    check_retrieval_quality,
+    get_report,
+    get_validation_policy,
+    list_reports,
+    validate_index_version,
+)
 from backend.app.index_versions import (
     active_index_version_id,
     active_or_bootstrap_version,
@@ -27,24 +36,27 @@ from backend.app.index_versions import (
     retire_version,
     rollback_to_previous,
 )
-from backend.app.index_validation import (
-    activate_with_report,
-    check_retrieval_quality,
-    get_validation_policy,
-    get_report,
-    list_reports,
-    validate_index_version,
-)
-from backend.evaluation.report import RetrievalEvaluationReport, assess_metric
 from backend.app.pipeline_governance import ensure_index_build
 from backend.app.postgres_documents import (
     cancel_index_version_build,
     create_index_version_candidate,
     retry_index_version_build,
 )
+from backend.evaluation.report import RetrievalEvaluationReport, assess_metric
 
 KNOWLEDGE_BASE_ID = "kb_default"
 DATA_SOURCE_ID = "ds_default"
+# 创建候选版本前会检查每个文档的源文件还在不在，所以这些用例需要一个真实的上传根目录。
+UPLOAD_ROOT = Path(tempfile.mkdtemp(prefix="rag-index-versions-uploads-"))
+
+
+def _write_source(relative: str, content: str = "source") -> Path:
+    path = UPLOAD_ROOT / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 EMBEDDING_DIMENSION = 3
 
 
@@ -132,10 +144,15 @@ def _add_document(database_url: str, name: str) -> str:
     """插入一个 ready 的当前版本文档，返回 document_version_id。
 
     documents 与 document_versions 互相引用，因此先插空指针的 documents 再回填。
+
+    **源文件同时落到 UPLOAD_ROOT 下。** `source_path` 存的是相对 upload_root 的路径，
+    创建候选版本前会逐个检查它是否还在磁盘上；这里若沿用 `/tmp/x.md` 这种绝对路径，
+    `upload_root / source_path` 会直接跳出 upload_root，预检把每份资料都判成源文件丢失。
     """
 
     document_id = f"doc_{name}"
     document_version_id = f"dv_{name}"
+    _write_source(f"{name}.md")
     with psycopg.connect(database_url) as connection, connection.transaction():
         connection.execute(
             """INSERT INTO documents
@@ -155,7 +172,7 @@ def _add_document(database_url: str, name: str) -> str:
                 KNOWLEDGE_BASE_ID,
                 document_id,
                 "a" * 64,
-                f"/tmp/{name}.md",
+                f"{name}.md",
             ),
         )
         connection.execute(
@@ -313,13 +330,14 @@ def test_finalize_requires_full_document_coverage() -> None:
     index_version_id = _create(database_url)
     first = _add_document(database_url, "first")
     _add_document(database_url, "second")
+    _write_source("first-v2.md")
     with psycopg.connect(database_url) as connection, connection.transaction():
         connection.execute(
             """INSERT INTO document_versions
                (document_version_id, knowledge_base_id, document_id, version_number,
                 content_sha256, source_file_bytes, source_path, status, created_at,
                 parser_name, parser_version, parse_status)
-               VALUES ('dv_first_v2', %s, 'doc_first', 2, %s, 12, '/tmp/first-v2.md',
+               VALUES ('dv_first_v2', %s, 'doc_first', 2, %s, 12, 'first-v2.md',
                        'ready', now(), 'markdown', 'structured-1', 'ready')""",
             (KNOWLEDGE_BASE_ID, "b" * 64),
         )
@@ -622,7 +640,13 @@ def test_switch_accepts_a_report_below_the_frozen_thresholds() -> None:
     # 绝对阈值结论如实记进报告的检索质量层，但不参与放行判定。
     stored = get_report(database_url, str(result["validation_report_id"]))
     assert stored["retrieval_result"]["meets_frozen_thresholds"] is False
-    assert len(list_reports(database_url, index_version_id, KNOWLEDGE_BASE_ID)) == 1
+    # 两份报告：`_ready_version` 里的三层验证一份，这次 activate 自己再核一遍一份。
+    # 断言的是「这次激活留下了自己的那份证据」，不是总数——总数会随流程步骤增减。
+    reports = list_reports(database_url, index_version_id, KNOWLEDGE_BASE_ID)
+    assert len(reports) == 2
+    assert str(result["validation_report_id"]) in {
+        str(item["validation_report_id"]) for item in reports
+    }
     assert list_reports(database_url, index_version_id, "kb_other") == []
     assert get_version(database_url, index_version_id)["status"] == "active"
 
@@ -768,6 +792,70 @@ def test_creation_context_exposes_the_effective_definition_and_real_document_sco
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
+def test_candidate_persists_chunking_definition_and_consistent_parser_snapshot() -> None:
+    from backend.app.index_versions import get_index_version_creation_context, preview_index_version_candidate
+
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    _add_document(database_url, "first")
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            "INSERT INTO index_settings (embedding_model, embedding_dimension) VALUES (%s,%s)",
+            ("test/embedding", EMBEDDING_DIMENSION),
+        )
+        connection.execute(
+            """INSERT INTO documents
+               (document_id, knowledge_base_id, data_source_id, filename, created_at, updated_at)
+               VALUES ('doc_excluded', %s, %s, 'excluded.pdf', now(), now())""",
+            (KNOWLEDGE_BASE_ID, DATA_SOURCE_ID),
+        )
+    preview = preview_index_version_candidate(
+        database_url, KNOWLEDGE_BASE_ID, reason="initial_build",
+        chunk_size=860, chunk_overlap=120, force=False, force_reason=None,
+        reranker_model="test/reranker", upload_root=UPLOAD_ROOT,
+    )
+
+    base_create = {
+        "database_url": database_url,
+        "knowledge_base_id": KNOWLEDGE_BASE_ID,
+        "reason": "initial_build",
+        "chunk_size": 860,
+        "chunk_overlap": 120,
+        "force": False,
+        "force_reason": None,
+        "expected_config_fingerprint": str(preview["config_fingerprint"]),
+        "expected_document_set_fingerprint": str(preview["document_set_fingerprint"]),
+        "expected_release_fingerprint": str(preview["release_fingerprint"]),
+        "requested_by": "usr_admin",
+        "reranker_model": "test/reranker",
+        "upload_root": UPLOAD_ROOT,
+    }
+    with pytest.raises(AppError) as error:
+        create_index_version_candidate(**base_create, idempotency_key="definition-without-ack")
+    assert error.value.code == "INDEX_DOCUMENT_EXCLUSIONS_NOT_ACKNOWLEDGED"
+
+    result = create_index_version_candidate(
+        **base_create,
+        idempotency_key="definition-with-ack",
+        excluded_documents_acknowledged=True,
+    )
+    context = get_index_version_creation_context(
+        database_url, KNOWLEDGE_BASE_ID, chunk_size=700, chunk_overlap=100,
+        reranker_model="test/reranker",
+    )
+    assert context["definition"]["chunking"]["chunk_size"] == 860
+    assert context["definition"]["chunking"]["chunk_overlap"] == 120
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        version = connection.execute(
+            """SELECT config_snapshot, excluded_documents_acknowledged
+               FROM index_versions WHERE index_version_id=%s""",
+            (result["index_version_id"],),
+        ).fetchone()
+    assert version["config_snapshot"]["parser"] == preview["config_snapshot"]["parser"]
+    assert version["excluded_documents_acknowledged"] is True
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
 def test_candidate_creation_rolls_back_if_a_document_job_started_after_preview() -> None:
     """Preview 后出现任务竞态时，不得留下半套 Version/Snapshot/Build。"""
 
@@ -790,6 +878,7 @@ def test_candidate_creation_rolls_back_if_a_document_job_started_after_preview()
         force=False,
         force_reason=None,
         reranker_model="test/reranker",
+        upload_root=UPLOAD_ROOT,
     )
     _add_job(database_url, "preview_race", "queued", document_version_id)
 
@@ -808,6 +897,7 @@ def test_candidate_creation_rolls_back_if_a_document_job_started_after_preview()
             requested_by="usr_admin",
             idempotency_key="preview-race",
             reranker_model="test/reranker",
+            upload_root=UPLOAD_ROOT,
         )
 
     assert error.value.code == "DOCUMENT_INDEX_TASK_IN_PROGRESS"
@@ -865,7 +955,8 @@ def test_candidate_preview_rejects_an_unchanged_release_without_a_force_reason()
             ),
         )
         connection.execute(
-            "UPDATE knowledge_bases SET active_index_version_id='iv_active_context' WHERE knowledge_base_id=%s",
+            """UPDATE knowledge_bases SET active_index_version_id='iv_active_context'
+               WHERE knowledge_base_id=%s""",
             (KNOWLEDGE_BASE_ID,),
         )
 
@@ -878,6 +969,7 @@ def test_candidate_preview_rejects_an_unchanged_release_without_a_force_reason()
         force=False,
         force_reason=None,
         reranker_model="test/reranker",
+        upload_root=UPLOAD_ROOT,
     )
 
     assert preview["document_set_fingerprint"] == snapshot[0]
@@ -930,10 +1022,28 @@ def test_candidate_preview_allows_a_document_snapshot_change() -> None:
             ),
         )
         connection.execute(
-            "UPDATE knowledge_bases SET active_index_version_id='iv_active_context' WHERE knowledge_base_id=%s",
+            """UPDATE knowledge_bases SET active_index_version_id='iv_active_context'
+               WHERE knowledge_base_id=%s""",
             (KNOWLEDGE_BASE_ID,),
         )
+    # 文档集合有两种变法，一起覆盖：新增一份（second），以及既有资料出了新版本（first）。
     _add_document(database_url, "second")
+    _write_source("first-v2.md")
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """INSERT INTO document_versions
+               (document_version_id, knowledge_base_id, document_id, version_number,
+                content_sha256, source_file_bytes, source_path, status, created_at,
+                parser_name, parser_version, parse_status)
+               VALUES ('dv_first_v2', %s, 'doc_first', 2, %s, 12, 'first-v2.md',
+                       'ready', now(), 'markdown', 'structured-1', 'ready')""",
+            (KNOWLEDGE_BASE_ID, "b" * 64),
+        )
+        connection.execute(
+            """UPDATE documents SET current_version_id='dv_first_v2'
+               WHERE knowledge_base_id=%s AND document_id='doc_first'""",
+            (KNOWLEDGE_BASE_ID,),
+        )
 
     preview = preview_index_version_candidate(
         database_url,
@@ -944,6 +1054,7 @@ def test_candidate_preview_allows_a_document_snapshot_change() -> None:
         force=False,
         force_reason=None,
         reranker_model="test/reranker",
+        upload_root=UPLOAD_ROOT,
     )
 
     assert preview["creation_allowed"] is True
@@ -1038,9 +1149,17 @@ def test_rollback_restores_the_previous_version() -> None:
     }
     assert active_index_version_id(database_url, KNOWLEDGE_BASE_ID) == first
     assert _status(database_url, first) == "active"
-    # 被撤下的版本回到 ready：它已被质量门放行过，且再降为 previous 会撞唯一索引。
-    assert _status(database_url, second) == "ready"
+    # 被撤下的版本降为 previous，与激活路径一致——回滚复用同一个原子切换函数。
+    # 此前它退回 ready，于是回滚一次之后知识库就没有 previous，再也回滚不回来。
+    assert _status(database_url, second) == "previous"
     assert _chunk_count(database_url, second) == 3
+
+    # 回滚是对称的：再回滚一次应当把 second 换回来，而不是报「没有可回滚的版本」。
+    back = rollback_to_previous(database_url, KNOWLEDGE_BASE_ID)
+    assert back["active"] == second
+    assert _status(database_url, first) == "previous"
+    assert active_index_version_id(database_url, KNOWLEDGE_BASE_ID) == second
+    rollback_to_previous(database_url, KNOWLEDGE_BASE_ID)
     version = get_version(database_url, first)
     assert version is not None
     # active 必须带放行依据，回滚沿用该版本原有报告。
@@ -1060,13 +1179,14 @@ def test_rollback_requires_confirmation_when_current_document_revisions_are_newe
         database_url, "second", document_version_id, chunking="v1-160-20"
     )
     activate_with_report(database_url, second, _matching_report(database_url, second))
+    _write_source("first-v2.md")
     with psycopg.connect(database_url) as connection, connection.transaction():
         connection.execute(
             """INSERT INTO document_versions
                (document_version_id, knowledge_base_id, document_id, version_number,
                 content_sha256, source_file_bytes, source_path, status, created_at,
                 parser_name, parser_version, parse_status)
-               VALUES ('dv_first_v2', %s, 'doc_first', 2, %s, 12, '/tmp/first-v2.md',
+               VALUES ('dv_first_v2', %s, 'doc_first', 2, %s, 12, 'first-v2.md',
                        'ready', now(), 'markdown', 'structured-1', 'ready')""",
             (KNOWLEDGE_BASE_ID, "b" * 64),
         )

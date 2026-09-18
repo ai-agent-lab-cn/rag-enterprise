@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -18,7 +19,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .chunking import chunking_version as derive_chunking_version
-from .document_snapshots import create_snapshot, current_document_set
+from .document_snapshots import create_snapshot, current_document_set, validate_snapshot_sources
 from .errors import AppError
 from .parsers import PARSER_SCHEMA_VERSION
 
@@ -129,12 +130,31 @@ def release_fingerprint(
 
 
 def _effective_definition(
-    connection: psycopg.Connection[Any], *, chunk_size: int, chunk_overlap: int,
-    reranker_model: str,
+    connection: psycopg.Connection[Any], *, knowledge_base_id: str,
+    chunk_size: int, chunk_overlap: int, reranker_model: str,
+    prefer_persisted_chunking: bool = True,
 ) -> dict[str, Any]:
+    definition = connection.execute(
+        """SELECT chunk_size, chunk_overlap FROM index_definitions
+           WHERE knowledge_base_id=%s""",
+        (knowledge_base_id,),
+    ).fetchone() if prefer_persisted_chunking else None
+    if definition:
+        chunk_size = int(definition["chunk_size"])
+        chunk_overlap = int(definition["chunk_overlap"])
+    chunking_source = "index_definition" if definition else "application_settings"
     registered = connection.execute(
         "SELECT embedding_model, embedding_dimension FROM index_settings WHERE singleton"
     ).fetchone()
+    parser_rows = connection.execute(
+        """SELECT DISTINCT v.parser_version
+           FROM documents d JOIN document_versions v
+             ON v.document_version_id=d.current_version_id
+           WHERE d.knowledge_base_id=%s AND v.parser_version IS NOT NULL
+           ORDER BY v.parser_version""",
+        (knowledge_base_id,),
+    ).fetchall()
+    parser_runtime_versions = [str(row["parser_version"]) for row in parser_rows]
     target_chunking = derive_chunking_version(chunk_size, chunk_overlap)
     options = {"chunk_size": chunk_size, "chunk_overlap": chunk_overlap}
     components = component_manifest(reranker_model=reranker_model)
@@ -153,7 +173,10 @@ def _effective_definition(
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
         },
-        "parser": {"schema_version": PARSER_SCHEMA_VERSION},
+        "parser": {
+            "schema_version": PARSER_SCHEMA_VERSION,
+            "runtime_versions": parser_runtime_versions,
+        },
         "embedding": {
             "model": str(registered["embedding_model"]) if registered else None,
             "dimension": int(registered["embedding_dimension"]) if registered else None,
@@ -162,8 +185,14 @@ def _effective_definition(
         "processing_options": options,
         "config_fingerprint": fingerprint,
         "capabilities": [
-            {"field": "chunk_size", "editable": True, "value": chunk_size, "source": "application_settings", "reason": None},
-            {"field": "chunk_overlap", "editable": True, "value": chunk_overlap, "source": "application_settings", "reason": None},
+            {
+                "field": "chunk_size", "editable": True, "value": chunk_size,
+                "source": chunking_source, "reason": None,
+            },
+            {
+                "field": "chunk_overlap", "editable": True, "value": chunk_overlap,
+                "source": chunking_source, "reason": None,
+            },
             {
                 "field": "parser",
                 "editable": False,
@@ -234,6 +263,7 @@ def get_index_version_creation_context(
     reranker_model: str,
     max_concurrent_builds: int = 2,
     max_documents: int = 10000,
+    prefer_persisted_chunking: bool = True,
 ) -> dict[str, Any]:
     """汇总创建入口所需事实；不创建 Version 或 Snapshot。"""
 
@@ -246,9 +276,11 @@ def get_index_version_creation_context(
             raise AppError("KNOWLEDGE_BASE_NOT_FOUND", "未找到该知识库。", 404)
         definition = _effective_definition(
             connection,
+            knowledge_base_id=knowledge_base_id,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             reranker_model=reranker_model,
+            prefer_persisted_chunking=prefer_persisted_chunking,
         )
         document_set = current_document_set(connection, knowledge_base_id)
         document_version_ids = [
@@ -295,16 +327,33 @@ def get_index_version_creation_context(
             str(item["document_id"]): str(item["document_version_id"])
             for item in document_set["included"]
         }
+        active_snapshot_id = (
+            str(active["document_snapshot_id"])
+            if active and active["document_snapshot_id"]
+            else None
+        )
         document_diff = _document_diff(
             connection,
-            active_snapshot_id=(str(active["document_snapshot_id"]) if active and active["document_snapshot_id"] else None),
+            active_snapshot_id=active_snapshot_id,
             current_members=current_members,
         )
 
     config_changed = bool(
         active
-        and definition["config_fingerprint"]
-        and str(active["config_fingerprint"]) != definition["config_fingerprint"]
+        and (
+            str(active.get("chunking_version") or "") != definition["chunking"]["version"]
+            or str(active.get("embedding_model") or "")
+            != str(definition["embedding"]["model"] or "")
+            or int(active.get("embedding_dimension") or 0)
+            != int(definition["embedding"]["dimension"] or 0)
+            or dict(active.get("processing_options") or {})
+            != definition["processing_options"]
+        )
+    )
+    component_changed = bool(
+        active
+        and str(active.get("config_completeness")) == "complete"
+        and dict(active.get("component_manifest") or {}) != definition["components"]
     )
     document_changed = bool(
         active is not None
@@ -315,7 +364,7 @@ def get_index_version_creation_context(
     )
     if active is None:
         scenario = "initial_build"
-    elif config_changed or document_changed:
+    elif config_changed or component_changed or document_changed:
         scenario = "candidate"
     else:
         scenario = "no_change"
@@ -364,6 +413,13 @@ def get_index_version_creation_context(
             ),
         },
         "document_exclusions": document_set["excluded_details"],
+        "document_inclusions": [
+            {"document_id": item["document_id"], "filename": item["filename"]}
+            for item in document_set["included"]
+        ],
+        # 成员明细只在服务端内部流转（源文件预检要用），不进 API 响应模型：
+        # source_path 是宿主上的相对路径，没有理由交给浏览器。
+        "document_scope_members": document_set["included"],
         "build_capacity": {
             "active_builds": active_builds,
             "max_concurrent_builds": max_concurrent_builds,
@@ -373,6 +429,7 @@ def get_index_version_creation_context(
         "document_diff": document_diff,
         "document_set_fingerprint": document_set["fingerprint"],
         "config_changed": config_changed,
+        "component_changed": component_changed,
         "document_changed": document_changed,
         "creation_allowed": not blocked_reasons,
         "blocked_reasons": blocked_reasons,
@@ -389,10 +446,16 @@ def preview_index_version_candidate(
     force: bool,
     force_reason: str | None,
     reranker_model: str,
+    upload_root: Path,
     max_concurrent_builds: int = 2,
     max_documents: int = 10000,
 ) -> dict[str, Any]:
-    """返回候选版本预览；所有许可结论均由后端产生。"""
+    """返回候选版本预览；所有许可结论均由后端产生。
+
+    源文件缺失在这里就作为阻塞原因返回，而不是等到 Worker 读文件时才炸：那时 Version、
+    Build、Operation 与 Jobs 都已经建好，用户面对的是一个卡在 build_failed 的版本，
+    页面上完全看不出真正该做的动作是重新上传还是删掉失效资料。
+    """
 
     if reason not in CREATION_REASONS:
         raise AppError("INDEX_CREATION_REASON_INVALID", "索引版本创建原因无效。", 400)
@@ -406,6 +469,7 @@ def preview_index_version_candidate(
         reranker_model=reranker_model,
         max_concurrent_builds=max_concurrent_builds,
         max_documents=max_documents,
+        prefer_persisted_chunking=False,
     )
     blocked = [
         item for item in context["blocked_reasons"]
@@ -415,13 +479,34 @@ def preview_index_version_candidate(
         blocked.append("首个版本必须使用“创建首个索引版本”场景。")
     if context["scenario"] != "initial_build" and reason == "initial_build":
         blocked.append("知识库已经存在生效版本。")
-    changed = context["config_changed"] or context["document_changed"]
+    changed = (
+        context["config_changed"]
+        or context["component_changed"]
+        or context["document_changed"]
+    )
+    active = context["active_version"]
+    component_changed = context["component_changed"]
+    if reason == "config_changed" and not context["config_changed"]:
+        blocked.append("当前没有检测到配置变化，请选择与实际变化一致的创建场景。")
+    if reason == "document_snapshot_changed" and not context["document_changed"]:
+        blocked.append("当前没有检测到文档集合变化，请选择与实际变化一致的创建场景。")
+    if reason == "component_upgraded" and not component_changed:
+        blocked.append("当前没有检测到索引组件升级。")
+    if reason == "manual_rebuild" and changed:
+        blocked.append("当前已检测到配置、组件或文档变化，请选择对应的变化场景。")
+    if reason == "consistency_repair":
+        blocked.append("索引一致性修复必须关联真实健康检查证据；当前入口暂未开放。")
     if not changed and context["scenario"] != "initial_build" and not force:
         blocked.append("配置与文档集合均未变化；如需修复性重建，请填写原因。")
     if reason in FORCED_CREATION_REASONS and not force:
         blocked.append("修复性或主动重建必须显式确认强制创建。")
     if force and not (force_reason or "").strip():
         blocked.append("强制重建必须填写原因。")
+    missing_sources = validate_snapshot_sources(upload_root, context["document_scope_members"])
+    if missing_sources:
+        names = "、".join(item["filename"] for item in missing_sources[:3])
+        suffix = " 等" if len(missing_sources) > 3 else ""
+        blocked.append(f"以下资料的源文件已丢失，需重新上传或删除后再创建：{names}{suffix}。")
     definition = context["definition"]
     config_value = str(definition["config_fingerprint"] or "")
     document_value = str(context["document_set_fingerprint"])
@@ -435,7 +520,6 @@ def preview_index_version_candidate(
         else None
     )
     config_diff: list[dict[str, Any]] = []
-    active = context["active_version"]
     if active:
         for field, candidate_value in (
             ("chunking_version", definition["chunking"]["version"]),
@@ -481,6 +565,7 @@ def preview_index_version_candidate(
             "components": definition["components"],
         },
         "component_manifest": definition["components"],
+        "missing_source_documents": missing_sources,
         "config_diff": config_diff,
         "estimated_documents": context["document_scope"]["included"],
         "estimated_chunks": max(
@@ -589,8 +674,17 @@ def active_config_drift(
         registered = connection.execute(
             "SELECT embedding_model, embedding_dimension FROM index_settings WHERE singleton"
         ).fetchone()
+        definition = connection.execute(
+            """SELECT chunk_size, chunk_overlap FROM index_definitions
+               WHERE knowledge_base_id=%s""",
+            (knowledge_base_id,),
+        ).fetchone()
     if registered is None:
         return None
+
+    if definition:
+        chunk_size = int(definition["chunk_size"])
+        chunk_overlap = int(definition["chunk_overlap"])
 
     current_chunking = derive_chunking_version(chunk_size, chunk_overlap)
     current_options = {"chunk_size": chunk_size, "chunk_overlap": chunk_overlap}
@@ -659,6 +753,7 @@ def create_building_version(
     creation_idempotency_key: str | None = None,
     config_snapshot: dict[str, Any] | None = None,
     components: dict[str, str] | None = None,
+    excluded_documents_acknowledged: bool = False,
 ) -> tuple[str, str]:
     """创建一个 building 索引版本，同时冻结配置与输入文档集合，返回两者的 id。
 
@@ -686,6 +781,7 @@ def create_building_version(
             creation_idempotency_key=creation_idempotency_key,
             config_snapshot=config_snapshot,
             components=components,
+            excluded_documents_acknowledged=excluded_documents_acknowledged,
         )
 
 
@@ -705,6 +801,7 @@ def create_building_version_in_transaction(
     creation_idempotency_key: str | None,
     config_snapshot: dict[str, Any] | None,
     components: dict[str, str] | None,
+    excluded_documents_acknowledged: bool = False,
 ) -> tuple[str, str]:
     """在调用方事务内原子创建 Document Snapshot 与 building Version。"""
 
@@ -769,9 +866,9 @@ def create_building_version_in_transaction(
             embedding_model, embedding_dimension, processing_options, config_fingerprint,
             rebuild_batch_id, document_snapshot_id, version_no, creation_reason, force_reason,
             requested_by, creation_idempotency_key, config_snapshot, component_manifest,
-            release_fingerprint, config_completeness)
+            release_fingerprint, config_completeness, excluded_documents_acknowledged)
            VALUES (%s, %s, 'building', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   %s, %s, %s, %s, %s, %s)""",
+                   %s, %s, %s, %s, %s, %s, %s)""",
         (
             index_version_id,
             knowledge_base_id,
@@ -792,6 +889,7 @@ def create_building_version_in_transaction(
             Jsonb(manifest),
             release,
             "complete" if manifest else "unknown",
+            excluded_documents_acknowledged,
         ),
     )
     record_lifecycle_event(
@@ -832,7 +930,7 @@ def list_versions(database_url: str, knowledge_base_id: str) -> list[dict[str, A
                       document_snapshot_id, rebuild_batch_id, version_no, creation_reason,
                       force_reason, requested_by, config_snapshot, component_manifest,
                       release_fingerprint, config_completeness,
-                      legacy_migrated,
+                      legacy_migrated, excluded_documents_acknowledged,
                       created_at, activated_at, retired_at, cleaned_at
                FROM index_versions WHERE knowledge_base_id = %s
                ORDER BY created_at DESC""",
@@ -1148,6 +1246,94 @@ def drop_partial_vector_index(database_url: str, index_version_id: str) -> None:
         )
 
 
+def _promote_to_active(
+    connection: psycopg.Connection[Any],
+    *,
+    target: dict[str, Any],
+    actor: Actor | None,
+    event_type: str,
+    reason: str | None,
+) -> dict[str, str]:
+    """把目标版本切成 active 的唯一实现；激活与回滚共用它。
+
+    此前回滚自己写了一套 UPDATE，把原 active 退回 ``ready`` 而不是 ``previous``：
+    回滚一次之后知识库就没有 previous 了，想切回去只能走「激活」，而且**再也回滚不了**。
+    两条路径各自维护一套状态搬移，是「同一个操作在两处行为不一致」的典型形态。
+
+    四步顺序不能调整，每一步都实测过：
+    1. 退役其它 previous（排除目标本身，否则回滚会把要恢复的那一版直接退役掉）；
+    2. 目标若正停在 previous（回滚场景），先移到 ready 腾空 previous 槽位——它本来就
+       是被门禁放行过的版本，ready 语义正确；
+    3. 原 active 降为 previous（此时 previous 已空）；
+    4. 目标升为 active（此时 active 已空）。
+
+    不能合并成一条带 CASE 的 UPDATE：``index_versions_one_previous_idx`` 是非延迟的
+    partial unique index，**实测在单条 UPDATE 语句内部就会报 duplicate key**，
+    不是等到语句结束才检查。
+    """
+
+    index_version_id = str(target["index_version_id"])
+    knowledge_base_id = str(target["knowledge_base_id"])
+    from_status = str(target["status"])
+    retiring = connection.execute(
+        """UPDATE index_versions SET status = 'retired', retired_at = now()
+           WHERE knowledge_base_id = %s AND status = 'previous' AND index_version_id <> %s
+           RETURNING index_version_id""",
+        (knowledge_base_id, index_version_id),
+    ).fetchone()
+    if retiring:
+        record_lifecycle_event(
+            connection, knowledge_base_id=knowledge_base_id,
+            index_version_id=str(retiring["index_version_id"]),
+            event_type="retired", from_status="previous", to_status="retired",
+            actor=actor, reason=f"因激活 {index_version_id} 而退役",
+        )
+    # 中间步骤，不记事件：它不是一次独立的状态转换，而是这一次切换的内部顺序要求。
+    connection.execute(
+        "UPDATE index_versions SET status = 'ready' WHERE index_version_id = %s AND status = 'previous'",
+        (index_version_id,),
+    )
+    demoted = connection.execute(
+        """UPDATE index_versions SET status = 'previous'
+           WHERE knowledge_base_id = %s AND status = 'active'
+           RETURNING index_version_id""",
+        (knowledge_base_id,),
+    ).fetchone()
+    connection.execute(
+        """UPDATE index_versions
+           SET status = 'active', activated_at = now(),
+               evaluation_report_id = COALESCE(
+                   (SELECT evaluation_set_version FROM validation_reports
+                    WHERE validation_report_id = %s),
+                   evaluation_report_id)
+           WHERE index_version_id = %s""",
+        (target.get("validation_report_id"), index_version_id),
+    )
+    connection.execute(
+        "UPDATE knowledge_bases SET active_index_version_id = %s WHERE knowledge_base_id = %s",
+        (index_version_id, knowledge_base_id),
+    )
+    record_lifecycle_event(
+        connection, knowledge_base_id=knowledge_base_id,
+        index_version_id=index_version_id, event_type=event_type,
+        from_status=from_status, to_status="active", actor=actor, reason=reason,
+        validation_report_id=target.get("validation_report_id"),
+    )
+    if demoted:
+        record_lifecycle_event(
+            connection, knowledge_base_id=knowledge_base_id,
+            index_version_id=str(demoted["index_version_id"]),
+            event_type="deactivated", from_status="active", to_status="previous",
+            actor=actor, reason=f"被 {index_version_id} 取代",
+        )
+    return {
+        "knowledge_base_id": knowledge_base_id,
+        "active": index_version_id,
+        "previous": str(demoted["index_version_id"]) if demoted else "",
+        "retired": str(retiring["index_version_id"]) if retiring else "",
+    }
+
+
 def switch_to_version(
     database_url: str,
     index_version_id: str,
@@ -1226,53 +1412,10 @@ def switch_to_version(
                 "验证报告属于另一个索引版本，不能用它放行本版本。",
                 409,
             )
-        knowledge_base_id = str(target["knowledge_base_id"])
-        retiring = connection.execute(
-            """UPDATE index_versions SET status = 'retired', retired_at = now()
-               WHERE knowledge_base_id = %s AND status = 'previous'
-               RETURNING index_version_id""",
-            (knowledge_base_id,),
-        ).fetchone()
-        if retiring:
-            record_lifecycle_event(
-                connection, knowledge_base_id=knowledge_base_id,
-                index_version_id=str(retiring["index_version_id"]),
-                event_type="retired", from_status="previous", to_status="retired",
-                actor=actor, reason=f"因激活 {index_version_id} 而退役",
-            )
-        demoted = connection.execute(
-            """UPDATE index_versions SET status = 'previous'
-               WHERE knowledge_base_id = %s AND status = 'active'
-               RETURNING index_version_id""",
-            (knowledge_base_id,),
-        ).fetchone()
-        connection.execute(
-            """UPDATE index_versions
-               SET status = 'active', activated_at = now(),
-                   evaluation_report_id = COALESCE(
-                       (SELECT evaluation_set_version FROM validation_reports
-                        WHERE validation_report_id = %s),
-                       evaluation_report_id)
-               WHERE index_version_id = %s""",
-            (target["validation_report_id"], index_version_id),
+        switched = _promote_to_active(
+            connection, target=dict(target), actor=actor, event_type="activated", reason=None
         )
-        connection.execute(
-            "UPDATE knowledge_bases SET active_index_version_id = %s WHERE knowledge_base_id = %s",
-            (index_version_id, knowledge_base_id),
-        )
-        record_lifecycle_event(
-            connection, knowledge_base_id=knowledge_base_id,
-            index_version_id=index_version_id, event_type="activated",
-            from_status="ready", to_status="active", actor=actor,
-            validation_report_id=target["validation_report_id"],
-        )
-        if demoted:
-            record_lifecycle_event(
-                connection, knowledge_base_id=knowledge_base_id,
-                index_version_id=str(demoted["index_version_id"]),
-                event_type="deactivated", from_status="active", to_status="previous",
-                actor=actor, reason=f"被 {index_version_id} 取代",
-            )
+        knowledge_base_id = switched["knowledge_base_id"]
     if audit is not None:
         audit.record(
             "index_version.activate",
@@ -1285,7 +1428,7 @@ def switch_to_version(
     return {
         "knowledge_base_id": knowledge_base_id,
         "active": index_version_id,
-        "previous": str(demoted["index_version_id"]) if demoted else "",
+        "previous": switched["previous"],
         "validation_report_id": str(target["validation_report_id"]),
     }
 
@@ -1298,15 +1441,17 @@ def rollback_to_previous(
     *,
     confirm_content_lag: bool = False,
 ) -> dict[str, str]:
-    """把 previous 切回 active，原 active 退回 ready。
+    """把 previous 切回 active，原 active 降为 previous。
 
-    原 active 退回 ready 而不是 previous——同一知识库只允许一个 previous，且 ready 在
-    新状态机里明确表示「已通过三层门禁、可以激活」，正好描述一个刚被换下来的版本。
-    它的 validation_report_id 仍然有效，因此想再切回去是一次普通激活，不必重跑评测。
+    切换本身复用 ``_promote_to_active``——与激活是同一份实现。此前回滚自己写了一套
+    UPDATE，并把原 active 退回 ``ready``：那之后知识库就没有 previous 了，**再也回滚
+    不回来**，只能走「激活」。现在两条路径产出同一种结果，来回回滚是对称的。
 
-    回滚不要求新报告：目标版本此前已被质量门放行过，其 ``evaluation_report_id`` 仍然有效，
-    因此提升它不会违反 index_versions_active_requires_report。原 active 退回 ready 而不是
-    previous——同一知识库只允许一个 previous，且它同样是放行过的版本，ready 语义正确。
+    回滚不要求新报告：目标版本此前已被放行过，其 ``evaluation_report_id`` 仍然有效，
+    因此提升它不会违反 index_versions_active_requires_report。这里也不重新核验验证报告
+    ——引导版本与历史回填版本的报告状态本来就不是 standard，要求它们重新通过门禁等于
+    取消回滚这条恢复路径。可发布约束由下面三项前置检查表达：目标必须停在 previous、
+    分块没有被清理、内容时间点差异已被显式确认。
     """
 
     with psycopg.connect(database_url, row_factory=dict_row) as connection, connection.transaction():
@@ -1316,7 +1461,9 @@ def rollback_to_previous(
         ).fetchone() is None:
             raise AppError("KNOWLEDGE_BASE_NOT_FOUND", "未找到该知识库。", 404)
         target = connection.execute(
-            """SELECT index_version_id, document_snapshot_id FROM index_versions
+            """SELECT index_version_id, knowledge_base_id, status, document_snapshot_id,
+                      validation_report_id
+               FROM index_versions
                WHERE knowledge_base_id = %s AND status = 'previous' FOR UPDATE""",
             (knowledge_base_id,),
         ).fetchone()
@@ -1349,36 +1496,16 @@ def rollback_to_previous(
                 "上一索引版本的文档时间点与当前资料集合不同；请先查看差异并显式确认。",
                 409,
             )
-        demoted = connection.execute(
-            """UPDATE index_versions SET status = 'ready'
-               WHERE knowledge_base_id = %s AND status = 'active'
-               RETURNING index_version_id""",
-            (knowledge_base_id,),
-        ).fetchone()
-        connection.execute(
-            "UPDATE index_versions SET status = 'active', activated_at = now() WHERE index_version_id = %s",
-            (restored,),
-        )
-        connection.execute(
-            "UPDATE knowledge_bases SET active_index_version_id = %s WHERE knowledge_base_id = %s",
-            (restored, knowledge_base_id),
-        )
-        record_lifecycle_event(
-            connection, knowledge_base_id=knowledge_base_id, index_version_id=restored,
-            event_type="rolled_back", from_status="previous", to_status="active",
+        switched = _promote_to_active(
+            connection,
+            target=dict(target),
             actor=actor,
+            event_type="rolled_back",
             reason=(
                 "回滚到上一生效版本；已确认内容时间点差异"
                 if content_lag else "回滚到上一生效版本"
             ),
         )
-        if demoted:
-            record_lifecycle_event(
-                connection, knowledge_base_id=knowledge_base_id,
-                index_version_id=str(demoted["index_version_id"]),
-                event_type="deactivated", from_status="active", to_status="ready",
-                actor=actor, reason=f"因回滚到 {restored} 而退下",
-            )
     if audit is not None:
         audit.record(
             "index_version.rollback",
@@ -1391,7 +1518,7 @@ def rollback_to_previous(
     return {
         "knowledge_base_id": knowledge_base_id,
         "active": restored,
-        "demoted": str(demoted["index_version_id"]) if demoted else "",
+        "demoted": switched["previous"],
     }
 
 
@@ -1410,9 +1537,12 @@ def retire_version(
 
     with psycopg.connect(database_url, row_factory=dict_row) as connection, connection.transaction():
         version = connection.execute(
+            # %s::text 的 cast 不能省：不带类型的 `%s IS NULL` 让 PostgreSQL 无从推断
+            # 参数类型，整条查询直接抛 IndeterminateDatatype——也就是说，「跨知识库退役
+            # 必须 404」这条防线此前从未真正执行过，它只是碰巧被异常挡住了。
             """SELECT knowledge_base_id, status FROM index_versions
                WHERE index_version_id=%s
-                 AND (%s IS NULL OR knowledge_base_id=%s)
+                 AND (%s::text IS NULL OR knowledge_base_id=%s)
                FOR UPDATE""",
             (index_version_id, knowledge_base_id, knowledge_base_id),
         ).fetchone()

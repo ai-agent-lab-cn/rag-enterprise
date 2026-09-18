@@ -62,6 +62,7 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
   const [streamingSources, setStreamingSources] = useState<Source[]>([]);
   const [pendingQuestion, setPendingQuestion] = useState("");
   const streamController = useRef<AbortController | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
 
   const loadBase = useCallback(async (id: string) => {
     const [docs, items, categoryItems] = await Promise.all([api.listKnowledgeBaseDocuments(id), api.listConversations(id), api.listKnowledgeBaseCategories(id)]);
@@ -75,6 +76,11 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
     if (!conversationId) { Promise.resolve().then(() => setHistory(null)); return; }
     api.getConversation(baseId, conversationId).then((value) => { setHistory(value); setResult(null); }, (reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取会话。"));
   }, [baseId, conversationId]);
+  useEffect(() => {
+    const messageList = messageListRef.current;
+    if (!messageList) return;
+    messageList.scrollTop = messageList.scrollHeight;
+  }, [history?.conversation_id, history?.records.length, result?.record_id]);
 
   const activeRecord = useMemo(() => history?.records.at(-1) ?? null, [history]);
   const historicalResult = useMemo<QueryResult | null>(() => activeRecord ? {
@@ -124,6 +130,16 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
       // finalAnswer 在流式回调里赋值，TS 的控制流分析追不进闭包，会认定它此处仍是初始的
       // null 并把类型 narrow 成 never。显式取回声明类型，不改变运行时行为。
       const answer = finalAnswer as QueryResult | null;
+      const persistedConversationId = answer?.conversation_id || conversationId;
+      if (persistedConversationId) {
+        try {
+          const refreshedHistory = await api.getConversation(baseId, persistedConversationId);
+          setHistory(refreshedHistory);
+          setResult(null);
+        } catch (reason) {
+          setError(reason instanceof Error ? reason.message : "回答已生成，但会话详情刷新失败。");
+        }
+      }
       if (!conversationId && answer?.conversation_id) onOpen(`/chat/${answer.conversation_id}?knowledge_base_id=${baseId}`);
     } catch (reason) {
       if (!(reason instanceof DOMException && reason.name === "AbortError")) setError(reason instanceof Error ? reason.message : "查询失败。");
@@ -149,7 +165,7 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
     <div className="grid grid-cols-1 min-w-0 min-h-0 bg-canvas min-[901px]:grid-cols-[minmax(430px,1fr)_290px] min-[1025px]:grid-cols-[minmax(520px,1fr)_300px]">
       <section className="grid grid-rows-[auto_minmax(0,1fr)_auto] min-h-0 min-w-0 border-r border-line bg-[#fbfcff] max-[901px]:min-h-[720px] max-[901px]:border-r-0 max-[768px]:min-h-[680px]">
         <header className="flex h-[72px] items-center justify-between gap-4 border-b border-line bg-surface px-6 max-[768px]:h-[62px] max-[768px]:px-3.5 min-[1025px]:h-16 min-[1025px]:px-5"><h1 className="m-0 max-w-[520px] overflow-hidden text-ellipsis whitespace-nowrap text-[17px] max-[768px]:max-w-[180px] max-[768px]:text-[15px] min-[1025px]:text-[14px]">{history?.title ?? "新对话"}</h1><div className="flex gap-2"><Button variant="outline" size="sm" blockedReason={history ? undefined : "当前对话还没有内容"} onClick={exportConversation}><Download size={16}/> 导出对话</Button><Button variant="outline" size="sm" className="text-danger-text hover:bg-danger-subtle" blockedReason={conversationId ? undefined : "当前是新对话，没有内容可清空"} onClick={() => setConfirmDelete(true)}><Trash2 size={16}/> 清空对话</Button></div></header>
-        <div className="min-h-0 overflow-y-auto scroll-smooth pt-[26px] px-7 pb-[18px] max-[768px]:pt-[18px] max-[768px]:px-3 min-[768px]:px-[18px] min-[1025px]:pt-5 min-[1025px]:px-[22px] min-[1025px]:pb-3.5">
+        <div ref={messageListRef} className="min-h-0 overflow-y-auto scroll-smooth pt-[26px] px-7 pb-[18px] max-[768px]:pt-[18px] max-[768px]:px-3 min-[768px]:px-[18px] min-[1025px]:pt-5 min-[1025px]:px-[22px] min-[1025px]:pb-3.5">
           {/* 弹层开着时错误只在弹层里显示：这条横幅在 Radix 的 aria-hidden 背景里。 */}
           {error && !confirmDelete ? <ErrorBanner>{error}</ErrorBanner> : null}
           {history?.records.map((record, index) => <div className="mx-auto mb-[30px] grid max-w-[760px] gap-[18px]" key={record.record_id}><article className="flex items-start justify-end gap-2.5"><span className="block max-w-[78%] rounded-[14px_14px_3px_14px] bg-[#eeeaff] px-4 py-[13px] leading-[1.65] text-[#332878] max-[768px]:max-w-[85%]">{record.question}</span><b className="grid h-[30px] w-[30px] flex-none place-items-center rounded-full bg-[#9a8ce8] text-[11px] font-bold text-white">你</b></article><article className="flex items-start gap-2.5"><span className="grid h-[30px] w-[30px] flex-none place-items-center rounded-full bg-brand text-white"><Bot size={17}/></span><div className="max-w-[min(86%,720px)] rounded-[3px_14px_14px_14px] border border-line bg-surface py-4 px-[18px] shadow-[0_5px_18px_rgba(31,38,63,0.04)] max-[768px]:max-w-[calc(100%-40px)] max-[768px]:p-[13px]"><p className="m-0 leading-[1.85] whitespace-pre-wrap text-[#343c50]">{record.answer ?? record.error_message ?? "本次回答失败。"}</p><small className="block mt-3 text-[10px] text-ink-faint">{record.sources.length} 条来源 · {new Date(record.created_at).toLocaleString("zh-CN")}</small>{index === history.records.length - 1 && historicalResult ? <TechnicalDrawer result={historicalResult}/> : null}</div></article></div>)}

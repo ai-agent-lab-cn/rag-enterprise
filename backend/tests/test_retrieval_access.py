@@ -347,7 +347,8 @@ def test_reindexing_a_document_preserves_manual_acl(tmp_path: Path) -> None:
                 (KNOWLEDGE_BASE_ID, indexed.document_id),
             ).fetchone()
         data = dict(row[0] or {})
-        return {key: data.get(key) for key in ("acl_version", "allow_user_ids", "deny_user_ids", "retrieval_status")}
+        keys = ("acl_version", "allow_user_ids", "deny_user_ids", "retrieval_status")
+        return {key: data.get(key) for key in keys}
 
     before = governance()
     assert before["allow_user_ids"] == [USER], "前置条件：ACL 已写入"
@@ -446,7 +447,8 @@ def test_document_listing_hides_documents_the_user_cannot_retrieve(tmp_path: Pat
     settings = _settings(tmp_path, database_url)
     service = PostgresAsyncRAGService(settings, _FakeEmbedder(), None, None)
 
-    public = service.index_document("public.md", DOCUMENT_TEXT.encode(), KNOWLEDGE_BASE_ID)
+    # 这份公开文档只需要存在，后面按文件名断言，不用它的返回值。
+    service.index_document("public.md", DOCUMENT_TEXT.encode(), KNOWLEDGE_BASE_ID)
     secret = service.index_document("secret-payroll.md", DOCUMENT_TEXT.encode(), KNOWLEDGE_BASE_ID)
     while IndexWorker(settings, _FakeEmbedder()).run_once():
         pass

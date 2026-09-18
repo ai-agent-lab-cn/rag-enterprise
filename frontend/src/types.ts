@@ -192,7 +192,7 @@ export interface QueryResult {
 }
 
 export interface ApiErrorPayload {
-  error?: { code?: string; message?: string };
+  error?: { code?: string; message?: string; details?: unknown };
 }
 
 export interface User {
@@ -297,6 +297,14 @@ export interface EvaluationReportSummary {
   commit: string;
   run_at: string;
   models: Record<string, string>;
+  /**
+   * 这份报告是不是受控正式运行的产物。
+   *
+   * 与 `passed` 是两件事：official 说的是来源可信度——能不能作为三层验证的证据；
+   * passed 只说明指标有没有达到冻结阈值。此前后端把两者绑在一起（未达标就不标
+   * official），页面因此只能按 passed 筛报告，把「跑完没达标」显示成「缺少可用报告」。
+   */
+  official: boolean;
   passed: boolean;
   config_fingerprint?: string | null;
 }
@@ -550,6 +558,7 @@ export interface IndexVersion {
   release_fingerprint: string | null;
   config_completeness: "complete" | "unknown";
   legacy_migrated: boolean;
+  excluded_documents_acknowledged: boolean;
   created_at: string;
   activated_at: string | null;
   retired_at: string | null;
@@ -566,7 +575,7 @@ export type IndexVersionCreationReason =
 
 export interface IndexDefinitionView {
   chunking: { version: string; chunk_size: number; chunk_overlap: number };
-  parser: { schema_version: string };
+  parser: { schema_version: string; runtime_versions: string[] };
   embedding: { model: string | null; dimension: number | null };
   components: Record<string, string>;
   processing_options: Record<string, unknown>;
@@ -594,6 +603,7 @@ export interface IndexVersionCreationContext {
     latest_status: string;
     parse_failure_code: string | null;
   }>;
+  document_inclusions: Array<{ document_id: string; filename: string }>;
   build_capacity: {
     active_builds: number;
     max_concurrent_builds: number;
@@ -603,6 +613,7 @@ export interface IndexVersionCreationContext {
   document_diff: { added: number; removed: number; updated: number; unchanged: number };
   document_set_fingerprint: string;
   config_changed: boolean;
+  component_changed: boolean;
   document_changed: boolean;
   creation_allowed: boolean;
   blocked_reasons: string[];
@@ -620,6 +631,7 @@ export interface IndexVersionCandidatePreview extends IndexVersionCreationContex
   estimated_documents: number;
   estimated_chunks: number;
   estimated_embedding_units: number;
+  missing_source_documents: Array<{ document_id: string; filename: string }>;
 }
 
 export interface IndexVersionBuildResult {
@@ -718,4 +730,49 @@ export interface LifecycleEvent {
   reason: string | null;
   validation_report_id: string | null;
   created_at: string;
+}
+
+/** 一次正式检索评测运行的状态。与后端 evaluation_runs_status_check 同一套取值。 */
+export type EvaluationRunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+/**
+ * 一次正式检索评测运行。
+ *
+ * `passed` 在跑完之前是 null——「还没跑」与「跑完没达标」不能用同一个值表达。
+ * `failure_reason` 是后端按 `failure_code` 映射出的稳定中文文案，不是异常原文：
+ * 技术详情（连接串、宿主路径）留在数据库里给管理员，不出接口。
+ */
+export interface IndexEvaluationRun {
+  evaluation_run_id: string;
+  knowledge_base_id: string;
+  index_version_id: string;
+  operation_id: string | null;
+  dataset_id: string;
+  dataset_version: string;
+  dataset_slug: string | null;
+  status: EvaluationRunStatus;
+  config_fingerprint: string | null;
+  baseline_report_id: string | null;
+  report_id: string | null;
+  official: boolean;
+  passed: boolean | null;
+  attempt_count: number;
+  max_attempts: number;
+  requested_by: string | null;
+  failure_code: string | null;
+  failure_reason: string | null;
+  available_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 评测运行详情：额外带上入队时冻结的配置与完整报告。 */
+export interface IndexEvaluationRunDetail extends IndexEvaluationRun {
+  models: Record<string, string>;
+  metrics: Record<string, unknown>;
+  config_snapshot: Record<string, unknown>;
+  component_manifest: Record<string, unknown>;
+  report: EvaluationReport | null;
 }

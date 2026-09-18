@@ -302,8 +302,12 @@ class PostgresDataSourceRepository:
                    LEFT JOIN documents d ON d.data_source_id = s.data_source_id
                    LEFT JOIN document_versions v ON v.document_version_id = d.current_version_id
                    LEFT JOIN LATERAL (
+                     -- 只看索引类任务。不限 job_type 的话，上传后自动排的 classify
+                     -- 任务往往是最近一条，于是「最后索引时间」读到一个还没跑完的
+                     -- 分类任务，显示成从未索引过；failure_reason 同理会串台。
                      SELECT status, finished_at, failure_reason FROM index_jobs
                      WHERE data_source_id = s.data_source_id
+                       AND job_type IN ('index', 'rebuild')
                      ORDER BY created_at DESC LIMIT 1
                    ) j ON true
                    GROUP BY s.data_source_id, k.name, j.finished_at, j.status, j.failure_reason

@@ -9,8 +9,8 @@ import pytest
 from pydantic import ValidationError
 
 from backend.app.chunking import chunking_version, split_sections, stable_document_id
-from backend.app.database import apply_migrations
 from backend.app.config import get_settings
+from backend.app.database import apply_migrations
 from backend.app.index_versions import component_manifest, config_fingerprint
 from backend.app.parsers import parse_document
 from backend.evaluation import (

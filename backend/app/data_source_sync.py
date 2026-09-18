@@ -296,8 +296,14 @@ def build_connector(
             str(configuration.get("id_column") or "id"),
             str(configuration.get("content_column") or "content"),
             str(configuration.get("updated_column") or "") or None,
-            {str(key): str(value) for key, value in dict(configuration.get("metadata_mapping") or {}).items()},
-            {str(key): str(value) for key, value in dict(configuration.get("acl_mapping") or {}).items()},
+            {
+                str(key): str(value)
+                for key, value in dict(configuration.get("metadata_mapping") or {}).items()
+            },
+            {
+                str(key): str(value)
+                for key, value in dict(configuration.get("acl_mapping") or {}).items()
+            },
         )
 
     raise AppError(

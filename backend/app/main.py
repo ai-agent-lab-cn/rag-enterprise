@@ -18,22 +18,30 @@ from .auth import AuthenticatedSession, AuthRepository, UserRecord
 from .chunking import chunking_version
 from .config import get_settings
 from .data_source_sync import build_connector, enqueue_sync, retry_sync_resource
-from .pipeline_governance import (
-    cancel_sync_run,
-    list_document_index_states,
-    list_index_builds,
-    list_operations,
-    list_sync_resources,
-)
 from .database import check_schema_version
 from .demo import seed_demo_document
 from .errors import AppError, install_error_handlers
 from .evaluation_governance import BadCaseUpdate
 from .evaluation_reports import EvaluationReportRepository
+from .generation_models import GenerationProviderState
+from .history import ConversationRepository
+from .index_evaluation_runs import (
+    cancel_evaluation_run,
+    create_evaluation_run,
+    get_evaluation_run,
+    list_evaluation_runs,
+    retry_evaluation_run,
+)
+from .index_evaluation_runs import (
+    failure_message as evaluation_failure_message,
+)
+from .index_evaluation_worker import require_isolated_evaluation_database
 from .index_validation import (
     get_validation_policy,
-    list_reports as list_validation_reports,
     validate_index_version,
+)
+from .index_validation import (
+    list_reports as list_validation_reports,
 )
 from .index_versions import (
     Actor,
@@ -47,8 +55,6 @@ from .index_versions import (
     rollback_to_previous,
     switch_to_version,
 )
-from .history import ConversationRepository
-from .generation_models import GenerationProviderState
 from .knowledge_bases import (
     DEFAULT_KNOWLEDGE_BASE_ID,
     KnowledgeBaseRecord,
@@ -57,6 +63,13 @@ from .knowledge_bases import (
 )
 from .models import SwitchableGenerator, get_embedding_model, get_generator, get_reranker
 from .observability import MetricsRegistry, ObservabilityMiddleware, bind_actor, hash_identifier
+from .pipeline_governance import (
+    cancel_sync_run,
+    list_document_index_states,
+    list_index_builds,
+    list_operations,
+    list_sync_resources,
+)
 from .postgres_documents import (
     PostgresAsyncRAGService,
     cancel_index_version_build,
@@ -101,38 +114,40 @@ from .schemas import (
     ConversationDetailResponse,
     ConversationSummaryResponse,
     DataSourceConnectionTestResponse,
-    DataSourcePreviewResponse,
     DataSourceCreate,
+    DataSourcePreviewResponse,
     DataSourceResponse,
     DataSourceUpdate,
+    DocumentIndexStateResponse,
     DocumentInfo,
     DocumentMetadata,
     DocumentVersionResponse,
     EvaluationCenterOverviewResponse,
     EvaluationReportResponse,
     EvaluationReportSummary,
-    GovernedBadCaseResponse,
-    GovernedBadCaseUpdate,
     GenerationModelActivateRequest,
     GenerationModelItemResponse,
     GenerationModelsResponse,
+    GovernedBadCaseResponse,
+    GovernedBadCaseUpdate,
     HealthResponse,
-    IndexVersionResponse,
     IndexBuildResponse,
-    DocumentIndexStateResponse,
+    IndexDefinitionResponse,
+    IndexEvaluationRunCreateRequest,
+    IndexEvaluationRunDetailResponse,
+    IndexEvaluationRunResponse,
     IndexVersionCandidatePreviewResponse,
     IndexVersionComparisonResponse,
-    IndexDefinitionResponse,
     IndexVersionCreateRequest,
     IndexVersionCreateResponse,
     IndexVersionCreationContextResponse,
     IndexVersionPreviewRequest,
+    IndexVersionResponse,
     IndexVersionValidationRequest,
-    LifecycleEventResponse,
-    ValidationReportResponse,
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
     KnowledgeBaseUpdate,
+    LifecycleEventResponse,
     LivenessResponse,
     MemberCreate,
     MemberUpdate,
@@ -145,9 +160,10 @@ from .schemas import (
     ReadinessResponse,
     ReprocessDocumentVersionRequest,
     SyncEnqueueResponse,
-    SyncRunResponse,
     SyncResourceRunResponse,
+    SyncRunResponse,
     UserResponse,
+    ValidationReportResponse,
 )
 from .security import AbuseProtection, SecurityBoundaryMiddleware, validate_upload
 from .service import RAGService, RAGServiceProtocol
@@ -188,7 +204,8 @@ def get_generation_manager() -> SwitchableGenerator:
 def get_evaluation_reports() -> EvaluationReportRepository:
     """报告查询不依赖 RAGService，避免只读请求初始化重量模型。"""
 
-    return EvaluationReportRepository(get_settings().evaluation_reports_path)
+    settings = get_settings()
+    return EvaluationReportRepository(settings.evaluation_reports_path, settings.database_url)
 
 
 EvaluationReportsDependency = Annotated[EvaluationReportRepository, Depends(get_evaluation_reports)]
@@ -967,7 +984,9 @@ def create_app() -> FastAPI:
             retry_sync_resource, settings, data_source_id, sync_run_id, resource_id
         ):
             raise AppError("SYNC_RESOURCE_NOT_FOUND", "未找到同步资源。", 404)
-        await _record_audit(audit, "data_source.sync.resource.retry", current.user, "sync_resource", resource_id)
+        await _record_audit(
+            audit, "data_source.sync.resource.retry", current.user, "sync_resource", resource_id
+        )
 
     @app.put("/api/data-sources/{data_source_id}/enabled", status_code=204)
     async def set_data_source_enabled(
@@ -1631,6 +1650,7 @@ def create_app() -> FastAPI:
             force=payload.force,
             force_reason=payload.force_reason,
             reranker_model=settings.reranker_model,
+            upload_root=settings.upload_path,
             max_concurrent_builds=settings.max_concurrent_index_builds,
             max_documents=settings.max_index_build_documents,
         )
@@ -1676,9 +1696,11 @@ def create_app() -> FastAPI:
             expected_config_fingerprint=payload.expected_config_fingerprint,
             expected_document_set_fingerprint=payload.expected_document_set_fingerprint,
             expected_release_fingerprint=payload.expected_release_fingerprint,
+            excluded_documents_acknowledged=payload.excluded_documents_acknowledged,
             requested_by=current.user.user_id,
             idempotency_key=idempotency_key,
             reranker_model=settings.reranker_model,
+            upload_root=settings.upload_path,
             max_concurrent_builds=settings.max_concurrent_index_builds,
             max_documents=settings.max_index_build_documents,
         )
@@ -1814,6 +1836,189 @@ def create_app() -> FastAPI:
         return [DocumentIndexStateResponse(**row) for row in rows]
 
     @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/evaluation-runs",
+        response_model=IndexEvaluationRunResponse,
+        status_code=202,
+    )
+    async def create_scoped_index_evaluation_run(
+        knowledge_base_id: str,
+        index_version_id: str,
+        payload: IndexEvaluationRunCreateRequest,
+        knowledge_bases: KnowledgeBasesDependency,
+        service: ServiceDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> IndexEvaluationRunResponse:
+        """给候选版本排一次正式检索评测。
+
+        202 而不是 201：这里只是入队，真正的评测由独立的 Evaluation Worker 执行。
+        没有 Worker 在跑时任务会一直停在 queued——这是如实反映，不是接口失败。
+        """
+
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "正式评测需要 PostgreSQL。", 503)
+        # 没配评测库就不该让任务入队：它会永远停在 queued，而页面显示「评测中」。
+        require_isolated_evaluation_database(settings)
+        if not any(
+            item["index_version_id"] == index_version_id
+            for item in await run_in_threadpool(service.list_index_versions, knowledge_base_id)
+        ):
+            raise AppError("INDEX_VERSION_NOT_FOUND", "未找到该知识库的索引版本。", 404)
+        run = await run_in_threadpool(
+            create_evaluation_run,
+            sources.database_url,
+            index_version_id,
+            payload.dataset_id,
+            current.user.user_id,
+        )
+        await _record_audit(
+            audit, "index_evaluation.create", current.user, "index_version", index_version_id
+        )
+        metrics.record_index_governance("evaluation.create")
+        return _evaluation_run_response(run)
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/evaluation-runs",
+        response_model=list[IndexEvaluationRunResponse],
+    )
+    async def list_scoped_index_evaluation_runs(
+        knowledge_base_id: str,
+        index_version_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> list[IndexEvaluationRunResponse]:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "正式评测需要 PostgreSQL。", 503)
+        rows = await run_in_threadpool(
+            list_evaluation_runs, sources.database_url, knowledge_base_id, index_version_id
+        )
+        return [_evaluation_run_response(row) for row in rows]
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/evaluation-runs",
+        response_model=list[IndexEvaluationRunResponse],
+    )
+    async def list_index_evaluation_runs(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> list[IndexEvaluationRunResponse]:
+        """整个知识库的正式评测记录。
+
+        运行记录列的是 Operation，而 Operation 上没有 `evaluation_run_id`；页面要把
+        某一行翻译成评测详情，只能先拿到这份列表再按 `operation_id` 对上。按候选版本
+        取做不到这件事：版本激活后就不再是候选，它那次评测的详情会永远打不开。
+        """
+
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "正式评测需要 PostgreSQL。", 503)
+        rows = await run_in_threadpool(
+            list_evaluation_runs, sources.database_url, knowledge_base_id
+        )
+        return [_evaluation_run_response(row) for row in rows]
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/evaluation-runs/{evaluation_run_id}",
+        response_model=IndexEvaluationRunDetailResponse,
+    )
+    async def get_scoped_index_evaluation_run(
+        knowledge_base_id: str,
+        evaluation_run_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> IndexEvaluationRunDetailResponse:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "正式评测需要 PostgreSQL。", 503)
+        row = await run_in_threadpool(
+            get_evaluation_run, sources.database_url, knowledge_base_id, evaluation_run_id
+        )
+        if row is None:
+            raise AppError("EVALUATION_RUN_NOT_FOUND", "未找到该正式评测记录。", 404)
+        return _evaluation_run_detail(row)
+
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/evaluation-runs/{evaluation_run_id}/retry",
+        response_model=IndexEvaluationRunResponse,
+        status_code=202,
+    )
+    async def retry_scoped_index_evaluation_run(
+        knowledge_base_id: str,
+        evaluation_run_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> IndexEvaluationRunResponse:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "正式评测需要 PostgreSQL。", 503)
+        require_isolated_evaluation_database(settings)
+        run = await run_in_threadpool(
+            retry_evaluation_run,
+            sources.database_url,
+            knowledge_base_id,
+            evaluation_run_id,
+            current.user.user_id,
+        )
+        await _record_audit(
+            audit, "index_evaluation.retry", current.user, "index_version",
+            str(run["index_version_id"]),
+        )
+        metrics.record_index_governance("evaluation.retry")
+        return _evaluation_run_response(run)
+
+    @app.post(
+        "/api/knowledge-bases/{knowledge_base_id}/evaluation-runs/{evaluation_run_id}/cancel",
+        response_model=IndexEvaluationRunResponse,
+    )
+    async def cancel_scoped_index_evaluation_run(
+        knowledge_base_id: str,
+        evaluation_run_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> IndexEvaluationRunResponse:
+        """只取消尚未开始的评测。
+
+        运行中的取消返回 409：Worker 进程没有接收取消信号的通道，把记录改成 cancelled
+        只会让页面显示已取消而语料仍在评测库里跑。
+        """
+
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "正式评测需要 PostgreSQL。", 503)
+        run = await run_in_threadpool(
+            cancel_evaluation_run, sources.database_url, knowledge_base_id, evaluation_run_id
+        )
+        await _record_audit(
+            audit, "index_evaluation.cancel", current.user, "index_version",
+            str(run["index_version_id"]),
+        )
+        metrics.record_index_governance("evaluation.cancel")
+        return _evaluation_run_response(run)
+
+    @app.post(
         "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/validations",
         status_code=201,
     )
@@ -1847,8 +2052,13 @@ def create_app() -> FastAPI:
             for item in await run_in_threadpool(service.list_index_versions, knowledge_base_id)
         ):
             raise AppError("INDEX_VERSION_NOT_FOUND", "未找到该知识库的索引版本。", 404)
+        # 走同一个 Repository：正式报告既可能来自仓库里的冻结 JSON，也可能来自产品内
+        # 的正式评测运行。这里只要求 official，不要求 passed——「跑过但没达标」是三层
+        # 门禁要给出的结论，不该在挑报告这一步就被筛掉。
         report = await run_in_threadpool(
-            EvaluationReportRepository(settings.evaluation_reports_path).load_official_model,
+            EvaluationReportRepository(
+                settings.evaluation_reports_path, sources.database_url
+            ).load_official_model,
             payload.evaluation_report_id,
         )
         result = await run_in_threadpool(
@@ -2842,6 +3052,72 @@ def _client_key(request: Request) -> str:
 
 def _page[T](items: list[T], offset: int, limit: int) -> list[T]:
     return items[offset : offset + limit]
+
+
+def _evaluation_run_response(row: dict[str, object]) -> IndexEvaluationRunResponse:
+    """把评测运行行映射成响应。
+
+    这里刻意不透出 ``error_message``：它保存的是技术详情（模型加载栈、评测库连接串、
+    宿主路径），只留在数据库里给管理员排查。响应给的是按错误码映射出的稳定文案，
+    页面据此能说明「下一步该做什么」，而不是把一段异常字符串贴给用户。
+    """
+
+    parameters = dict(row.get("parameters") or {})  # type: ignore[arg-type]
+    payload = row.get("report_payload") or {}
+    failure_code = row.get("error_code")
+    return IndexEvaluationRunResponse(
+        evaluation_run_id=str(row["evaluation_run_id"]),
+        knowledge_base_id=str(row["knowledge_base_id"]),
+        index_version_id=str(row["index_version_id"]),
+        operation_id=str(row["operation_id"]) if row.get("operation_id") else None,
+        dataset_id=str(row["dataset_id"]),
+        dataset_version=str(row["dataset_version"]),
+        dataset_slug=(
+            str(parameters["dataset_slug"]) if parameters.get("dataset_slug") else None
+        ),
+        status=str(row["status"]),  # type: ignore[arg-type]
+        config_fingerprint=(
+            str(row["config_fingerprint"]) if row.get("config_fingerprint") else None
+        ),
+        baseline_report_id=(
+            str(row["baseline_report_id"]) if row.get("baseline_report_id") else None
+        ),
+        report_id=(
+            str(payload["report_id"])  # type: ignore[index]
+            if isinstance(payload, dict) and payload.get("report_id")
+            else None
+        ),
+        official=bool(row.get("official")),
+        passed=None if row.get("passed") is None else bool(row["passed"]),
+        attempt_count=int(row["attempt_count"]),  # type: ignore[arg-type]
+        max_attempts=int(row["max_attempts"]),  # type: ignore[arg-type]
+        requested_by=str(row["requested_by"]) if row.get("requested_by") else None,
+        failure_code=str(failure_code) if failure_code else None,
+        failure_reason=evaluation_failure_message(
+            str(failure_code) if failure_code else None
+        ),
+        available_at=row["available_at"],  # type: ignore[arg-type]
+        started_at=row.get("started_at"),  # type: ignore[arg-type]
+        finished_at=row.get("finished_at"),  # type: ignore[arg-type]
+        created_at=row["created_at"],  # type: ignore[arg-type]
+        updated_at=row["updated_at"],  # type: ignore[arg-type]
+    )
+
+
+def _evaluation_run_detail(row: dict[str, object]) -> IndexEvaluationRunDetailResponse:
+    parameters = dict(row.get("parameters") or {})  # type: ignore[arg-type]
+    payload = row.get("report_payload")
+    report = None
+    if isinstance(payload, dict) and payload:
+        report = EvaluationReportRepository.detail_from_payload(payload)
+    return IndexEvaluationRunDetailResponse(
+        **_evaluation_run_response(row).model_dump(),
+        models=dict(row.get("models") or {}),  # type: ignore[arg-type]
+        metrics=dict(row.get("metrics") or {}),  # type: ignore[arg-type]
+        config_snapshot=dict(parameters.get("config_snapshot") or {}),
+        component_manifest=dict(parameters.get("component_manifest") or {}),
+        report=report,
+    )
 
 
 def _redact_unreadable_sources(

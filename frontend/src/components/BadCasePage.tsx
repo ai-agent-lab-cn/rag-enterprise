@@ -8,7 +8,10 @@ import { ErrorBanner } from "./ui/ErrorBanner";
 import { Input } from "./ui/Input";
 import { Select } from "./ui/Select";
 
-const STATUS_TONE: Record<GovernedBadCase["status"], "neutral" | "success" | "warning" | "danger" | "brand"> = {
+const STATUS_TONE: Record<
+  GovernedBadCase["status"],
+  "neutral" | "success" | "warning" | "danger" | "brand"
+> = {
   new: "neutral",
   confirmed: "brand",
   fixing: "warning",
@@ -16,7 +19,10 @@ const STATUS_TONE: Record<GovernedBadCase["status"], "neutral" | "success" | "wa
   regression_added: "success",
   ignored: "neutral",
 };
-const SEVERITY_TONE: Record<GovernedBadCase["severity"], "neutral" | "success" | "warning" | "danger" | "brand"> = {
+const SEVERITY_TONE: Record<
+  GovernedBadCase["severity"],
+  "neutral" | "success" | "warning" | "danger" | "brand"
+> = {
   critical: "danger",
   high: "warning",
   medium: "neutral",
@@ -48,18 +54,33 @@ export function BadCasePage({ isAdmin }: { isAdmin: boolean }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api.listGovernedBadCases().then(setItems, (reason: unknown) =>
-      setError(reason instanceof Error ? reason.message : "无法读取 Bad Case。"));
+    api
+      .listGovernedBadCases()
+      .then(setItems, (reason: unknown) =>
+        setError(
+          reason instanceof Error ? reason.message : "无法读取 Bad Case。",
+        ),
+      );
   }, []);
 
-  const updateCase = async (item: GovernedBadCase, update: Parameters<typeof api.updateGovernedBadCase>[1]) => {
+  const updateCase = async (
+    item: GovernedBadCase,
+    update: Parameters<typeof api.updateGovernedBadCase>[1],
+  ) => {
     setBusy(true);
     setError("");
     try {
       const updated = await api.updateGovernedBadCase(item.case_id, update);
-      setItems((current) => current?.map((candidate) => candidate.case_id === item.case_id ? updated : candidate) ?? null);
+      setItems(
+        (current) =>
+          current?.map((candidate) =>
+            candidate.case_id === item.case_id ? updated : candidate,
+          ) ?? null,
+      );
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Bad Case 更新失败。");
+      setError(
+        reason instanceof Error ? reason.message : "Bad Case 更新失败。",
+      );
     } finally {
       setBusy(false);
     }
@@ -67,9 +88,7 @@ export function BadCasePage({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <section className="px-6 pt-5 pb-8" aria-label="Bad Case">
-      {error ? (
-        <ErrorBanner>{error}</ErrorBanner>
-      ) : null}
+      {error ? <ErrorBanner>{error}</ErrorBanner> : null}
       {busy ? (
         <div className="py-2 text-[12.8px] text-ink-muted" aria-live="polite">
           正在保存治理结果…
@@ -94,7 +113,8 @@ export function BadCasePage({ isAdmin }: { isAdmin: boolean }) {
               emptyState={{
                 kind: "empty",
                 title: "还没有 Bad Case。",
-                description: "Bad Case 由评测和线上问答的失败样本自动归集，暂时没有需要治理的记录。",
+                description:
+                  "Bad Case 由评测和线上问答的失败样本自动归集，暂时没有需要治理的记录。",
               }}
             />
           </div>
@@ -114,13 +134,21 @@ function BadCasePanel({
 }: {
   items: GovernedBadCase[];
   isAdmin: boolean;
-  onUpdate: (item: GovernedBadCase, update: Parameters<typeof api.updateGovernedBadCase>[1]) => void;
+  onUpdate: (
+    item: GovernedBadCase,
+    update: Parameters<typeof api.updateGovernedBadCase>[1],
+  ) => void;
 }) {
   const [status, setStatus] = useState("");
   const [severity, setSeverity] = useState("");
   const [stage, setStage] = useState("");
   const [expandedCaseId, setExpandedCaseId] = useState<string | null>(null);
-  const visible = items.filter((item) => (!status || item.status === status) && (!severity || item.severity === severity) && (!stage || item.failure_stage === stage));
+  const visible = items.filter(
+    (item) =>
+      (!status || item.status === status) &&
+      (!severity || item.severity === severity) &&
+      (!stage || item.failure_stage === stage),
+  );
 
   const columns: Column<GovernedBadCase>[] = [
     {
@@ -134,7 +162,11 @@ function BadCasePanel({
         </>
       ),
     },
-    { key: "failure_stage", header: "阶段", render: (item) => item.failure_stage },
+    {
+      key: "failure_stage",
+      header: "阶段",
+      render: (item) => item.failure_stage,
+    },
     { key: "category", header: "分类", render: (item) => item.category },
     {
       key: "severity",
@@ -161,14 +193,18 @@ function BadCasePanel({
       header: "治理",
       truncate: false,
       render: (item) => (
-        <button
-          type="button"
-          className="cursor-pointer text-brand"
+        <Button
+          variant="link"
+          size="sm"
           aria-expanded={expandedCaseId === item.case_id}
-          onClick={() => setExpandedCaseId((current) => (current === item.case_id ? null : item.case_id))}
+          onClick={() =>
+            setExpandedCaseId((current) =>
+              current === item.case_id ? null : item.case_id,
+            )
+          }
         >
           治理详情
-        </button>
+        </Button>
       ),
     },
   ];
@@ -179,7 +215,13 @@ function BadCasePanel({
         <div className="flex gap-2">
           <label className="flex items-center gap-[5px]">
             <span className="shrink-0">状态</span>
-            <Select size="sm" className="w-28" aria-label="Bad Case 状态筛选" value={status} onChange={(event) => setStatus(event.target.value)}>
+            <Select
+              size="sm"
+              className="w-28"
+              aria-label="Bad Case 状态筛选"
+              value={status}
+              onChange={(event) => setStatus(event.target.value)}
+            >
               <option value="">全部</option>
               <option value="new">新建</option>
               <option value="confirmed">已确认</option>
@@ -191,7 +233,13 @@ function BadCasePanel({
           </label>
           <label className="flex items-center gap-[5px]">
             <span className="shrink-0">严重级别</span>
-            <Select size="sm" className="w-20" aria-label="Bad Case 严重级别筛选" value={severity} onChange={(event) => setSeverity(event.target.value)}>
+            <Select
+              size="sm"
+              className="w-20"
+              aria-label="Bad Case 严重级别筛选"
+              value={severity}
+              onChange={(event) => setSeverity(event.target.value)}
+            >
               <option value="">全部</option>
               <option value="critical">严重</option>
               <option value="high">高</option>
@@ -201,13 +249,21 @@ function BadCasePanel({
           </label>
           <label className="flex items-center gap-[5px]">
             <span className="shrink-0">失败阶段</span>
-            <Select size="sm" className="w-28" aria-label="Bad Case 失败阶段筛选" value={stage} onChange={(event) => setStage(event.target.value)}>
+            <Select
+              size="sm"
+              className="w-28"
+              aria-label="Bad Case 失败阶段筛选"
+              value={stage}
+              onChange={(event) => setStage(event.target.value)}
+            >
               <option value="">全部</option>
-              {Array.from(new Set(items.map((item) => item.failure_stage))).map((value) => (
-                <option value={value} key={value}>
-                  {value}
-                </option>
-              ))}
+              {Array.from(new Set(items.map((item) => item.failure_stage))).map(
+                (value) => (
+                  <option value={value} key={value}>
+                    {value}
+                  </option>
+                ),
+              )}
             </Select>
           </label>
         </div>
@@ -225,7 +281,8 @@ function BadCasePanel({
             ? {
                 kind: "empty",
                 title: "还没有 Bad Case。",
-                description: "Bad Case 由评测和线上问答的失败样本自动归集，暂时没有需要治理的记录。",
+                description:
+                  "Bad Case 由评测和线上问答的失败样本自动归集，暂时没有需要治理的记录。",
               }
             : {
                 kind: "filtered",
@@ -234,7 +291,13 @@ function BadCasePanel({
               }
         }
         expandedRow={(item) =>
-          expandedCaseId === item.case_id ? <BadCaseGovernanceDetails item={item} isAdmin={isAdmin} onUpdate={onUpdate} /> : null
+          expandedCaseId === item.case_id ? (
+            <BadCaseGovernanceDetails
+              item={item}
+              isAdmin={isAdmin}
+              onUpdate={onUpdate}
+            />
+          ) : null
         }
       />
     </div>
@@ -248,13 +311,34 @@ function BadCaseGovernanceDetails({
 }: {
   item: GovernedBadCase;
   isAdmin: boolean;
-  onUpdate: (item: GovernedBadCase, update: Parameters<typeof api.updateGovernedBadCase>[1]) => void;
+  onUpdate: (
+    item: GovernedBadCase,
+    update: Parameters<typeof api.updateGovernedBadCase>[1],
+  ) => void;
 }) {
   const [rootCause, setRootCause] = useState(item.root_cause ?? "");
   const [fixCommit, setFixCommit] = useState(item.fix_commit ?? "");
   const [assignee, setAssignee] = useState(item.assignee ?? "");
-  const next = item.status === "new" ? "confirmed" : item.status === "confirmed" ? "fixing" : item.status === "fixing" ? "resolved" : item.status === "resolved" ? "regression_added" : null;
-  const nextLabel = item.status === "new" ? "确认" : item.status === "confirmed" ? "开始修复" : item.status === "fixing" ? "标记已解决" : item.status === "resolved" ? "加入回归集" : "";
+  const next =
+    item.status === "new"
+      ? "confirmed"
+      : item.status === "confirmed"
+        ? "fixing"
+        : item.status === "fixing"
+          ? "resolved"
+          : item.status === "resolved"
+            ? "regression_added"
+            : null;
+  const nextLabel =
+    item.status === "new"
+      ? "确认"
+      : item.status === "confirmed"
+        ? "开始修复"
+        : item.status === "fixing"
+          ? "标记已解决"
+          : item.status === "resolved"
+            ? "加入回归集"
+            : "";
   return (
     <div className="w-full">
       <dl className="my-1.5">
@@ -273,17 +357,29 @@ function BadCaseGovernanceDetails({
       </dl>
       {isAdmin ? (
         <div className="mt-2 grid grid-cols-4 gap-8">
-          <label className="flex items-center text-[11.52px] text-ink-muted" >
+          <label className="flex items-center text-[11.52px] text-ink-muted">
             <span className="whitespace-nowrap">根因：</span>
-            <Input size="sm" value={rootCause} onChange={(event) => setRootCause(event.target.value)} />
+            <Input
+              size="sm"
+              value={rootCause}
+              onChange={(event) => setRootCause(event.target.value)}
+            />
           </label>
           <label className="flex items-center text-[11.52px] text-ink-muted">
             <span className="whitespace-nowrap">负责人：</span>
-            <Input size="sm" value={assignee} onChange={(event) => setAssignee(event.target.value)} />
+            <Input
+              size="sm"
+              value={assignee}
+              onChange={(event) => setAssignee(event.target.value)}
+            />
           </label>
           <label className="flex items-center text-[11.52px] text-ink-muted">
             <span className="whitespace-nowrap">修复 Commit：</span>
-            <Input size="sm" value={fixCommit} onChange={(event) => setFixCommit(event.target.value)} />
+            <Input
+              size="sm"
+              value={fixCommit}
+              onChange={(event) => setFixCommit(event.target.value)}
+            />
           </label>
           <div className="flex gap-1">
             {next ? (
@@ -297,7 +393,8 @@ function BadCaseGovernanceDetails({
                     root_cause: rootCause || undefined,
                     assignee: assignee || undefined,
                     fix_commit: fixCommit || undefined,
-                    regression_passed: next === "regression_added" ? true : undefined,
+                    regression_passed:
+                      next === "regression_added" ? true : undefined,
                   })
                 }
               >
@@ -309,7 +406,9 @@ function BadCaseGovernanceDetails({
                 variant="ghost"
                 size="sm"
                 className="text-danger-text hover:bg-danger-subtle"
-                onClick={() => onUpdate(item, { status: "ignored", severity: item.severity })}
+                onClick={() =>
+                  onUpdate(item, { status: "ignored", severity: item.severity })
+                }
               >
                 忽略
               </Button>

@@ -192,7 +192,7 @@ export function DocumentPanel({ knowledgeBaseId, documents, versions, categories
             return;
           }
           void onUpdateFile(document, file)
-            .then(() => toast.success(`“${document.filename}”的新版本已上传`))
+            .then(() => toast.success(`“${document.filename}”已上传或恢复`))
             .catch((reason: unknown) => toast.error(reason instanceof Error ? reason.message : "文件更新失败。"));
         },
       },
@@ -221,14 +221,14 @@ export function DocumentPanel({ knowledgeBaseId, documents, versions, categories
     {
       key: "filename", header: "文件名", width: "26%", truncate: false,
       render: (document) => (
-        <button
-          type="button"
-          className="block max-w-full truncate border-0 bg-transparent p-0 text-left font-medium text-brand hover:underline"
+        <Button
+          variant="link"
+          className="block max-w-full truncate text-left font-medium"
           title={`打开 ${document.filename}`}
           onClick={() => setViewing(document)}
         >
           {document.filename}
-        </button>
+        </Button>
       ),
     },
     {

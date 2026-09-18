@@ -35,7 +35,7 @@ def list_retention_candidates(
                           ) AS retention_rank
                    FROM index_versions
                    WHERE status='retired'
-                     AND (%s IS NULL OR knowledge_base_id=%s)
+                     AND (%s::text IS NULL OR knowledge_base_id=%s)
                )
                SELECT * FROM ranked
                WHERE retention_rank>%s

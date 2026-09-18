@@ -37,11 +37,23 @@ export function Dialog({ open, title, description, children, onClose, size = "sm
             "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
             "w-[calc(100vw-32px)] rounded-lg bg-surface shadow-modal",
             "focus-visible:outline-none",
+            // 受控高度 + 内部滚动：此前弹层没有任何 max-height，内容超过视口时上下会被
+            // 裁掉且**滚不到**——长内容弹框只能各自在 children 里再套一层滚动容器，
+            // 于是滚动条位置每处都不一样。这里统一由弹层自己承担。
+            "flex max-h-[calc(100dvh-64px)] flex-col",
             size === "sm" ? "max-w-[420px]" : size === "md" ? "max-w-[640px]" : "max-w-[900px]",
+            // lg 在窄屏下改为全屏：900px 的弹层在手机上本来就等于满屏，留 16px 边距只是
+            // 把可用高度又切掉一截。断点写 768 而不是 767——Tailwind 的 max-[768px]
+            // 编译成 `< 768`，与 CSS 的 `max-width: 767px`（≤767）等价（CLAUDE.md 第七条）。
+            size === "lg" && [
+              "max-[768px]:left-0 max-[768px]:top-0 max-[768px]:h-dvh max-[768px]:w-screen",
+              "max-[768px]:max-h-none max-[768px]:max-w-none max-[768px]:translate-x-0",
+              "max-[768px]:translate-y-0 max-[768px]:rounded-none",
+            ],
           )}
         >
-          <header className="flex items-start justify-between gap-4 border-b border-divider px-5 py-4">
-            <div className="grid gap-1">
+          <header className="flex shrink-0 items-start justify-between gap-4 border-b border-divider px-5 py-4">
+            <div className="grid min-w-0 gap-1">
               <RadixDialog.Title className="text-lg font-semibold text-ink">{title}</RadixDialog.Title>
               {description ? (
                 <RadixDialog.Description className="text-base text-ink-faint">
@@ -54,13 +66,14 @@ export function Dialog({ open, title, description, children, onClose, size = "sm
             </div>
             <RadixDialog.Close
               // border-0 同 Button：preflight 未启用，UA 的默认按钮边框还在。
-              className="rounded-sm border-0 bg-transparent p-1 text-ink-faint hover:bg-canvas hover:text-ink"
+              className="shrink-0 rounded-sm border-0 bg-transparent p-1 text-ink-faint hover:bg-canvas hover:text-ink"
               aria-label="关闭弹框"
             >
               <X size={16} />
             </RadixDialog.Close>
           </header>
-          <div className="px-5 py-4">{children}</div>
+          {/* min-h-0 是 flex 子项能收缩的前提，缺了它 overflow-y-auto 不会生效。 */}
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
         </RadixDialog.Content>
       </RadixDialog.Portal>
     </RadixDialog.Root>

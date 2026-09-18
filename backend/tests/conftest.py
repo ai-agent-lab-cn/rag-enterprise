@@ -125,7 +125,13 @@ class FakeService:
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
         filters=None,
         access=None,
+        event_callback=None,
     ) -> QueryResponse:
+        # 流式路由把 event_callback 当第 7 个**位置**参数传进来，少一个形参就是
+        # TypeError 而不是「事件没发出去」——替身的签名必须跟着 RAGService 协议走。
+        if event_callback:
+            event_callback("stage", {"stage": "retrieval", "message": "正在检索资料"})
+            event_callback("stage", {"stage": "generation", "message": "正在生成答案"})
         return QueryResponse(
             answer=f"回答：{question}",
             sources=[

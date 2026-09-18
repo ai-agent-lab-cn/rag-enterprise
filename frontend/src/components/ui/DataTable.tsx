@@ -2,6 +2,7 @@ import { Fragment, type ReactNode } from "react";
 import { Checkbox } from "./Checkbox";
 import { EmptyState, type EmptyStateProps } from "./EmptyState";
 import { SkeletonRows } from "./Skeleton";
+import { Tooltip } from "./Tooltip";
 import { cn } from "./cn";
 
 /**
@@ -29,6 +30,17 @@ export type Column<T> = {
   numeric?: boolean;
   /** 是否单行截断。默认 true；组合内容（名称+徽章）与操作列必须设为 false。 */
   truncate?: boolean;
+  /**
+   * 截断后要能看到的完整内容。
+   *
+   * 简单的 string / number 单元格不必写：`render` 返回的就是全文时，DataTable 自动把它
+   * 挂成 `title`。只有当 `render` 返回的是徽章、图标这类复合节点、而完整内容另有来源
+   * 时才需要它——例如列里显示的是缩写 ID，完整 ID 要在悬停时给出。
+   *
+   * 返回值走 `delay={0}` 的 Tooltip，hover 与键盘聚焦都能触发；它渲染在 `<td>` 内部
+   * 的行内元素上，**不会撑高行**。
+   */
+  tooltip?: (row: T) => ReactNode;
   render: (row: T) => ReactNode;
 };
 
@@ -85,6 +97,10 @@ export function DataTable<T>({
         // table-fixed 是 width 生效的前提：auto 布局下浏览器会按内容重算列宽，
         // <col width> 只被当作建议。
         className="w-full table-fixed border-collapse text-base"
+        // 每列至少 120px，否则外层那个 overflow-x-auto 形同虚设：w-full 让表格永远
+        // 正好等于容器宽度，窄屏下不会溢出、也就不会滚动，六列全被压成三四个字，
+        // 连状态徽章都被截掉一半。实测 412px 视口下的索引版本表就是这样。
+        style={{ minWidth: `${(selection ? 44 : 0) + columns.length * 120}px` }}
       >
         <colgroup>
           {selection ? <col style={{ width: "44px" }} /> : null}
@@ -148,19 +164,40 @@ export function DataTable<T>({
                         />
                       </td>
                     ) : null}
-                    {columns.map((column) => (
-                      <td
-                        key={column.key}
-                        className={cn(
-                          "px-3 text-ink",
-                          (column.truncate ?? true) && "truncate",
-                          column.numeric && "tabular-nums text-right",
-                          !column.numeric && column.align === "right" && "text-right",
-                        )}
-                      >
-                        {column.render(row)}
-                      </td>
-                    ))}
+                    {columns.map((column) => {
+                      const content = column.render(row);
+                      const hint = column.tooltip?.(row);
+                      return (
+                        <td
+                          key={column.key}
+                          className={cn(
+                            "px-3 text-ink",
+                            (column.truncate ?? true) && "truncate",
+                            column.numeric && "tabular-nums text-right",
+                            !column.numeric && column.align === "right" && "text-right",
+                          )}
+                          // 简单文本自动带全文 title：被 truncate 截掉的内容此前在任何
+                          // 地方都看不到，而要求调用方逐列手写 title 就一定会漏。
+                          title={plainTitle(content)}
+                        >
+                          {hint ? (
+                            <Tooltip content={hint} delay={0}>
+                              {/* 行内 span + tabIndex：Radix 的 trigger 必须可聚焦，
+                                  键盘用户才看得到。inline-block + max-w-full 保证它
+                                  不改变行高，也不撑破列宽。 */}
+                              <span
+                                tabIndex={0}
+                                className="inline-block max-w-full truncate align-bottom focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-brand/20"
+                              >
+                                {content}
+                              </span>
+                            </Tooltip>
+                          ) : (
+                            content
+                          )}
+                        </td>
+                      );
+                    })}
                   </tr>
                   {details ? (
                     <tr className={cn("bg-canvas", index !== rows.length - 1 && "border-b border-divider")}>
@@ -183,4 +220,17 @@ export function DataTable<T>({
       ) : null}
     </div>
   );
+}
+
+
+/**
+ * 只给「渲染结果本身就是全文」的单元格加 title。
+ *
+ * 复合节点（徽章、按钮组、多行结构）拿不到有意义的纯文本，硬拼只会得到一串拼接后的
+ * 碎片；那类列请用 `column.tooltip` 显式给出完整内容。
+ */
+function plainTitle(value: ReactNode): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (typeof value === "number") return String(value);
+  return undefined;
 }

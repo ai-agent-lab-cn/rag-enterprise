@@ -1,13 +1,16 @@
-"""从版本化 JSON 文件提供正式检索评测报告的只读查询。"""
+"""正式检索评测报告的只读查询：合并版本化 JSON 文件与产品内评测运行。"""
 
 from pathlib import Path
 
+import psycopg
+from psycopg.rows import dict_row
 from pydantic import ValidationError
 
 from backend.evaluation.answer_quality import AnswerEvaluationReport
 from backend.evaluation.report import RetrievalEvaluationReport
 
 from .errors import AppError
+from .observability import structured_log
 from .schemas import (
     AnswerEvaluationReportResponse,
     AnswerEvaluationReportSummary,
@@ -18,31 +21,76 @@ from .schemas import (
 
 
 class EvaluationReportRepository:
-    """读取已经离线生成的报告；此类绝不启动模型或评测任务。"""
+    """读取已经生成的报告；此类绝不启动模型或评测任务。
 
-    def __init__(self, reports_path: Path):
+    报告有两个来源：仓库里冻结的 JSON 文件（历史基线，随代码走）与 `evaluation_runs`
+    里由 Evaluation Worker 写入的产品内正式运行。两者合并成同一个列表，因为发布门禁
+    问的问题只有一个——「有没有一份用这套配置跑出来的正式报告」，它不该关心报告是
+    从文件读的还是从库里读的。
+
+    同 `report_id` 时数据库记录优先：文件是随代码分发的静态副本，数据库那份带着运行
+    事实（谁请求的、跑在哪个候选版本上、指标明细）。
+    """
+
+    def __init__(self, reports_path: Path, database_url: str | None = None):
         self.reports_path = reports_path
+        self.database_url = database_url
 
     def list_official(self) -> list[EvaluationReportSummary]:
-        reports = [self._load(path) for path in sorted(self.reports_path.glob("*.json"))]
-        official = [report for report in reports if report.official]
-        newest_first = sorted(official, key=lambda item: item.run_at, reverse=True)
-        return [self._summary(report) for report in newest_first]
+        return [self._summary(report) for report in self._official_reports()]
 
     def get_official(self, report_id: str) -> EvaluationReportResponse:
-        for path in sorted(self.reports_path.glob("*.json")):
-            report = self._load(path)
-            if report.official and report.report_id == report_id:
-                return self._detail(report)
-        raise AppError("EVALUATION_REPORT_NOT_FOUND", "未找到该正式评测报告。", 404)
+        return self._detail(self.load_official_model(report_id))
 
     def load_official_model(self, report_id: str) -> RetrievalEvaluationReport:
         """索引放行使用完整报告模型；API 展示仍返回裁剪后的响应模型。"""
-        for path in sorted(self.reports_path.glob("*.json")):
-            report = self._load(path)
-            if report.official and report.report_id == report_id:
+
+        for report in self._official_reports():
+            if report.report_id == report_id:
                 return report
         raise AppError("EVALUATION_REPORT_NOT_FOUND", "未找到该正式评测报告。", 404)
+
+    def _official_reports(self) -> list[RetrievalEvaluationReport]:
+        by_id: dict[str, RetrievalEvaluationReport] = {}
+        for path in sorted(self.reports_path.glob("*.json")):
+            report = self._load(path)
+            if report.official:
+                by_id[report.report_id] = report
+        for report in self._database_reports():
+            by_id[report.report_id] = report
+        return sorted(by_id.values(), key=lambda item: item.run_at, reverse=True)
+
+    def _database_reports(self) -> list[RetrievalEvaluationReport]:
+        """读取产品内正式评测运行沉淀的报告。
+
+        `official` 与 `passed` 在这里已经分开：筛的是 `official`，不是 `passed`。
+        受控运行即使没达到冻结阈值也是可信证据——是否可发布由三层门禁给结论，
+        用绝对阈值提前筛掉报告等于让门禁失去「跑过但没达标」这个真实结果。
+        """
+
+        if not self.database_url:
+            return []
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                """SELECT evaluation_run_id, report_payload FROM evaluation_runs
+                   WHERE evaluation_type='retrieval' AND status='succeeded' AND official
+                     AND report_payload IS NOT NULL
+                   ORDER BY run_at DESC"""
+            ).fetchall()
+        reports: list[RetrievalEvaluationReport] = []
+        for row in rows:
+            try:
+                reports.append(RetrievalEvaluationReport.model_validate(row["report_payload"]))
+            except ValidationError:
+                # 单条 payload 结构过时不能让整个评测中心 500：其余报告仍然可用。
+                # 但也不能静默——记一条可检索的日志，否则「报告少了一份」查不出原因。
+                structured_log(
+                    "evaluation_report.payload_invalid",
+                    level=30,
+                    evaluation_run_id=str(row["evaluation_run_id"]),
+                    result="error",
+                )
+        return reports
 
     def list_official_answers(self) -> list[AnswerEvaluationReportSummary]:
         """回答报告独立存放，只公开经过人工复核后标记 official 的正式报告。"""
@@ -111,9 +159,20 @@ class EvaluationReportRepository:
             commit=report.commit,
             run_at=report.run_at,
             models=report.models,
+            official=report.official,
             passed=report.passed,
             config_fingerprint=report.config_fingerprint,
         )
+
+    @classmethod
+    def detail_from_payload(cls, payload: dict[str, object]) -> EvaluationReportResponse:
+        """把 `evaluation_runs.report_payload` 直接转成展示模型。
+
+        评测运行详情与只读评测 API 走同一个转换：页面上两处看到的指标结构一致，
+        不会出现「运行记录里叫 recall_at_5、报告页里叫 recall5」这种两份映射漂移。
+        """
+
+        return cls._detail(RetrievalEvaluationReport.model_validate(payload))
 
     @classmethod
     def _detail(cls, report: RetrievalEvaluationReport) -> EvaluationReportResponse:
@@ -160,6 +219,7 @@ class EvaluationReportRepository:
             run_at=report.run_at,
             prompt_version=report.prompt_version,
             models=report.models,
+            official=report.official,
             passed=report.passed,
         )
 

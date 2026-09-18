@@ -45,6 +45,7 @@ function report(overrides: Partial<EvaluationReportSummary> = {}): EvaluationRep
     commit: "abc",
     run_at: "2026-09-01T00:00:00Z",
     models: {},
+    official: true,
     passed: true,
     config_fingerprint: FINGERPRINT,
     ...overrides,
@@ -101,10 +102,23 @@ test("报告指纹不匹配不算有报告", () => {
   expect(stateOf(stages, "evaluation")).toBe("blocked");
 });
 
-test("未通过的报告不算有报告", () => {
+test("未达阈值的正式报告仍算有报告，阈值结论放进说明", () => {
+  // 判据是 official（这份报告来自受控正式运行），不是 passed（达到了冻结阈值）。
+  // 两者绑在一起时，「跑过但没达标」会显示成「缺少可用报告」，把用户引去重跑评测，
+  // 而真正该看的是哪项指标没到线。能否发布由三层验证给结论。
   const stages = releaseStages(
     [version({ index_version_id: "iv_c", status: "validating" })],
     [report({ passed: false })],
+    NO_DRIFT,
+  );
+  expect(stateOf(stages, "evaluation")).toBe("done");
+  expect(noteOf(stages, "evaluation")).toContain("未达冻结阈值");
+});
+
+test("非正式报告不算发布证据", () => {
+  const stages = releaseStages(
+    [version({ index_version_id: "iv_c", status: "validating" })],
+    [report({ official: false })],
     NO_DRIFT,
   );
   expect(stateOf(stages, "evaluation")).toBe("blocked");

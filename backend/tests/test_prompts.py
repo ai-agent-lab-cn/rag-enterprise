@@ -18,7 +18,7 @@ def test_prompt_has_version_hash_and_evidence_contract() -> None:
 
     prompt = build_prompt("系统如何回答？", [chunk])
 
-    assert prompt.version == PROMPT_VERSION == "v5-8-grounded-governance-1"
+    assert prompt.version == PROMPT_VERSION == "v5-stream-grounded-governance-2"
     assert len(prompt.sha256) == 64
     assert "禁止补充外部知识或猜测" in prompt.text
     assert "[STATUS: SOURCE_CONFLICT]" in prompt.text

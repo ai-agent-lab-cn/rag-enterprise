@@ -40,6 +40,8 @@ import type {
   SyncResourceRun,
   GovernedOperation,
   IndexBuild,
+  IndexEvaluationRun,
+  IndexEvaluationRunDetail,
   DocumentIndexState,
   Citation,
 } from "./types";
@@ -52,6 +54,28 @@ export function setAccessToken(token: string | null) {
 
 export function hasAccessToken() {
   return accessToken !== null;
+}
+
+/**
+ * 带稳定错误码的请求失败。
+ *
+ * 此前 `request()` 只取 `error.message` 抛裸 `Error`，`code` 与 `details` 直接丢掉——
+ * 页面因此无法区分「源文件丢了」和「配置在预览后变了」，只能把后端那句话原样显示，
+ * 给不出针对性的恢复动作。它仍然 extends Error，既有的
+ * `reason instanceof Error ? reason.message : ...` 写法一个都不用改。
+ */
+export class ApiError extends Error {
+  readonly code: string | null;
+  readonly status: number;
+  readonly details: unknown;
+
+  constructor(message: string, status: number, code: string | null, details: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -68,7 +92,12 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
       setAccessToken(null);
       window.dispatchEvent(new Event("rag-auth-expired"));
     }
-    throw new Error(payload.error?.message ?? `请求失败（${response.status}）`);
+    throw new ApiError(
+      payload.error?.message ?? `请求失败（${response.status}）`,
+      response.status,
+      payload.error?.code ?? null,
+      payload.error?.details ?? null,
+    );
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -240,7 +269,7 @@ export const api = {
     id: string,
     payload: { reason: IndexVersionCreationReason; chunk_size: number; chunk_overlap: number; force: boolean; force_reason: string | null },
   ) => request<IndexVersionCandidatePreview>(`/api/knowledge-bases/${id}/index-versions/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
-  createIndexVersion: (id: string, preview: IndexVersionCandidatePreview, idempotencyKey: string) => request<IndexVersionBuildResult>(`/api/knowledge-bases/${id}/index-versions`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ reason: preview.reason, chunk_size: preview.definition.chunking.chunk_size, chunk_overlap: preview.definition.chunking.chunk_overlap, force: preview.force, force_reason: preview.force_reason, expected_config_fingerprint: preview.config_fingerprint, expected_document_set_fingerprint: preview.document_set_fingerprint, expected_release_fingerprint: preview.release_fingerprint }) }),
+  createIndexVersion: (id: string, preview: IndexVersionCandidatePreview, idempotencyKey: string, excludedDocumentsAcknowledged: boolean) => request<IndexVersionBuildResult>(`/api/knowledge-bases/${id}/index-versions`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ reason: preview.reason, chunk_size: preview.definition.chunking.chunk_size, chunk_overlap: preview.definition.chunking.chunk_overlap, force: preview.force, force_reason: preview.force_reason, expected_config_fingerprint: preview.config_fingerprint, expected_document_set_fingerprint: preview.document_set_fingerprint, expected_release_fingerprint: preview.release_fingerprint, excluded_documents_acknowledged: excludedDocumentsAcknowledged }) }),
   listKnowledgeBaseIndexBuilds: (id: string) => request<IndexBuild[]>(`/api/knowledge-bases/${id}/index-builds`),
   listIndexBuildDocuments: (id: string, buildId: string) => request<DocumentIndexState[]>(`/api/knowledge-bases/${id}/index-builds/${buildId}/documents`),
   listIndexVersionEvents: (id: string, versionId: string) => request<LifecycleEvent[]>(`/api/knowledge-bases/${id}/index-versions/${versionId}/events`),
@@ -248,6 +277,14 @@ export const api = {
   createIndexVersionValidation: (id: string, versionId: string, reportId: string) => request<Record<string, unknown>>(`/api/knowledge-bases/${id}/index-versions/${versionId}/validations`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ evaluation_report_id: reportId }) }),
   retryIndexVersionBuild: (id: string, versionId: string) => request<IndexVersionBuildResult>(`/api/knowledge-bases/${id}/index-versions/${versionId}/builds`, { method: "POST" }),
   cancelIndexVersionBuild: (id: string, versionId: string) => request<Record<string, unknown>>(`/api/knowledge-bases/${id}/index-versions/${versionId}/builds/cancel`, { method: "POST" }),
+  createIndexEvaluationRun: (id: string, versionId: string, datasetId: string) => request<IndexEvaluationRun>(`/api/knowledge-bases/${id}/index-versions/${versionId}/evaluation-runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dataset_id: datasetId }) }),
+  listIndexEvaluationRuns: (id: string, versionId: string) => request<IndexEvaluationRun[]>(`/api/knowledge-bases/${id}/index-versions/${versionId}/evaluation-runs`),
+  // 整库列表：运行记录里的评测行要按 operation_id 找回对应 run，而版本一旦激活就不再是
+  // 候选，按候选版本取会让那次评测的详情永远打不开。
+  listKnowledgeBaseEvaluationRuns: (id: string) => request<IndexEvaluationRun[]>(`/api/knowledge-bases/${id}/evaluation-runs`),
+  getIndexEvaluationRun: (id: string, runId: string) => request<IndexEvaluationRunDetail>(`/api/knowledge-bases/${id}/evaluation-runs/${encodeURIComponent(runId)}`),
+  retryIndexEvaluationRun: (id: string, runId: string) => request<IndexEvaluationRun>(`/api/knowledge-bases/${id}/evaluation-runs/${encodeURIComponent(runId)}/retry`, { method: "POST" }),
+  cancelIndexEvaluationRun: (id: string, runId: string) => request<IndexEvaluationRun>(`/api/knowledge-bases/${id}/evaluation-runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
   compareIndexVersion: (id: string, versionId: string) => request<IndexVersionComparison>(`/api/knowledge-bases/${id}/index-versions/${versionId}/diff`),
   activateIndexVersion: (id: string, versionId: string) => request<Record<string, unknown>>(`/api/knowledge-bases/${id}/index-versions/${versionId}/active`, { method: "PUT" }),
   rollbackIndexVersion: (id: string, confirmContentLag = false) => request<Record<string, string>>(`/api/knowledge-bases/${id}/index-versions/rollback?confirm_content_lag=${confirmContentLag}`, { method: "POST" }),

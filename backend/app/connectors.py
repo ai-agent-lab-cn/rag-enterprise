@@ -23,11 +23,10 @@ from xml.etree import ElementTree
 
 import httpx
 import psycopg
-from psycopg import sql
-from psycopg.rows import dict_row
-
 from minio import Minio
 from minio.error import S3Error
+from psycopg import sql
+from psycopg.rows import dict_row
 
 from .errors import AppError
 
@@ -227,9 +226,10 @@ class ReadOnlyDatabaseConnector:
                     "external_updated_at": modified.isoformat() if hasattr(modified, "isoformat") else None,
                     **acl,
                 }
-                fingerprint = hashlib.sha256(
-                    content + json.dumps({"metadata": metadata, "acl": acl}, sort_keys=True, default=str).encode()
-                ).hexdigest()
+                envelope = json.dumps(
+                    {"metadata": metadata, "acl": acl}, sort_keys=True, default=str
+                ).encode()
+                fingerprint = hashlib.sha256(content + envelope).hexdigest()
                 yield SourceObject(key, fingerprint, len(content), modified)
 
     def fetch(self, key: str) -> bytes:

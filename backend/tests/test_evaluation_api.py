@@ -58,6 +58,9 @@ def test_evaluation_list_only_exposes_official_reports_in_latest_first_order(cli
         "commit": older["commit"],
         "run_at": "2026-08-07T00:00:00Z",
         "models": older["models"],
+        # official 与 passed 解耦后前端要分别读这两项：能否作为发布证据看 official，
+        # 达没达到冻结阈值看 passed。少了 official 这一列，页面就只能拿 passed 当证据资格。
+        "official": True,
         "passed": True,
         "config_fingerprint": older.get("config_fingerprint"),
     }

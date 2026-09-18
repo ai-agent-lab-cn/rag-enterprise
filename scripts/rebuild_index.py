@@ -64,6 +64,7 @@ def main() -> None:
             force=force,
             force_reason=args.force_reason,
             reranker_model=settings.reranker_model,
+            upload_root=settings.upload_path,
             max_concurrent_builds=settings.max_concurrent_index_builds,
             max_documents=settings.max_index_build_documents,
         )
@@ -88,6 +89,7 @@ def main() -> None:
             requested_by=args.requested_by,
             idempotency_key=args.idempotency_key or f"cli-{uuid4().hex}",
             reranker_model=settings.reranker_model,
+            upload_root=settings.upload_path,
             max_concurrent_builds=settings.max_concurrent_index_builds,
             max_documents=settings.max_index_build_documents,
             max_attempts=settings.index_job_max_attempts,

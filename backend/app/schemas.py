@@ -958,6 +958,7 @@ class IndexVersionResponse(BaseModel):
     release_fingerprint: str | None = None
     config_completeness: Literal["complete", "unknown"] = "unknown"
     legacy_migrated: bool = False
+    excluded_documents_acknowledged: bool = False
     created_at: datetime
     activated_at: datetime | None
     retired_at: datetime | None
@@ -983,6 +984,7 @@ class IndexVersionCreateRequest(IndexVersionPreviewRequest):
     expected_config_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     expected_document_set_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     expected_release_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    excluded_documents_acknowledged: bool = False
 
 
 class IndexVersionCreationContextResponse(BaseModel):
@@ -993,10 +995,12 @@ class IndexVersionCreationContextResponse(BaseModel):
     latest_document_snapshot: dict[str, object] | None
     document_scope: dict[str, int]
     document_exclusions: list[dict[str, object]] = Field(default_factory=list)
+    document_inclusions: list[dict[str, str]] = Field(default_factory=list)
     build_capacity: dict[str, int]
     document_diff: dict[str, int]
     document_set_fingerprint: str
     config_changed: bool
+    component_changed: bool
     document_changed: bool
     creation_allowed: bool
     blocked_reasons: list[str]
@@ -1022,6 +1026,7 @@ class IndexVersionCandidatePreviewResponse(IndexVersionCreationContextResponse):
     estimated_documents: int
     estimated_chunks: int
     estimated_embedding_units: int
+    missing_source_documents: list[dict[str, str]] = Field(default_factory=list)
 
 
 class IndexVersionCreateResponse(BaseModel):
@@ -1109,12 +1114,21 @@ class EvaluationMetricResponse(BaseModel):
 
 
 class EvaluationReportSummary(BaseModel):
+    """一份正式检索评测报告的摘要。
+
+    ``official`` 与 ``passed`` 是两件事，此前只暴露了后者，页面因此只能按「达标」
+    筛报告，把「受控运行但没达标」和「来源不可信」显示成同一种「缺少可用报告」。
+    ``official`` 说明这份报告来自受控的正式运行，可以作为三层门禁的证据；
+    ``passed`` 只说明它有没有达到冻结阈值，最终能不能发布由三层门禁决定。
+    """
+
     report_id: str
     dataset_id: str
     dataset_version: str
     commit: str
     run_at: datetime
     models: dict[str, str]
+    official: bool
     passed: bool
     config_fingerprint: str | None = None
 
@@ -1149,6 +1163,8 @@ class AnswerEvaluationReportSummary(BaseModel):
     run_at: datetime
     prompt_version: str
     models: dict[str, str]
+    # 与检索报告同一套语义：official 是来源可信度，passed 是阈值结论。
+    official: bool
     passed: bool
 
 
@@ -1164,6 +1180,63 @@ class EvaluationCenterOverviewResponse(BaseModel):
     retrieval_report: EvaluationReportSummary | None = None
     answer_report: AnswerEvaluationReportSummary | None = None
     report_count: int = Field(ge=0)
+
+
+class IndexEvaluationRunCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # 只接受服务端白名单里的数据集标识。dataset_id 决定 Worker 去读哪个语料目录，
+    # 放任请求方传值等于把文件路径交出去。
+    dataset_id: str = Field(min_length=1, max_length=160)
+
+
+class IndexEvaluationRunResponse(BaseModel):
+    """一次正式检索评测运行的只读视图。
+
+    ``official`` 与 ``passed`` 分开：前者说明这次运行受控、可作为三层门禁的证据，
+    后者只说明指标有没有达到冻结阈值。``passed`` 在跑完之前是 null——「还没跑」与
+    「跑完没达标」不能用同一个值表达。
+
+    这里不输出 ``error_message`` 原文：它保存的是技术详情（可能带连接串或宿主路径），
+    只在数据库里供管理员排查。接口输出的 ``failure_reason`` 是按 ``failure_code``
+    映射出的稳定用户文案。
+    """
+
+    evaluation_run_id: str
+    knowledge_base_id: str
+    index_version_id: str
+    operation_id: str | None
+    dataset_id: str
+    dataset_version: str
+    dataset_slug: str | None
+    # 与 evaluation_runs_status_check 同一套取值；数据库扩了域这里必须同步，否则
+    # 列表接口 500。
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
+    config_fingerprint: str | None
+    baseline_report_id: str | None
+    report_id: str | None
+    official: bool
+    passed: bool | None
+    attempt_count: int = Field(ge=0)
+    max_attempts: int = Field(gt=0)
+    requested_by: str | None
+    failure_code: str | None
+    failure_reason: str | None
+    available_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class IndexEvaluationRunDetailResponse(IndexEvaluationRunResponse):
+    """详情额外带上入队时冻结的配置与完整报告。"""
+
+    models: dict[str, str] = Field(default_factory=dict)
+    metrics: dict[str, object] = Field(default_factory=dict)
+    config_snapshot: dict[str, object] = Field(default_factory=dict)
+    component_manifest: dict[str, object] = Field(default_factory=dict)
+    report: EvaluationReportResponse | None = None
 
 
 class ErrorBody(BaseModel):

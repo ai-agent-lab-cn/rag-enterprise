@@ -10,7 +10,7 @@ const CONTEXT: IndexVersionCreationContext = {
   scenario: "candidate",
   definition: {
     chunking: { version: "v1-700-100", chunk_size: 700, chunk_overlap: 100 },
-    parser: { schema_version: "structured-v2" },
+    parser: { schema_version: "structured-v2", runtime_versions: ["docx-1"] },
     embedding: { model: "test/embedding", dimension: 1024 },
     components: { keyword_index_schema_version: "bm25-cache-v1" },
     processing_options: { chunk_size: 700, chunk_overlap: 100 },
@@ -31,10 +31,14 @@ const CONTEXT: IndexVersionCreationContext = {
     { document_id: "doc_failed", filename: "解析失败.pdf", reason: "parse_failed", latest_status: "failed", parse_failure_code: "PARSER_FAILED" },
     { document_id: "doc_missing", filename: "等待处理.docx", reason: "missing_current_revision", latest_status: "pending", parse_failure_code: null },
   ],
+  document_inclusions: [
+    { document_id: "doc_guide", filename: "使用指南.md" },
+  ],
   build_capacity: { active_builds: 0, max_concurrent_builds: 2, remaining_build_slots: 2, max_documents: 10000 },
   document_diff: { added: 3, removed: 1, updated: 2, unchanged: 7 },
   document_set_fingerprint: "b".repeat(64),
   config_changed: true,
+  component_changed: false,
   document_changed: true,
   creation_allowed: true,
   blocked_reasons: [],
@@ -56,11 +60,20 @@ const PREVIEW: IndexVersionCandidatePreview = {
   estimated_documents: 12,
   estimated_chunks: 48,
   estimated_embedding_units: 32000,
+  missing_source_documents: [],
 };
 
 test("五步向导展示真实配置与文档范围，并只提交后端预览结果", async () => {
   const onPreview = vi.fn().mockResolvedValue(PREVIEW);
-  const onCreate = vi.fn().mockResolvedValue(undefined);
+  const onCreate = vi.fn().mockResolvedValue({
+    batch_id: "rbd_test",
+    index_version_id: "iv_test",
+    index_build_id: "ib_test",
+    knowledge_base_id: "kb_default",
+    target_chunking_version: "v1-700-100",
+    queued: 12,
+    reused: false,
+  });
   render(
     <IndexVersionCreationWizard
       open
@@ -72,22 +85,23 @@ test("五步向导展示真实配置与文档范围，并只提交后端预览�
     />,
   );
 
-  expect(screen.getByText("1. 创建原因")).toBeVisible();
+  expect(screen.getByText("1. 创建场景")).toBeVisible();
   await userEvent.selectOptions(screen.getByLabelText("创建原因"), "config_changed");
   await userEvent.click(screen.getByRole("button", { name: "下一步" }));
 
-  expect(screen.getByLabelText("Chunk Size")).toHaveValue(700);
-  expect(screen.getByLabelText("Chunk Overlap")).toHaveValue(100);
+  expect(screen.getByLabelText("Chunk 大小")).toHaveValue(700);
+  expect(screen.getByLabelText("重叠长度")).toHaveValue(100);
   await userEvent.click(screen.getByRole("button", { name: "生成预览" }));
 
   await waitFor(() => expect(onPreview).toHaveBeenCalled());
   expect(await screen.findByText("纳入 12 份")).toBeVisible();
   expect(screen.getByText("解析失败.pdf · 解析失败（PARSER_FAILED）")).toBeVisible();
+  await userEvent.click(screen.getByRole("checkbox", { name: "我确认本版本不会包含以上资料" }));
   await userEvent.click(screen.getByRole("button", { name: "下一步" }));
   expect(screen.getByText("预计处理 12 份资料")).toBeVisible();
   await userEvent.click(screen.getByRole("button", { name: "下一步" }));
   expect(screen.getByText("发布指纹")).toBeVisible();
   await userEvent.click(screen.getByRole("button", { name: "创建并开始构建" }));
 
-  expect(onCreate).toHaveBeenCalledWith(PREVIEW);
+  expect(onCreate).toHaveBeenCalledWith(PREVIEW, true);
 });

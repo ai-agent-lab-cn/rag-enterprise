@@ -1,6 +1,14 @@
+import { ProgressSteps } from "./ProgressSteps";
+import type { ProgressStep, ProgressStepState } from "./ProgressSteps";
 import { cn } from "./cn";
 
-type PipelineKind = "file_upload" | "file_update" | "sync_run" | "index_build" | string;
+type PipelineKind =
+  | "file_upload"
+  | "file_update"
+  | "sync_run"
+  | "index_build"
+  | "index_evaluation"
+  | string;
 
 const PIPELINES: Record<string, Array<{ key: string; label: string; aliases?: string[] }>> = {
   // 每条流水线的格子必须对应后端真实写入的 current_stage。多出来的格子不会显示成
@@ -49,6 +57,17 @@ const PIPELINES: Record<string, Array<{ key: string; label: string; aliases?: st
     { key: "validate", label: "验证", aliases: ["validate", "validating"] },
     { key: "activate", label: "激活", aliases: ["active", "activate", "activating", "complete", "completed", "succeeded"] },
   ],
+  // 正式检索评测。格子与 backend/app/index_evaluation_runs.py 的 EVALUATION_STAGES
+  // 逐字对应——Evaluation Worker 按序写入这些 current_stage。
+  index_evaluation: [
+    { key: "prepare_dataset", label: "备数据集", aliases: ["queued", "prepare_dataset"] },
+    { key: "build_corpus", label: "建语料", aliases: ["build_corpus"] },
+    { key: "retrieve", label: "召回", aliases: ["retrieve"] },
+    { key: "rerank", label: "精排", aliases: ["rerank"] },
+    { key: "calculate_metrics", label: "算指标", aliases: ["calculate_metrics"] },
+    { key: "persist_report", label: "出报告", aliases: ["persist_report"] },
+    { key: "complete", label: "完成", aliases: ["complete", "completed", "succeeded"] },
+  ],
 };
 
 const TERMINAL_SUCCESS = new Set(["succeeded", "completed", "complete"]);
@@ -91,45 +110,34 @@ export function PipelineStepper({
   const failedStageLabel = steps[currentIndex]?.label ?? "处理";
   const statusText = succeeded ? "已完成" : failed ? `${failedStageLabel}失败` : retrying ? "等待重试" : cancelled ? "已取消" : waiting ? (status === "idle" ? "未开始" : "等待处理") : "处理中";
 
+  // 业务状态仍在这里推导，只把最终的步骤数组交给共享的视觉 primitive。
+  const progressSteps: ProgressStep[] = steps.map((step, index) => {
+    const completed = succeeded || index < currentIndex;
+    const current = index === currentIndex && !succeeded;
+    let state: ProgressStepState = "todo";
+    if (completed) state = "done";
+    else if (current && failed) state = "failed";
+    else if (current && retrying) state = "retrying";
+    else if (current && !waiting && !cancelled) state = "current";
+    return { key: step.key, label: step.label, state };
+  });
+
   return (
     <div className="min-w-0" aria-label={`${label}：${statusText}，${Math.round(progressPercent ?? 0)}%`}>
-      <div className="flex min-w-0 items-center gap-2 overflow-hidden py-0.5">
-        <div className="min-w-0 flex-1 overflow-x-auto">
-          <ol className="flex min-w-max items-start" aria-hidden="true">
-            {steps.map((step, index) => {
-              const completed = succeeded || index < currentIndex;
-              const current = index === currentIndex && !succeeded;
-              const failureHere = current && failed;
-              const retryHere = current && retrying;
-              return (
-                <li key={step.key} className="flex items-start">
-                  <div className="grid w-11 justify-items-center gap-1">
-                    <span className={cn(
-                      "grid h-4 w-4 place-items-center rounded-full border text-[9px] font-bold",
-                      completed && "border-success bg-success text-white",
-                      current && !failureHere && !retryHere && !waiting && !cancelled && "border-brand bg-brand text-white",
-                      failureHere && "border-danger bg-danger text-white",
-                      retryHere && "border-warning bg-warning text-white",
-                      (waiting || cancelled) && current && "border-line-firm bg-surface text-ink-faint",
-                      !completed && !current && "border-line-firm bg-surface text-ink-faint",
-                    )}>{completed ? "✓" : failureHere ? "!" : retryHere ? "↻" : current ? "●" : ""}</span>
-                    <span className={cn("text-[10px] leading-3", current ? "font-medium text-ink" : "text-ink-faint")}>{step.label}</span>
-                  </div>
-                  {index < steps.length - 1 ? <span className={cn("mt-[1px] grid h-4 w-2 place-items-center text-[11px]", completed ? "text-success" : "text-ink-faint")}>→</span> : null}
-                </li>
-              );
-            })}
-          </ol>
-        </div>
-        {!failed ? <span className={cn(
+      <ProgressSteps
+        steps={progressSteps}
+        label={label}
+        compact
+        // 整条对读屏隐藏：一行表格里念七个格子读屏用户听不完，语义由外层那一句
+        // 完整可访问名承担。
+        describeSteps={false}
+        showPercent={progressPercent ?? 0}
+        className="overflow-hidden"
+        trailing={!failed ? <span className={cn(
           "shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[11px] font-medium",
           retrying ? "bg-warning/10 text-warning" : succeeded ? "bg-success-subtle text-success" : waiting || cancelled ? "bg-canvas text-ink-faint" : "bg-brand-subtle text-brand",
         )}>{statusText}</span> : null}
-        <span className={cn(
-          "w-11 shrink-0 rounded-full px-1.5 py-0.5 text-center text-[12px] font-semibold tabular-nums",
-          failed ? "bg-danger-subtle text-danger-text" : retrying ? "bg-warning/10 text-warning" : succeeded ? "bg-success-subtle text-success" : waiting || cancelled ? "bg-canvas text-ink-faint" : "bg-brand-subtle text-brand",
-        )}>{Math.round(progressPercent ?? 0)}%</span>
-      </div>
+      />
       {failed ? <div className="mt-1 flex min-w-0 items-center gap-1.5">
         <span className="shrink-0 whitespace-nowrap rounded-full bg-danger-subtle px-1.5 py-0.5 text-[11px] font-medium text-danger-text">{statusText}</span>
         {failureReason ? <span className="min-w-0 truncate text-[11px] text-danger-text" title={failureReason}>{failureReason}</span> : null}

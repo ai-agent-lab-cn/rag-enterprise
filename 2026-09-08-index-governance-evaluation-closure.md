@@ -130,7 +130,7 @@ draft → building → validating → ready → active → previous → retired 
 - Produces: schema version `39`；`Settings.evaluation_database_url: str | None`；`Settings.evaluation_worker_id: str`；`Settings.evaluation_job_stale_seconds: int`。
 - Consumes: existing `evaluation_runs`、`operations`、`index_versions`。
 
-- [ ] **Step 1: Add migration contract assertions**
+- [x] **Step 1: Add migration contract assertions**
 
 在 `test_postgres_foundation.py` 的连续迁移清单和数据库迁移断言中加入 V39，并在 `test_env_example.py` 保持配置版本一致：
 
@@ -141,7 +141,7 @@ assert column("evaluation_runs", "status").is_nullable is False
 assert column("evaluation_runs", "passed").is_nullable is True
 ```
 
-- [ ] **Step 2: Create V39 migration**
+- [x] **Step 2: Create V39 migration**
 
 迁移必须完成：
 
@@ -172,7 +172,7 @@ ALTER TABLE evaluation_runs ALTER COLUMN passed DROP NOT NULL;
 - `operations.operation_type` 增加 `index_evaluation`；
 - 旧记录回填 `status='succeeded'`、`finished_at=run_at`、`updated_at=created_at`。
 
-- [ ] **Step 3: Add settings**
+- [x] **Step 3: Add settings**
 
 ```python
 evaluation_database_url: str | None = None
@@ -181,19 +181,19 @@ evaluation_job_stale_seconds: int = Field(default=1800, ge=60, le=86400)
 required_database_schema_version: int = Field(default=39, ge=1)
 ```
 
-- [ ] **Step 4: Wire runtime configuration**
+- [x] **Step 4: Wire runtime configuration**
 
 `.env.example`、Compose 和 Kubernetes 新增 `EVALUATION_DATABASE_URL`、`EVALUATION_WORKER_ID`，但不得把凭据写入仓库。Evaluation Worker 与 Index Worker 使用同一应用镜像、不同 command。Backend 缺少评测配置时仍可启动，但创建正式评测任务返回稳定 `503 EVALUATION_DATABASE_NOT_CONFIGURED`。
 
-- [ ] **Step 5: Guard and initialize the isolated Evaluation DB**
+- [x] **Step 5: Guard and initialize the isolated Evaluation DB**
 
 初始化前比较规范化后的 `DATABASE_URL` 与 `EVALUATION_DATABASE_URL`，相同则拒绝启动 Evaluation Worker。评测库不存在时只允许创建专用库 `rag_enterprise_evaluation`；存在时不得删除或清空。对该库应用同一套 V39 迁移，并保留 `_require_empty_evaluation_database()` 的业务数据防护。
 
-- [ ] **Step 6: Apply business migration only**
+- [x] **Step 6: Apply business migration only**
 
 运行迁移到当前本地 PostgreSQL，确认数据库报告 schema `39`。这一步不是测试，不运行测试套件。
 
-- [ ] **Step 7: Local review checkpoint**
+- [x] **Step 7: Local review checkpoint**
 
 检查 `git diff --check` 和迁移 SQL；不 commit、不 push。
 
@@ -215,7 +215,7 @@ required_database_schema_version: int = Field(default=39, ge=1)
   - `cancel_evaluation_run(...) -> dict[str, Any]`
 - Consumes: schema V39；`create_operation()`；Index Version frozen config。
 
-- [ ] **Step 1: Author repository behavior tests**
+- [x] **Step 1: Author repository behavior tests**
 
 覆盖：候选版本状态限制、同版本并发唯一、后端重算配置指纹、自动选择 active 正式报告为 baseline、`FOR UPDATE SKIP LOCKED`、失败重试、取消、租约恢复、知识库归属隔离。
 
@@ -226,11 +226,11 @@ assert run["config_fingerprint"] == candidate["config_fingerprint"]
 assert operation(run)["operation_type"] == "index_evaluation"
 ```
 
-- [ ] **Step 2: Implement immutable enqueue evidence**
+- [x] **Step 2: Implement immutable enqueue evidence**
 
 创建任务时事务内锁定版本，只接受 `validating` 或 `validation_failed`，保存：版本 ID、配置指纹、配置快照、数据集版本、当前 active 基线报告、请求人。
 
-- [ ] **Step 3: Implement claim and lease recovery**
+- [x] **Step 3: Implement claim and lease recovery**
 
 领取查询必须使用：
 
@@ -243,17 +243,17 @@ FOR UPDATE SKIP LOCKED LIMIT 1;
 
 领取和 `operations.status='running'` 在同一事务更新。
 
-- [ ] **Step 4: Implement terminal state convergence**
+- [x] **Step 4: Implement terminal state convergence**
 
 成功、失败、取消必须同时收口 `evaluation_runs` 与对应 `operations`；错误消息保存技术详情，API 响应层只输出稳定用户文案。
 
-- [ ] **Step 5: Add retry and cancellation guards**
+- [x] **Step 5: Add retry and cancellation guards**
 
 - `retry` 仅允许 `failed` 且未超过最大次数；
 - `cancel` 仅允许 `queued`；
 - 运行中的取消本轮不实现，返回稳定 `409`。
 
-- [ ] **Step 6: Local review checkpoint**
+- [x] **Step 6: Local review checkpoint**
 
 检查接口签名与 V39 字段一致；不运行测试，不 commit。
 
@@ -273,11 +273,11 @@ FOR UPDATE SKIP LOCKED LIMIT 1;
   - CLI loop `python -m scripts.evaluation_worker`
 - Consumes: Task 2 claim/finish/fail interfaces；`run_corpus_baseline()`。
 
-- [ ] **Step 1: Add worker orchestration tests with model fakes**
+- [x] **Step 1: Add worker orchestration tests with model fakes**
 
 断言 Worker 使用冻结的 `chunk_size`、`chunk_overlap`、模型与数据集；业务 DB 只保存报告，临时语料只进入 Evaluation DB。
 
-- [ ] **Step 2: Decouple report provenance from threshold result**
+- [x] **Step 2: Decouple report provenance from threshold result**
 
 `run_corpus_baseline()` 返回：
 
@@ -289,7 +289,7 @@ assert report.passed == all(metric.passed for metric in required_metrics)
 
 只有测试替身或不受控运行才允许 `official=False`；不得再执行 `official = passed`。
 
-- [ ] **Step 3: Implement evaluation orchestration**
+- [x] **Step 3: Implement evaluation orchestration**
 
 任务开始前检查：
 
@@ -299,21 +299,21 @@ assert report.passed == all(metric.passed for metric in required_metrics)
 - Dataset ID 位于服务端白名单；
 - 独立评测数据库 schema 为 39 且没有业务用户/知识库。
 
-- [ ] **Step 4: Persist complete report payload**
+- [x] **Step 4: Persist complete report payload**
 
 成功后通过 `finish_evaluation_run()` 写入完整 `model_dump(mode='json')`、metrics、`official`、`passed`、`report_id` 和候选版本冻结的 `component_manifest`。Vector、Keyword、Metadata、ACL、Citation 版本必须来自后端 Version Snapshot，不由 Worker 或前端重新推导。
 
 同时按阶段更新对应 Operation：`queued → prepare_dataset → build_corpus → retrieve → rerank → calculate_metrics → persist_report → complete`。失败时保留最后阶段并写入稳定错误码，前端不得直接展示宿主绝对路径。
 
-- [ ] **Step 5: Implement Worker process loop**
+- [x] **Step 5: Implement Worker process loop**
 
 参考 Index Worker 的 SIGTERM、轮询和租约恢复，但设置 `max_concurrency=1`，禁止并行污染同一个 Evaluation DB。
 
-- [ ] **Step 6: Add deployment process**
+- [x] **Step 6: Add deployment process**
 
 Compose 服务名 `evaluation-worker`，Kubernetes Deployment 名 `rag-evaluation-worker`。若未配置 `EVALUATION_DATABASE_URL`，进程明确退出并输出稳定配置错误，Backend 仍可启动。
 
-- [ ] **Step 7: Local review checkpoint**
+- [x] **Step 7: Local review checkpoint**
 
 确认 Evaluation Worker 不导入或调用 Index Worker 的任务领取循环；不运行测试，不 commit。
 
@@ -336,15 +336,15 @@ Compose 服务名 `evaluation-worker`，Kubernetes Deployment 名 `rag-evaluatio
   - `POST /api/knowledge-bases/{kb}/evaluation-runs/{run}/cancel`
 - Consumes: Tasks 2–3 repository and report payload。
 
-- [ ] **Step 1: Add API contract tests**
+- [x] **Step 1: Add API contract tests**
 
 覆盖管理员权限、知识库归属、202 enqueue、409 duplicate、404 cross-KB、retry/cancel、报告详情以及缺少 Evaluation DB 的 503。
 
-- [ ] **Step 2: Add response models**
+- [x] **Step 2: Add response models**
 
 新增 `IndexEvaluationRunCreateRequest`、`IndexEvaluationRunResponse`、`IndexEvaluationRunDetailResponse`。响应不得包含数据库 URL、密钥或宿主绝对路径。
 
-- [ ] **Step 3: Extend EvaluationReportRepository**
+- [x] **Step 3: Extend EvaluationReportRepository**
 
 Repository 构造函数接受可选业务数据库 URL：
 
@@ -354,15 +354,15 @@ EvaluationReportRepository(reports_path: Path, database_url: str | None = None)
 
 `list_official()` 和 `get_official()` 合并文件正式报告与数据库正式报告，按 `report_id` 去重，数据库记录优先。
 
-- [ ] **Step 4: Correct validation report selection**
+- [x] **Step 4: Correct validation report selection**
 
 `create_scoped_index_validation()` 使用统一 Repository 加载 `official=true` 的报告，不要求 `passed=true`。`check_retrieval_quality()` 继续检查配置指纹、证据完整性、ACL、Metadata 与相对回退；绝对阈值写入说明，不直接替代三层门禁结论。
 
-- [ ] **Step 5: Add routes and audit events**
+- [x] **Step 5: Add routes and audit events**
 
 审计动作使用：`index_evaluation.create`、`index_evaluation.retry`、`index_evaluation.cancel`。验证与激活保留原审计动作。
 
-- [ ] **Step 6: Protect lifecycle, rollback, and legacy governance**
+- [x] **Step 6: Protect lifecycle, rollback, and legacy governance**
 
 在既有生命周期测试中补充回归约束：
 
@@ -371,7 +371,7 @@ EvaluationReportRepository(reports_path: Path, database_url: str | None = None)
 - `legacy/unknown` 版本不得伪造配置指纹、组件版本或正式报告；证据不完整时禁止验证与激活，但保留查看、退役、清理能力；
 - Validation Report 保存并核对 Version Snapshot、Build、Evaluation Report 的同一 `config_fingerprint` 与 `component_manifest`。
 
-- [ ] **Step 7: Local review checkpoint**
+- [x] **Step 7: Local review checkpoint**
 
 检查 OpenAPI 响应与前端类型所需字段一致；不运行测试，不 commit。
 
@@ -390,7 +390,7 @@ EvaluationReportRepository(reports_path: Path, database_url: str | None = None)
   - stable code `SOURCE_FILE_MISSING`
 - Consumes: `document_versions.source_path`、Document Snapshot members。
 
-- [ ] **Step 1: Add missing-source regression tests**
+- [x] **Step 1: Add missing-source regression tests**
 
 测试数据库保留 ready Document Version 但删除物理文件，断言 Preview/Create 不创建 Version、Build、Operation 或 Job，并返回：
 
@@ -402,19 +402,19 @@ EvaluationReportRepository(reports_path: Path, database_url: str | None = None)
 }
 ```
 
-- [ ] **Step 2: Implement controlled path validation**
+- [x] **Step 2: Implement controlled path validation**
 
 通过 `Path.resolve()` 确认文件仍在 `upload_root` 内，检查存在性、普通文件、记录大小；不得允许 `../` 越界。
 
-- [ ] **Step 3: Wire preview and create**
+- [x] **Step 3: Wire preview and create**
 
 给 `preview_index_version_candidate()` 和 `create_index_version_candidate()` 增加 `upload_root` 参数。Preview 返回阻塞原因；Create 在事务写入前再次核对，防止 Preview 后文件消失。
 
-- [ ] **Step 4: Add Worker defense**
+- [x] **Step 4: Add Worker defense**
 
 `read_bytes()` 的 `FileNotFoundError` 转换为稳定 `SOURCE_FILE_MISSING`，Document Index State 与 Operation 使用用户文案；相对路径只保留在管理员技术详情中。
 
-- [ ] **Step 5: Local review checkpoint**
+- [x] **Step 5: Local review checkpoint**
 
 用当前缺失的测试资料记录执行只读 Preview，确认得到稳定阻塞结果；不得自动清理该记录，不运行测试，不 commit。
 
@@ -437,27 +437,27 @@ EvaluationReportRepository(reports_path: Path, database_url: str | None = None)
   - `Column<T>.tooltip?: (row: T) => ReactNode`
 - Consumes: existing Pipeline stage maps and `releaseStages()`。
 
-- [ ] **Step 1: Author visual-state component tests**
+- [x] **Step 1: Author visual-state component tests**
 
 断言 completed、current、blocked、failed、retrying 有文字和可访问名，不只依赖颜色；Tooltip 可被键盘聚焦触发。
 
-- [ ] **Step 2: Extract ProgressSteps visual primitive**
+- [x] **Step 2: Extract ProgressSteps visual primitive**
 
 统一使用文件进度条现有的 16px 圆点、连线、成功/警告/失败色与紧凑标签。组件只渲染传入状态，不推导业务状态。
 
-- [ ] **Step 3: Refactor PipelineStepper**
+- [x] **Step 3: Refactor PipelineStepper**
 
 保留 `PIPELINES`、真实 `current_stage` 别名与进度推导，仅把最终步骤数组交给 `ProgressSteps`。
 
-- [ ] **Step 4: Refactor ReleaseFlow**
+- [x] **Step 4: Refactor ReleaseFlow**
 
 生命周期步骤改为：索引定义、版本快照、索引构建、正式评测、三层验证、待激活、当前生效。状态继续由版本、评测、验证和 active 指针推导。
 
-- [ ] **Step 5: Extend DataTable tooltip behavior**
+- [x] **Step 5: Extend DataTable tooltip behavior**
 
 简单 string/number 自动设置完整 `title`；复杂内容使用 `column.tooltip(row)` 包装统一 Tooltip。错误、文件名、ID、指纹列接入时不得扩大行高。
 
-- [ ] **Step 6: Local review checkpoint**
+- [x] **Step 6: Local review checkpoint**
 
 启动 Vite 后检查步骤条与表格无布局溢出；不运行 Vitest、Lint 或 build，不 commit。
 
@@ -476,27 +476,27 @@ EvaluationReportRepository(reports_path: Path, database_url: str | None = None)
   - `IndexVersionDetailDialog({open, knowledgeBaseId, versionId, onClose, onActionComplete})`
 - Consumes: version、build、evaluation run、validation report、lifecycle event APIs。
 
-- [ ] **Step 1: Add dialog behavior tests**
+- [x] **Step 1: Add dialog behavior tests**
 
 覆盖打开、加载、错误、关闭、深链、移动端全屏语义，以及五个内容区块。
 
-- [ ] **Step 2: Build the dialog shell**
+- [x] **Step 2: Build the dialog shell**
 
 使用 Radix `Dialog size='lg'`，增加受控最大高度和内部滚动。标题显示版本号与状态，副标题显示缩写 ID；完整 ID 提供 Tooltip 与复制。
 
-- [ ] **Step 3: Move existing detail content**
+- [x] **Step 3: Move existing detail content**
 
 迁移版本概览、配置快照、组件清单、构建结果、正式评测、三层验证和生命周期；不得丢失 legacy/unknown 提示与治理读取错误态。
 
-- [ ] **Step 4: Replace independent navigation**
+- [x] **Step 4: Replace independent navigation**
 
 版本表“详情”设置 `selectedVersionId`。`/knowledge-bases/{kb}/index-versions/{version}` 深链进入知识库详情后自动打开弹框；关闭恢复 `/knowledge-bases/{kb}`。
 
-- [ ] **Step 5: Remove obsolete page implementation**
+- [x] **Step 5: Remove obsolete page implementation**
 
 确认所有 import 和测试已迁移后删除 `IndexVersionDetailPage.tsx`，不得留下两个详情实现。
 
-- [ ] **Step 6: Local review checkpoint**
+- [x] **Step 6: Local review checkpoint**
 
 检查桌面弹框和移动端全屏布局；不运行自动化验证，不 commit。
 
@@ -513,15 +513,15 @@ EvaluationReportRepository(reports_path: Path, database_url: str | None = None)
   - `OperationDetailDialog({operation, build, buildDocuments, evaluationRun, onClose, onRetryEvaluation, onOpenVersion})`
 - Consumes: Task 4 evaluation details、Index Build documents、Task 6 ProgressSteps。
 
-- [ ] **Step 1: Add type-aware detail tests**
+- [x] **Step 1: Add type-aware detail tests**
 
 覆盖 `index_build` 与 `index_evaluation` 两种类型，失败原因、技术详情、文档级结果、指标和动作必须来自真实响应数据。
 
-- [ ] **Step 2: Implement common summary**
+- [x] **Step 2: Implement common summary**
 
 展示类型、状态、版本、开始/结束时间、进度、总数/成功/失败/处理中。未知字段使用 `—`。
 
-- [ ] **Step 3: Implement build-specific section**
+- [x] **Step 3: Implement build-specific section**
 
 Document Index State 表显示文件名、Vector、Keyword、Metadata、整体状态和稳定失败原因，不再在主表格下方展开。
 
@@ -532,15 +532,15 @@ Document Index State 表显示文件名、Vector、Keyword、Metadata、整体�
 - “重新上传”打开现有上传入口，不伪造自动恢复；
 - 删除或补传后必须重新创建新的 Index Version，不修改旧版本快照。
 
-- [ ] **Step 4: Implement evaluation-specific section**
+- [x] **Step 4: Implement evaluation-specific section**
 
 展示数据集、候选配置、基线报告、绝对阈值结论、关键指标、报告 ID、失败诊断和重试动作。
 
-- [ ] **Step 5: Replace mixed detail interactions**
+- [x] **Step 5: Replace mixed detail interactions**
 
 所有运行记录行“详情”只设置 `selectedOperation`，统一弹框；删除 `selectedBuild` 的行内详情区。
 
-- [ ] **Step 6: Local review checkpoint**
+- [x] **Step 6: Local review checkpoint**
 
 检查长错误只在弹框中换行，主表格行高稳定；不运行自动化验证，不 commit。
 
@@ -564,11 +564,11 @@ Document Index State 表显示文件名、Vector、Keyword、Metadata、整体�
   - `cancelIndexEvaluationRun(kb, run)`
 - Consumes: Tasks 4、6、7、8。
 
-- [ ] **Step 1: Add frontend types and client methods**
+- [x] **Step 1: Add frontend types and client methods**
 
 定义 `IndexEvaluationRun`、`IndexEvaluationRunDetail`、`EvaluationRunStatus`，字段逐项对齐后端响应，不在前端重算配置指纹。
 
-- [ ] **Step 2: Add candidate row actions**
+- [x] **Step 2: Add candidate row actions**
 
 动作规则：
 
@@ -580,25 +580,25 @@ official matching report → 执行三层验证
 ready → 激活
 ```
 
-- [ ] **Step 3: Replace empty validation selector dead end**
+- [x] **Step 3: Replace empty validation selector dead end**
 
 无匹配报告时，验证弹框主操作改为“运行正式评测”；存在报告时允许选择，并同时显示绝对阈值结论和“最终是否可发布由三层验证决定”的说明。
 
-- [ ] **Step 4: Include evaluation operations in governance records**
+- [x] **Step 4: Include evaluation operations in governance records**
 
 索引治理运行记录仅包含 `index_build`、`index_evaluation`。空态文案改为“创建索引版本或运行正式评测后，这里会保留记录”。
 
 为 `index_evaluation` 增加任务类型中文映射和阶段映射；阶段必须与 Worker 写入的 `prepare_dataset / build_corpus / retrieve / rerank / calculate_metrics / persist_report / complete` 一致。
 
-- [ ] **Step 5: Poll active long-running records**
+- [x] **Step 5: Poll active long-running records**
 
 页面仅在存在 `queued/running` 构建或评测时定时刷新；终态后停止轮询，避免常驻请求。
 
-- [ ] **Step 6: Preserve manual activation boundary**
+- [x] **Step 6: Preserve manual activation boundary**
 
 正式评测和三层验证成功后不得自动调用 Activate。只有 `ready` 版本显示“激活”，弹框明确当前 active 将变为 previous。
 
-- [ ] **Step 7: Local review checkpoint**
+- [x] **Step 7: Local review checkpoint**
 
 用真实页面走到“运行正式评测”确认弹框、任务记录和禁用原因正确；不实际启动重量评测模型，除非本地 Evaluation DB 已安全配置；不运行自动化验证，不 commit。
 
@@ -613,7 +613,7 @@ ready → 激活
 - Produces: 当前实现的业务链路、已闭环能力、缺失项和后续优先级。
 - Consumes: Tasks 1–9 的实际代码与运行证据。
 
-- [ ] **Step 1: Start current workspace runtime**
+- [x] **Step 1: Start current workspace runtime**
 
 使用 schema V39 启动 PostgreSQL、Backend、Index Worker、Evaluation Worker 和 Frontend。检查：
 
@@ -622,19 +622,19 @@ GET /api/health/ready → 200
 GET / → 200
 ```
 
-- [ ] **Step 2: Inspect desktop UI**
+- [x] **Step 2: Inspect desktop UI**
 
 检查知识库详情索引治理：发布步骤条、版本详情弹框、正式评测入口、验证入口、运行记录弹框、长内容 Tooltip、缺失文件提示。
 
-- [ ] **Step 3: Inspect mobile UI**
+- [x] **Step 3: Inspect mobile UI**
 
 检查 `<768px`：顶部导航、全屏详情弹框、步骤条横向滚动、表格卡片或安全横向滚动、44px 点击区域。
 
-- [ ] **Step 4: Inspect empty/loading/success/failure states**
+- [x] **Step 4: Inspect empty/loading/success/failure states**
 
 不得用假数据冒充评测成功。未配置 Evaluation DB 时展示稳定配置失败；缺失源文件展示 `SOURCE_FILE_MISSING`；历史版本展示 unknown/legacy。
 
-- [ ] **Step 5: Write the post-implementation inventory**
+- [x] **Step 5: Write the post-implementation inventory**
 
 文档必须包含：
 
@@ -647,11 +647,11 @@ GET / → 200
 - P0/P1/P2 后续建议；
 - 事实证据对应的代码、迁移和运行结果。
 
-- [ ] **Step 6: Update operations documentation**
+- [x] **Step 6: Update operations documentation**
 
 README 与迁移恢复文档增加 Evaluation DB 初始化、Worker 启动、任务失败重试和报告恢复说明，不写真实凭据。
 
-- [ ] **Step 7: Final local review checkpoint**
+- [x] **Step 7: Final local review checkpoint**
 
 汇总修改、运行状态、未执行的自动化验证、仍存在的风险；不 commit、不 push，等待用户在 VS Code 审阅并明确“提交代码”。
 

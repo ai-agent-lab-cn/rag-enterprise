@@ -9,7 +9,6 @@ from backend.app.database import apply_migrations
 from backend.app.index_retention import list_retention_candidates, run_retention_sweep
 from backend.app.index_versions import create_building_version
 
-
 KB_ID = "kb_default"
 
 
@@ -21,8 +20,9 @@ def _reset(database_url: str) -> None:
     with psycopg.connect(database_url) as connection, connection.transaction():
         connection.execute(
             """INSERT INTO knowledge_bases
-               (knowledge_base_id, name, description, is_default, created_at, updated_at)
-               VALUES (%s, '默认知识库', '', true, now(), now())""",
+               (knowledge_base_id, name, name_normalized, description, is_default,
+                created_at, updated_at)
+               VALUES (%s, '默认知识库', '默认知识库', '', true, now(), now())""",
             (KB_ID,),
         )
 

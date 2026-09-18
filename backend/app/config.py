@@ -30,10 +30,16 @@ class Settings(BaseSettings):
     auth_path: Path = Path("data/auth/store.json")
     audit_path: Path = Path("data/audit/events.json")
     database_url: str | None = None
-    required_database_schema_version: int = Field(default=38, ge=1)
+    required_database_schema_version: int = Field(default=40, ge=1)
     index_worker_id: str = "worker-local"
     index_job_max_attempts: int = Field(default=3, ge=1, le=10)
     index_job_stale_seconds: int = Field(default=900, ge=60, le=86400)
+    # 正式检索评测会建临时语料再删掉，必须指向与业务库不同的隔离库；为空表示本部署
+    # 没有开启产品内正式评测，Backend 仍可启动，只有创建评测任务的接口返回 503。
+    evaluation_database_url: str | None = None
+    evaluation_worker_id: str = "evaluation-worker-local"
+    # 一次正式评测要跑完整语料的召回与精排，租约比索引任务长得多；默认 30 分钟。
+    evaluation_job_stale_seconds: int = Field(default=1800, ge=60, le=86400)
     max_concurrent_index_builds: int = Field(default=2, ge=1, le=32)
     max_index_build_documents: int = Field(default=10000, ge=1, le=1000000)
     index_retention_count: int = Field(default=2, ge=0, le=100)

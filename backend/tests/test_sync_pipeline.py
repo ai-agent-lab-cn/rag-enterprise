@@ -23,11 +23,11 @@ from backend.app.data_source_sync import (
     enqueue_sync,
 )
 from backend.app.database import apply_migrations
+from backend.app.errors import AppError
 from backend.app.pipeline_governance import (
     TERMINAL_RESOURCE_STATUSES,
     aggregate_sync_run,
 )
-from backend.app.errors import AppError
 from backend.app.postgres_documents import IndexWorker, PostgresAsyncRAGService
 
 

@@ -299,7 +299,8 @@ def check_technical(
                    OR jsonb_typeof(metadata->'paragraph') IS DISTINCT FROM 'number'
                    OR jsonb_typeof(COALESCE(metadata->'heading_path','[]'::jsonb)) IS DISTINCT FROM 'array'
                    OR (metadata ? 'page' AND jsonb_typeof(metadata->'page') IS DISTINCT FROM 'number')
-                   OR (metadata ? 'sheet_name' AND jsonb_typeof(metadata->'sheet_name') IS DISTINCT FROM 'string')
+                   OR (metadata ? 'sheet_name'
+                       AND jsonb_typeof(metadata->'sheet_name') IS DISTINCT FROM 'string')
                )""",
             (index_version_id,),
         ).fetchone()
@@ -429,7 +430,7 @@ def check_retrieval_quality(
 
     with connection.cursor(row_factory=dict_row) as cursor:
         version = cursor.execute(
-            """SELECT config_fingerprint, config_completeness
+            """SELECT config_fingerprint, config_completeness, component_manifest
                FROM index_versions WHERE index_version_id = %s""",
             (index_version_id,),
         ).fetchone()
@@ -507,7 +508,15 @@ def check_retrieval_quality(
         # 而切换要回答的是「这次换配置是变好还是变坏」。用绝对阈值当切换门槛会让
         # 功能锁死——某些语料在当前实现下永远达不到冻结阈值，于是一次切换都做不成。
         "meets_frozen_thresholds": report.passed,
+        # official 与 passed 是两件事：前者说明这份报告来自受控的正式运行，可以作为
+        # 门禁证据；后者只说明它有没有达到冻结阈值。放行看的是本层其余各项，不是它们。
+        "evaluation_report_official": report.official,
         "evaluation_report_id": report.report_id,
+        # 把这次放行依据的配置指纹与组件清单原样存进不可变报告：事后追溯「这一版是
+        # 拿什么证据放行的」时，不必再去 join 当时的 index_versions——那张表的行会随
+        # 后续动作变化，而 Validation Report 必须自己说得清楚。
+        "config_fingerprint": str(version["config_fingerprint"]),
+        "component_manifest": dict(version["component_manifest"] or {}),
     }
 
 

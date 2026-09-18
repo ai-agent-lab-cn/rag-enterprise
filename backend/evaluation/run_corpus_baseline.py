@@ -9,6 +9,7 @@
 import argparse
 import json
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -68,7 +69,27 @@ def run_corpus_baseline(
     reranker=None,
     retrieval_mode: str = "vector",
     retrieve_k: int = RETRIEVE_K,
+    official: bool = False,
+    on_stage: Callable[[str], None] | None = None,
 ) -> RetrievalEvaluationReport:
+    """跑一次语料级检索基线。
+
+    ``official`` 表示这次运行本身是否可信，与指标有没有达到阈值无关。之前这里执行的是
+    ``official = passed``：未达标的报告一律不标 official，于是 ``load_official_model``
+    找不到它，页面上「执行三层验证」永远只能选到已通过绝对阈值的报告。可发布与否本来
+    应该由三层门禁给结论（配置指纹一致、证据完整、相对基线不回退），把绝对阈值提前
+    当成来源可信度的判据，等于让门禁失去了「跑过但没达标」这个真实结论。
+
+    只有受控的正式运行才允许传 ``official=True``：调用方要保证数据集在服务端白名单里、
+    评测库是隔离的空库、配置来自候选版本的冻结快照。命令行手跑与测试替身保持默认
+    ``False``——它们证明不了这几件事。
+
+    ``on_stage`` 在每个阶段真正开始时被调用一次，用于把长任务进度投影到 ``operations``。
+    阶段名与 ``index_evaluation_runs.EVALUATION_STAGES`` 逐字对应；不传时整个函数行为
+    与之前完全一致。
+    """
+
+    notify = on_stage or (lambda _stage: None)
     settings = get_settings()
     if retrieval_mode not in RETRIEVAL_MODES:
         raise ValueError(f"retrieval_mode 必须是 {RETRIEVAL_MODES} 之一")
@@ -77,6 +98,7 @@ def run_corpus_baseline(
     database_url = database_url or settings.database_url
     if not database_url:
         raise ValueError("语料评测必须通过 --database-url 或 DATABASE_URL 指定隔离数据库")
+    notify("prepare_dataset")
     check_schema_version(database_url, settings.required_database_schema_version)
     _require_empty_evaluation_database(database_url)
     embedder = embedder or get_embedding_model()
@@ -103,6 +125,7 @@ def run_corpus_baseline(
         )
         service = PostgresAsyncRAGService(evaluation_settings, embedder, reranker, None)
         try:
+            notify("build_corpus")
             _create_evaluation_knowledge_base(database_url, knowledge_base_id)
             for document in dataset.documents:
                 service.index_document(document.filename, contents[document.filename], knowledge_base_id)
@@ -114,8 +137,12 @@ def run_corpus_baseline(
             if unfinished:
                 raise RuntimeError(f"语料索引未全部成功：{unfinished}")
 
+            # 召回与精排分两趟，而不是在一个循环里交替：两个阶段各自完整跑完，
+            # 报告的进度才真的对应「现在在做召回」还是「现在在做精排」。合成一趟时
+            # 无论怎么标记阶段都是猜的——第一个问题一进循环，两个阶段就同时开始了。
+            notify("retrieve")
             vector_rankings: dict[str, list[str]] = {}
-            reranked_rankings: dict[str, list[str]] = {}
+            candidates_by_query: dict[str, list[RetrievedChunk]] = {}
             for query in dataset.queries:
                 embedding = embedder.encode([query.question])[0]
                 # 与在线查询共用同一份召回实现，两个入口不会得出不同的质量结论。
@@ -129,7 +156,12 @@ def run_corpus_baseline(
                 # 在 lexical/hybrid 模式下这一路记录的是召回阶段的融合名次，
                 # 因此报告里的 vector_mrr 应结合 parameters.retrieval_mode 解读。
                 vector_rankings[query.query_id] = [_position(item) for item in candidates]
+                candidates_by_query[query.query_id] = candidates
 
+            notify("rerank")
+            reranked_rankings: dict[str, list[str]] = {}
+            for query in dataset.queries:
+                candidates = candidates_by_query[query.query_id]
                 # 纯词法模式下可能一个词元都匹配不上，此时该问题的两项指标均计 0，
                 # 而不是让空候选传进精排。
                 if candidates:
@@ -150,6 +182,7 @@ def run_corpus_baseline(
         finally:
             _delete_evaluation_knowledge_base(database_url, knowledge_base_id)
 
+    notify("calculate_metrics")
     metrics = evaluate_rankings(
         [_as_evaluation_query(query) for query in dataset.queries],
         vector_rankings,
@@ -162,9 +195,8 @@ def run_corpus_baseline(
         dataset_version=dataset.version,
         commit=commit,
         run_at=run_at,
-        # 与 promote_official_report 保持同一原则：未通过冻结门槛的基线如实保留，
-        # 但不标记 official，因此不会进入只读评测 API 的正式报告列表。
-        official=False,
+        # 由调用方声明这次运行是否受控，不由指标是否达标推导（见函数 docstring）。
+        official=official,
         models={
             "embedding": resolved_model(settings.embedding_model),
             "reranker": resolved_model(settings.reranker_model),
@@ -232,7 +264,7 @@ def run_corpus_baseline(
         acl_leak_count=acl_leak_count,
         config_fingerprint=fingerprint,
     )
-    return report.model_copy(update={"official": report.passed})
+    return report
 
 
 def _require_empty_evaluation_database(database_url: str) -> None:
@@ -427,6 +459,10 @@ def main() -> None:
     parser.add_argument("--database-url", default=os.getenv("DATABASE_URL"))
     parser.add_argument("--retrieval-mode", choices=RETRIEVAL_MODES, default="vector")
     parser.add_argument("--retrieve-k", type=int, default=RETRIEVE_K)
+    # 命令行默认不标 official：手跑的运行证明不了数据集、评测库与配置都是受控的。
+    # 要产出可用于三层验证的正式报告，走产品内的「运行正式评测」，由 Evaluation Worker
+    # 在校验完这几件事之后执行。
+    parser.add_argument("--official", action="store_true")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -446,6 +482,7 @@ def main() -> None:
         args.database_url,
         retrieval_mode=args.retrieval_mode,
         retrieve_k=args.retrieve_k,
+        official=args.official,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
@@ -453,6 +490,7 @@ def main() -> None:
         encoding="utf-8",
     )
     print(args.output)
+    print(f"official={str(report.official).lower()}")
     print(f"passed={str(report.passed).lower()}")
 
 

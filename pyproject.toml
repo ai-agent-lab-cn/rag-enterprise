@@ -38,3 +38,8 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# 提示词正文是模型的输入，不是代码。给它折行会改变发给模型的文本、改变 prompt_hash，
+# 而 `# noqa` 写在三引号字符串里只会变成提示词的一部分——两条路都不能走。
+"backend/app/prompts.py" = ["E501"]

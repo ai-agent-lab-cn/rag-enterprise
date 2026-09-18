@@ -55,8 +55,8 @@ export function ModelSwitcher() {
   }, []);
 
   useEffect(() => {
-    void load();
     const reload = () => void load();
+    reload();
     window.addEventListener("rag-generation-status-changed", reload);
     return () => window.removeEventListener("rag-generation-status-changed", reload);
   }, [load]);
@@ -121,9 +121,10 @@ export function ModelSwitcher() {
       </div>
 
       <Tooltip content={compactLabel} side="right">
-        <button
-          type="button"
-          className="relative mx-auto grid h-10 w-10 place-items-center rounded-md border-0 bg-transparent text-ink-muted hover:bg-brand-subtle hover:text-brand min-[1181px]:hidden"
+        <Button
+          variant="ghost"
+          size="icon"
+          className="relative mx-auto grid h-10 w-10 place-items-center text-ink-muted hover:bg-brand-subtle hover:text-brand min-[1181px]:hidden"
           onClick={openDialog}
           aria-label={`切换模型：${compactLabel}`}
         >
@@ -131,7 +132,7 @@ export function ModelSwitcher() {
           {active ? (
             <span className={`absolute right-1 top-1 h-2 w-2 rounded-full ${active.status === "available" ? "bg-success" : active.status === "unconfigured" ? "bg-ink-faint" : "bg-warning"}`} />
           ) : null}
-        </button>
+        </Button>
       </Tooltip>
 
       <Dialog

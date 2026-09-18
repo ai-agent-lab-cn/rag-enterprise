@@ -156,3 +156,54 @@ grep object_skipped <worker 日志> | jq -c '{object_key, size_bytes, max_bytes}
 更换 embedding 模型不在本流程范围。`chunks.embedding` 自 Schema V10 起按登记维度固定
 （pgvector 拒绝为无维度列建 ANN 索引），因此新旧模型维度不同时无法并存回滚，
 必须另行规划停写窗口与全量重嵌入。
+
+## 正式评测数据库
+
+自 Schema V39 起，产品内的正式检索评测跑在一个**独立数据库**上，由 `EVALUATION_DATABASE_URL`
+指定。它只承载评测过程中的临时语料，业务库里只保存最终报告。
+
+### 初始化
+
+```bash
+# 与业务库同址会被拒绝启动，这条守卫比较的是规范化之后的连接串
+EVALUATION_DATABASE_URL=postgresql://user:pass@host:5432/rag_enterprise_evaluation \
+  uv run python -m scripts.evaluation_worker --once
+```
+
+Worker 启动时自检并按需初始化：
+
+- 评测库与业务库同址 → 拒绝启动；
+- 评测库不存在 → 只允许创建名为 `rag_enterprise_evaluation` 的专用库，不会创建别的名字；
+- 评测库已存在 → **不删除、不清空**，只应用同一套迁移到 V39；
+- 评测库里存在业务数据（用户、知识库）→ 拒绝使用，避免把业务库当评测库用。
+
+Backend 缺少这项配置时照常启动，只是创建评测任务返回稳定
+`503 EVALUATION_DATABASE_NOT_CONFIGURED`——这样"本部署没开这个功能"与"任务卡住了"能区分开。
+
+### 任务失败与重试
+
+评测任务记录在业务库的 `evaluation_runs` 表：
+
+```sql
+-- 看当前队列与失败原因（error_message 含技术详情，只给管理员）
+SELECT evaluation_run_id, status, attempt_count, max_attempts, error_code, error_message
+FROM evaluation_runs WHERE evaluation_type = 'retrieval' ORDER BY created_at DESC LIMIT 20;
+```
+
+- `failed` 且 `attempt_count < max_attempts`（默认 3）可以重试：页面上的「重试」按钮，或
+  `POST /api/knowledge-bases/{kb}/evaluation-runs/{run}/retry`。重试不新建记录。
+- 只有 `queued` 能取消；运行中的取消本轮不实现，返回稳定 `409`。
+- 被 SIGKILL / OOMKill 的进程留下的 `running` 记录由租约恢复拉回队列，间隔取
+  `EVALUATION_JOB_STALE_SECONDS`（默认 1800 秒）的四分之一、下限 60 秒。**不回收的话部分唯一
+  索引会把它算作活动运行，管理员再点「运行正式评测」永远得到 409。**
+
+### 报告恢复
+
+成功的评测把完整报告写进 `evaluation_runs.report_payload`，页面与 `/api/evaluations` 都从这里读。
+因此：
+
+- **评测库不需要备份**，随时可以整库删除重建；要保的是业务库里的 `evaluation_runs`。
+- 业务库恢复到某个时间点后，之后产生的评测报告会一并丢失，对应版本会退回"缺少可用于发布的
+  正式报告"，重新跑一次即可，不需要手工补数据。
+- 报告的 `official` 与 `passed` 是两件事：前者表示这次运行受控可信，后者表示指标达到了冻结
+  阈值。三层验证只要求 `official=true` 且配置指纹一致，**不要求 `passed`**。

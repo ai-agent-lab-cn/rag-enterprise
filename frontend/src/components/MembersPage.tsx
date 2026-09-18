@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Plus, Shield, UserRound } from "lucide-react";
+import { Eye, EyeOff, Plus, Shield, UserRound } from "lucide-react";
 import { api } from "../api";
 import type { KnowledgeBase, User } from "../types";
 import { TopbarPortal } from "./TopbarPortal";
@@ -22,6 +22,7 @@ export function MembersPage({ currentUser }: { currentUser: User }) {
   const [selectedBase, setSelectedBase] = useState("");
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
+  const [passwordVisible, setPasswordVisible] = useState(false);
   const [busy, setBusy] = useState("");
   const { confirm, dialog: confirmDialog } = useConfirm();
   const toast = useToast();
@@ -72,6 +73,7 @@ export function MembersPage({ currentUser }: { currentUser: User }) {
     try {
       await api.createMember(String(form.get("username")), displayName, String(form.get("password")), String(form.get("role")) as User["role"]);
       setCreating(false);
+      setPasswordVisible(false);
       toast.success(`已创建成员「${displayName}」`);
       await load();
     } catch (reason) {
@@ -191,6 +193,17 @@ export function MembersPage({ currentUser }: { currentUser: User }) {
       },
     ];
   };
+  const openCreator = () => {
+    setPasswordVisible(false);
+    setError("");
+    setCreating(true);
+  };
+  const closeCreator = () => {
+    if (busy === "create") return;
+    setCreating(false);
+    setPasswordVisible(false);
+    setError("");
+  };
   const columns: Column<User>[] = [
     {
       key: "member", header: "成员", width: "220px", truncate: false,
@@ -258,7 +271,7 @@ export function MembersPage({ currentUser }: { currentUser: User }) {
   return (
     <section className="mx-auto max-w-[1440px] p-[26px_24px_52px] max-[768px]:p-[20px_14px_36px] min-[1025px]:p-[20px_20px_40px]" aria-label="成员与权限">
       <TopbarPortal>
-        <Button onClick={() => setCreating(true)}>
+        <Button onClick={openCreator}>
           <Plus size={16} />
           新建成员
         </Button>
@@ -296,7 +309,7 @@ export function MembersPage({ currentUser }: { currentUser: User }) {
         emptyState={{ kind: "empty", title: "还没有成员", description: "创建首位成员后可配置知识库权限。" }}
       />
       {creating ? (
-        <Dialog open title="新建成员" description="创建后可为普通成员分配知识库权限。" onClose={() => { if (busy !== "create") setCreating(false); }}>
+        <Dialog open title="新建成员" description="创建后可为普通成员分配知识库权限。" onClose={closeCreator}>
           <form className="grid gap-[9px] pt-[20px] px-[22px]" onSubmit={submitCreate}>
             {error ? <ErrorBanner>{error}</ErrorBanner> : null}
             <label className="text-[#4e576c] text-[13px] font-semibold">
@@ -307,10 +320,13 @@ export function MembersPage({ currentUser }: { currentUser: User }) {
               用户名
               <Input className="py-[10px]" name="username" required minLength={3} maxLength={64} pattern="[A-Za-z0-9._\-]+" />
             </label>
-            <label className="text-[#4e576c] text-[13px] font-semibold">
-              初始密码
-              <Input className="py-[10px]" name="password" type="password" required minLength={12} maxLength={128} />
-            </label>
+            <label htmlFor="member-initial-password" className="text-[#4e576c] text-[13px] font-semibold">初始密码</label>
+            <div className="relative -mt-2">
+              <Input id="member-initial-password" className="py-[10px] pr-10" name="password" type={passwordVisible ? "text" : "password"} required minLength={12} maxLength={128} autoComplete="new-password" />
+              <Button variant="ghost" size="icon" className="absolute right-0.5 top-0.5 text-ink-faint hover:text-brand" aria-label={passwordVisible ? "隐藏密码" : "显示密码"} aria-pressed={passwordVisible} onClick={() => setPasswordVisible((visible) => !visible)}>
+                {passwordVisible ? <EyeOff size={16}/> : <Eye size={16}/>}
+              </Button>
+            </div>
             <label className="text-[#4e576c] text-[13px] font-semibold">
               角色
               <Select name="role" defaultValue="member">
@@ -319,7 +335,7 @@ export function MembersPage({ currentUser }: { currentUser: User }) {
               </Select>
             </label>
             <DialogActions>
-              <Button variant="secondary" loading={busy === "create"} onClick={() => setCreating(false)}>取消</Button>
+              <Button variant="secondary" loading={busy === "create"} onClick={closeCreator}>取消</Button>
               <Button type="submit" loading={busy === "create"}>确认创建</Button>
             </DialogActions>
           </form>

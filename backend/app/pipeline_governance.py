@@ -13,7 +13,6 @@ from psycopg.rows import dict_row, tuple_row
 
 from .index_versions import finalize_building_version
 
-
 TERMINAL_RESOURCE_STATUSES = frozenset(
     {"succeeded", "unchanged", "skipped", "deleted", "failed", "dead_letter", "cancelled"}
 )
@@ -177,7 +176,8 @@ def aggregate_sync_run(database_url: str, sync_run_id: str) -> None:
     """按单资源真实状态收口同步批次，并在完全结束后提交 cursor。"""
     with psycopg.connect(database_url, row_factory=dict_row) as connection, connection.transaction():
         run = connection.execute(
-            "SELECT operation_id, data_source_id, discovered_cursor FROM sync_runs WHERE sync_run_id=%s FOR UPDATE",
+            """SELECT operation_id, data_source_id, discovered_cursor FROM sync_runs
+               WHERE sync_run_id=%s FOR UPDATE""",
             (sync_run_id,),
         ).fetchone()
         if run is None:
@@ -191,7 +191,10 @@ def aggregate_sync_run(database_url: str, sync_run_id: str) -> None:
         counts = connection.execute(
             """SELECT count(*) AS total,
                       count(*) FILTER (WHERE status = ANY(%s)) AS completed,
-                      count(*) FILTER (WHERE status NOT IN ('discovered','succeeded','unchanged','skipped','deleted','failed','dead_letter','cancelled')) AS processing,
+                      count(*) FILTER (
+                          WHERE status NOT IN ('discovered','succeeded','unchanged','skipped',
+                                               'deleted','failed','dead_letter','cancelled')
+                      ) AS processing,
                       count(*) FILTER (WHERE status IN ('failed','dead_letter')) AS failed,
                       count(*) FILTER (WHERE status='dead_letter') AS dead_letter
                FROM sync_resource_runs WHERE sync_run_id=%s""",
@@ -240,7 +243,7 @@ def list_sync_resources(
     with psycopg.connect(database_url, row_factory=dict_row) as connection:
         rows = connection.execute(
             """SELECT r.* FROM sync_resource_runs r JOIN sync_runs s USING (sync_run_id)
-               WHERE r.sync_run_id=%s AND (%s IS NULL OR s.data_source_id=%s)
+               WHERE r.sync_run_id=%s AND (%s::text IS NULL OR s.data_source_id=%s)
                ORDER BY r.created_at, r.external_resource_id""",
             (sync_run_id, data_source_id, data_source_id),
         ).fetchall()
@@ -381,7 +384,14 @@ def upsert_document_index_state(
 def update_index_build_for_job(
     database_url: str, rebuild_batch_id: str, document_version_id: str,
     *, succeeded: bool, terminal: bool, failure_reason: str | None = None,
+    failure_code: str = "INDEX_BUILD_FAILED",
 ) -> None:
+    """把单份资料的构建结果写回 Document Index State。
+
+    ``failure_code`` 不再写死：源文件丢失与解析失败在页面上要给出不同的下一步动作，
+    统一记成 INDEX_BUILD_FAILED 会让「重新上传」这条恢复路径无从触发。
+    """
+
     with psycopg.connect(database_url) as connection, connection.transaction():
         state = "ready" if succeeded else ("failed" if terminal else "building")
         lane = "ready" if succeeded else ("failed" if terminal else "building")
@@ -392,7 +402,7 @@ def update_index_build_for_job(
                                    WHERE c.index_version_id=dis.index_version_id
                                      AND c.document_version_id=dis.document_version_id),
                       failure_stage=CASE WHEN %s THEN NULL ELSE 'build' END,
-                      failure_code=CASE WHEN %s THEN NULL ELSE 'INDEX_BUILD_FAILED' END,
+                      failure_code=CASE WHEN %s THEN NULL ELSE %s END,
                       failure_reason=%s, updated_at=now()
                FROM index_builds ib JOIN index_versions iv USING (index_version_id)
                WHERE dis.index_build_id=ib.index_build_id
@@ -401,7 +411,7 @@ def update_index_build_for_job(
                  -- 历史记录会被这一次的结果改写，失败现场就没了。
                  AND ib.attempt_no=(SELECT max(attempt_no) FROM index_builds
                                     WHERE index_version_id=ib.index_version_id)""",
-            (state, lane, lane, lane, succeeded, succeeded, failure_reason,
+            (state, lane, lane, lane, succeeded, succeeded, failure_code, failure_reason,
              rebuild_batch_id, document_version_id),
         )
     aggregate_index_build(database_url, rebuild_batch_id)

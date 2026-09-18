@@ -66,9 +66,11 @@ class PostgresGenerationProviderRepository:
                              status_code=CASE WHEN NOT EXCLUDED.configured THEN 'MODEL_KEY_MISSING'
                                               WHEN NOT generation_provider_states.configured THEN NULL
                                               ELSE generation_provider_states.status_code END,
-                             status_message=CASE WHEN NOT EXCLUDED.configured THEN 'API Key 未配置'
-                                                 WHEN NOT generation_provider_states.configured THEN '等待可用性检测'
-                                                 ELSE generation_provider_states.status_message END,
+                             status_message=CASE
+                                 WHEN NOT EXCLUDED.configured THEN 'API Key 未配置'
+                                 WHEN NOT generation_provider_states.configured
+                                     THEN '等待可用性检测'
+                                 ELSE generation_provider_states.status_message END,
                              updated_at=now()""",
                         (
                             provider,

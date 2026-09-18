@@ -2,9 +2,9 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type { CategoryTemplate, KnowledgeBase } from "../types";
 import { CategoryTemplateModal } from "./CategoryTemplateModal";
+import { KnowledgeBaseForm } from "./KnowledgeBaseForm";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
-import { Checkbox } from "./ui/Checkbox";
 import { Column, DataTable } from "./ui/DataTable";
 import { Dialog, DialogActions } from "./ui/Dialog";
 import { ErrorBanner } from "./ui/ErrorBanner";
@@ -29,7 +29,6 @@ export function KnowledgeBasesPage({ isAdmin, onOpen, showCreate, onCloseCreate 
   const [search, setSearch] = useState(""); const [status, setStatus] = useState("");
   const [sort, setSort] = useState<"updated_desc" | "updated_asc">("updated_desc");
   const [page, setPage] = useState(0); const [hasNext, setHasNext] = useState(false); const pageSize = 10;
-  const [editing, setEditing] = useState<KnowledgeBase | null>(null);
   // 仅用于「无法删除」这一分支：需要区分「知道了」与「去清空资料」两个出口，
   // useConfirm 的通用弹层只有一个确认按钮，装不下第二个出口，所以这里单独留一个 Dialog。
   const [blocked, setBlocked] = useState<KnowledgeBase | null>(null);
@@ -60,18 +59,6 @@ export function KnowledgeBasesPage({ isAdmin, onOpen, showCreate, onCloseCreate 
       toast.error(reason instanceof Error ? reason.message : "创建失败。");
     } finally { setBusy(false); }
   };
-  const saveEdit = async (event: FormEvent) => {
-    event.preventDefault(); if (!editing) return; setBusy(true);
-    try {
-      await api.updateKnowledgeBase(editing.knowledge_base_id, name.trim(), description.trim());
-      toast.success(`已保存「${name.trim()}」`);
-      setEditing(null); setName(""); setDescription("");
-      await load();
-    } catch (reason) {
-      toast.error(reason instanceof Error ? reason.message : "保存失败。");
-    } finally { setBusy(false); }
-  };
-  const closeEdit = () => { if (!busy) { setEditing(null); setName(""); setDescription(""); } };
   const startDelete = (item: KnowledgeBase) => {
     if (deleteBlockReason(item)) { setBlocked(item); return; }
     confirm({
@@ -93,9 +80,6 @@ export function KnowledgeBasesPage({ isAdmin, onOpen, showCreate, onCloseCreate 
   };
   const rowActions = (item: KnowledgeBase): RowAction[] => {
     const actions: RowAction[] = [{ label: "详情", onSelect: () => onOpen(`/knowledge-bases/${item.knowledge_base_id}`) }];
-    if ((item.allowed_actions ?? ["detail"]).includes("edit")) {
-      actions.push({ label: "编辑", onSelect: () => { setEditing(item); setName(item.name); setDescription(item.description); } });
-    }
     if (item.current_user_permission === "admin") {
       actions.push({ label: "删除", tone: "destructive", onSelect: () => startDelete(item) });
     }
@@ -124,7 +108,7 @@ export function KnowledgeBasesPage({ isAdmin, onOpen, showCreate, onCloseCreate 
     },
     { key: "permission", header: "权限", width: "90px", render: (item) => (item.current_user_permission === "admin" ? "管理员" : "可使用") },
     { key: "updated_at", header: "更新时间", width: "145px", render: (item) => new Date(item.updated_at).toLocaleString("zh-CN") },
-    { key: "actions", header: "操作", width: "190px", align: "right", truncate: false, render: (item) => <RowActions rowLabel={item.name} actions={rowActions(item)} /> },
+    { key: "actions", header: "操作", width: "140px", align: "right", truncate: false, render: (item) => <RowActions rowLabel={item.name} actions={rowActions(item)} /> },
   ];
   const filtered = Boolean(search.trim() || status);
   return <section className="mx-auto max-w-[1440px] p-[26px_24px_52px] min-[1025px]:p-[20px_20px_40px]" aria-label="知识库管理">
@@ -152,8 +136,7 @@ export function KnowledgeBasesPage({ isAdmin, onOpen, showCreate, onCloseCreate 
         {items !== null ? <Pagination page={page} hasNext={hasNext} onChange={setPage} label="知识库分页" /> : null}
       </>
     )}
-    {showCreate ? <Dialog open title="新建知识库" description="知识库之间的资料、索引和会话相互隔离。" onClose={() => { if (!busy) onCloseCreate(); }}><BaseForm name={name} description={description} busy={busy} submitText="确认创建" applyTemplate={applyTemplate} template={template} onApplyTemplate={setApplyTemplate} onName={setName} onDescription={setDescription} onCancel={onCloseCreate} onSubmit={create}/></Dialog> : null}
-    {editing ? <Dialog open title="编辑知识库" description="知识库类型不可修改。" onClose={closeEdit}><BaseForm name={name} description={description} busy={busy} submitText="保存" onName={setName} onDescription={setDescription} onCancel={closeEdit} onSubmit={saveEdit}/></Dialog> : null}
+    {showCreate ? <Dialog open title="新建知识库" description="知识库之间的资料、索引和会话相互隔离。" onClose={() => { if (!busy) onCloseCreate(); }}><KnowledgeBaseForm name={name} description={description} busy={busy} submitText="确认创建" applyTemplate={applyTemplate} template={template} onApplyTemplate={setApplyTemplate} onName={setName} onDescription={setDescription} onCancel={onCloseCreate} onSubmit={create}/></Dialog> : null}
     {blocked ? <Dialog open title="无法删除" onClose={() => setBlocked(null)}>
         <div className="p-[20px_22px] text-[#626b7f] text-[14px] leading-[1.7]">
           {blocked.is_default ? (
@@ -189,5 +172,3 @@ function deleteBlockReason(item: KnowledgeBase): string {
   if (item.document_count) return `请先删除 ${item.document_count} 份资料`;
   return "当前不可删除";
 }
-
-function BaseForm({ name, description, busy, submitText, applyTemplate, template, onApplyTemplate, onName, onDescription, onCancel, onSubmit }: { name: string; description: string; busy: boolean; submitText: string; applyTemplate?: boolean; template?: CategoryTemplate | null; onApplyTemplate?: (value: boolean) => void; onName: (value: string) => void; onDescription: (value: string) => void; onCancel: () => void; onSubmit: (event: FormEvent) => void }) { const activeItems = template?.items.filter((item) => item.active) ?? []; const templateSummary = template === null ? "正在读取默认分类模板…" : activeItems.length ? `将复制 ${activeItems.length} 个有效分类：${activeItems.slice(0, 4).map((item) => item.name).join("、")}${activeItems.length > 4 ? "等" : ""}` : "当前模板无有效分类，新知识库的分类列表将为空"; return <form className="grid gap-[9px] pt-[20px] px-[22px]" onSubmit={onSubmit}><label className="text-[#4e576c] text-[13px] font-semibold" htmlFor="base-name">知识库名称</label><Input className="py-[10px]" autoFocus id="base-name" value={name} onChange={(event) => onName(event.target.value)} maxLength={80} required/><label className="text-[#4e576c] text-[13px] font-semibold" htmlFor="base-description">描述 <span className="text-[#939bad] text-[11px] font-normal">选填</span></label><textarea id="base-description" className="w-full text-[#242c41] border border-line-firm rounded-[7px] bg-white px-[11px] py-[10px] text-[14px] resize-y placeholder:text-[#a0a7b7]" value={description} onChange={(event) => onDescription(event.target.value)} maxLength={500} rows={4}/>{onApplyTemplate ? <div className="grid gap-[4px] border-t border-divider pt-[10px]"><Checkbox showLabel label="应用默认分类模板" checked={!!applyTemplate} onCheckedChange={onApplyTemplate}/><small className="text-[#7b8395] text-[11px]">{templateSummary}</small><small className="text-[#7b8395] text-[11px]">资料可以暂时没有分类，系统不会替它创建占位分类。</small></div> : null}<DialogActions><Button variant="secondary" loading={busy} onClick={onCancel}>取消</Button><Button type="submit" loading={busy}>{submitText}</Button></DialogActions></form>; }

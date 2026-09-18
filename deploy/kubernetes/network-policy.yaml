@@ -13,7 +13,7 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/component
                 operator: In
-                values: [backend, worker, migrate, backup, restore]
+                values: [backend, worker, evaluation-worker, migrate, backup, restore]
       ports:
         - {protocol: TCP, port: 5432}
     - from:

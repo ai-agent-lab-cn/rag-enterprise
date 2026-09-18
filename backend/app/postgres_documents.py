@@ -15,13 +15,18 @@ from .chunking import chunking_version, parse_chunking_version, split_sections
 from .config import Settings
 from .connectors import validate_object_key
 from .data_source_sync import run_sync
-from .document_snapshots import current_document_set
 from .document_classifier import DocumentClassifier
+from .document_snapshots import (
+    SOURCE_FILE_MISSING,
+    SOURCE_FILE_MISSING_MESSAGE,
+    current_document_set,
+    require_present_sources,
+)
 from .errors import AppError
 from .index_versions import (
-    Actor,
     CREATION_REASONS,
     FORCED_CREATION_REASONS,
+    Actor,
     active_index_version_id,
     active_or_bootstrap_version,
     component_manifest,
@@ -57,8 +62,13 @@ from .store import RetrievedChunk
 RETRY_BACKOFF_SECONDS = 5
 
 
+
 class _RetryableClassification(RuntimeError):
     """分类遇到了值得重试的外部故障，交回队列按既有退避重来。"""
+
+
+class _SourceFileMissing(RuntimeError):
+    """源文件不在磁盘上。重试改变不了这件事，需要人重新上传或删除该资料。"""
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
@@ -265,7 +275,10 @@ class PostgresVectorStore:
                    WHERE c.knowledge_base_id = %s AND c.index_version_id = %s""",
                 (knowledge_base_id, active),
             ).fetchone()
-        return f"{active}:{int(row[0])}:{row[1].isoformat()}:{int(row[2])}:{int(row[3])}:{row[4]}:{row[5].isoformat()}"
+        return (
+            f"{active}:{int(row[0])}:{row[1].isoformat()}:{int(row[2])}:"
+            f"{int(row[3])}:{row[4]}:{row[5].isoformat()}"
+        )
 
     def score_by_ids(
         self,
@@ -450,11 +463,16 @@ class PostgresVectorStore:
         validate_knowledge_base_id(knowledge_base_id)
         source_paths: list[str] = []
         with psycopg.connect(self.database_url) as connection, connection.transaction():
+            # 只有会往索引里写分块的任务才拦删除。分类任务不写分块，拿它挡删除的后果是：
+            # 分类 Worker 没在跑的部署里，任何刚上传的文档都删不掉——排队中的 classify
+            # 永远不会消失，用户看到的是「文档正在处理，暂时不能删除」，而实际上没有
+            # 任何东西在处理它。
             active = connection.execute(
                 """SELECT EXISTS (
                     SELECT 1 FROM index_jobs j
                     JOIN document_versions v ON v.document_version_id = j.document_version_id
                     WHERE v.knowledge_base_id = %s AND v.document_id = %s
+                      AND j.job_type IN ('index', 'rebuild')
                       AND j.status IN ('queued', 'running'))""",
                 (knowledge_base_id, document_id),
             ).fetchone()[0]
@@ -691,7 +709,7 @@ class PostgresAsyncRAGService(RAGService):
                     except psycopg.errors.UniqueViolation:
                         pass
                 existing = connection.execute(
-                    """SELECT dv.document_version_id, dv.status,
+                    """SELECT dv.document_version_id, dv.status, dv.source_path,
                               COALESCE((SELECT count(*) FROM chunks c
                                         WHERE c.document_version_id = dv.document_version_id), 0) chunks
                        FROM document_versions dv
@@ -699,6 +717,31 @@ class PostgresAsyncRAGService(RAGService):
                          AND dv.content_sha256 = %s""",
                     (knowledge_base_id, document_id, content_hash),
                 ).fetchone()
+                if existing:
+                    source_path = str(existing["source_path"] or "")
+                    if not source_path:
+                        extension = Path(safe_name).suffix.lower()
+                        source_path = f"{knowledge_base_id}/{document_id}/{content_hash}{extension}"
+                        connection.execute(
+                            "UPDATE document_versions SET source_path=%s WHERE document_version_id=%s",
+                            (source_path, existing["document_version_id"]),
+                        )
+                    upload_root = self.settings.upload_path.resolve()
+                    restored_path = (upload_root / source_path).resolve()
+                    if not restored_path.is_relative_to(upload_root):
+                        raise AppError(
+                            "SOURCE_FILE_PATH_INVALID",
+                            "资料源文件路径无效，无法安全恢复。",
+                            409,
+                        )
+                    if restored_path.exists() and not restored_path.is_file():
+                        raise AppError(
+                            "SOURCE_FILE_PATH_INVALID",
+                            "资料源文件路径不是普通文件，无法安全恢复。",
+                            409,
+                        )
+                    if not restored_path.exists():
+                        write_private_file(restored_path, content)
                 if existing and str(existing["status"]) != "superseded":
                     return DocumentInfo(
                         knowledge_base_id=knowledge_base_id,
@@ -853,7 +896,8 @@ class PostgresAsyncRAGService(RAGService):
                         connection, operation_type=operation_type, knowledge_base_id=knowledge_base_id,
                         data_source_id=source_id, document_id=document_id,
                         document_version_id=version_id,
-                        idempotency_key=f"{operation_type.replace('_', '-')}:{version_id}", progress_mode="stages",
+                        idempotency_key=f"{operation_type.replace('_', '-')}:{version_id}",
+                        progress_mode="stages",
                     )
                     connection.execute(
                         """INSERT INTO document_processing_runs
@@ -1025,6 +1069,38 @@ def _building_version_for_rebuild(
     return index_version_id, batch_id
 
 
+def _settled_version_covering_everything(
+    database_url: str, knowledge_base_id: str, target_chunking_version: str
+) -> str | None:
+    """已经构建完成、且覆盖了当前全部资料的同配置版本，没有就返回 None。
+
+    只看已离开 building 的版本（validating / ready / active）。building 中的那一个由
+    `_building_version_for_rebuild` 负责复用，两边合在一起才构成完整的幂等：无论上次
+    重建是还在跑还是已经跑完，重复发起都不该再排一遍。
+    """
+
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        row = connection.execute(
+            """SELECT iv.index_version_id
+               FROM index_versions iv
+               WHERE iv.knowledge_base_id = %s
+                 AND iv.chunking_version = %s
+                 AND iv.status IN ('validating', 'ready', 'active')
+                 AND NOT EXISTS (
+                     SELECT 1 FROM documents d
+                     WHERE d.knowledge_base_id = iv.knowledge_base_id
+                       AND d.current_version_id IS NOT NULL
+                       AND NOT EXISTS (
+                           SELECT 1 FROM chunks c
+                           WHERE c.index_version_id = iv.index_version_id
+                             AND c.document_version_id = d.current_version_id))
+               ORDER BY iv.created_at DESC
+               LIMIT 1""",
+            (knowledge_base_id, target_chunking_version),
+        ).fetchone()
+    return str(row["index_version_id"]) if row else None
+
+
 def enqueue_rebuild(
     database_url: str,
     knowledge_base_id: str,
@@ -1045,6 +1121,21 @@ def enqueue_rebuild(
 
     validate_knowledge_base_id(knowledge_base_id)
     _, chunk_size, chunk_overlap = parse_chunking_version(target_chunking_version)
+    settled = _settled_version_covering_everything(
+        database_url, knowledge_base_id, target_chunking_version
+    )
+    if settled is not None:
+        # 幂等的第二种情形：上一次重建已经跑完，版本离开 building 进了 validating。
+        # 不认这种情形的话，重复发起同一个目标配置会再建一个候选版本、把全量文档重排
+        # 一遍——两个内容完全相同的候选版本并存，而 partial unique index 只拦得住
+        # 两个 building 并存，拦不住这个。
+        return {
+            "batch_id": None,
+            "index_version_id": settled,
+            "knowledge_base_id": knowledge_base_id,
+            "target_chunking_version": target_chunking_version,
+            "queued": 0,
+        }
     prepared = _building_version_for_rebuild(
         database_url, knowledge_base_id, target_chunking_version, chunk_size, chunk_overlap
     )
@@ -1170,9 +1261,11 @@ def create_index_version_candidate(
     requested_by: str,
     idempotency_key: str,
     reranker_model: str,
+    upload_root: Path,
     max_concurrent_builds: int = 2,
     max_documents: int = 10000,
     max_attempts: int = 3,
+    excluded_documents_acknowledged: bool = False,
 ) -> dict[str, object]:
     """按 Preview 证据原子创建 Snapshot、Version、Build、Operation 与 Jobs。
 
@@ -1255,7 +1348,8 @@ def create_index_version_candidate(
         if registered is None:
             raise AppError("INDEX_NOT_INITIALIZED", "索引尚未登记向量模型。", 409)
         parser = connection.execute(
-            """SELECT string_agg(DISTINCT v.parser_version, ',') AS parser_version
+            """SELECT string_agg(DISTINCT v.parser_version, ',' ORDER BY v.parser_version)
+                      AS parser_version
                FROM documents d JOIN document_versions v
                  ON v.document_version_id=d.current_version_id
                WHERE d.knowledge_base_id=%s""",
@@ -1266,6 +1360,16 @@ def create_index_version_candidate(
             raise AppError(
                 "INDEX_BUILD_EMPTY_KNOWLEDGE_BASE", "知识库暂无可构建资料。", 409
             )
+        if documents["excluded"] and not excluded_documents_acknowledged:
+            raise AppError(
+                "INDEX_DOCUMENT_EXCLUSIONS_NOT_ACKNOWLEDGED",
+                "当前文档快照包含排除资料，请确认排除范围后再创建。",
+                409,
+                {"documents": documents["excluded_details"]},
+            )
+        # Preview 之后、事务提交之前再核一次：文件可能在用户确认的这段时间里被删掉。
+        # 放在这里而不是事务外，是为了让「检查通过」和「冻结快照」处在同一个事务里。
+        require_present_sources(upload_root, documents["included"])
         if len(documents["included"]) > max_documents:
             raise AppError(
                 "INDEX_BUILD_SCOPE_TOO_LARGE",
@@ -1305,7 +1409,9 @@ def create_index_version_candidate(
                 409,
             )
         active = connection.execute(
-            """SELECT iv.config_fingerprint, ds.snapshot_fingerprint
+            """SELECT iv.config_fingerprint, iv.chunking_version, iv.embedding_model,
+                      iv.embedding_dimension, iv.processing_options,
+                      iv.component_manifest, iv.config_completeness, ds.snapshot_fingerprint
                FROM index_versions iv LEFT JOIN document_snapshots ds
                  ON ds.document_snapshot_id=iv.document_snapshot_id
                WHERE iv.knowledge_base_id=%s AND iv.status='active'""",
@@ -1337,15 +1443,72 @@ def create_index_version_candidate(
             )
         if force and not (force_reason or "").strip():
             raise AppError("INDEX_FORCE_REASON_REQUIRED", "强制重建必须填写原因。", 400)
+        config_changed_now = bool(
+            active
+            and (
+                str(active["chunking_version"] or "") != target_chunking_version
+                or str(active["embedding_model"] or "") != str(registered["embedding_model"])
+                or int(active["embedding_dimension"] or 0)
+                != int(registered["embedding_dimension"])
+                or dict(active["processing_options"] or {}) != options
+            )
+        )
+        document_changed_now = bool(
+            active and str(active["snapshot_fingerprint"] or "") != documents["fingerprint"]
+        )
+        active_manifest = dict(active.get("component_manifest") or {}) if active else {}
+        component_changed_now = bool(
+            active
+            and str(active["config_completeness"]) == "complete"
+            and active_manifest != components
+        )
+        if reason == "config_changed" and not config_changed_now:
+            raise AppError("INDEX_CREATION_REASON_MISMATCH", "当前没有检测到配置变化。", 409)
+        if reason == "document_snapshot_changed" and not document_changed_now:
+            raise AppError("INDEX_CREATION_REASON_MISMATCH", "当前没有检测到文档集合变化。", 409)
+        if reason == "component_upgraded" and not component_changed_now:
+            raise AppError("INDEX_CREATION_REASON_MISMATCH", "当前没有检测到索引组件升级。", 409)
+        if reason == "manual_rebuild" and (
+            config_changed_now or component_changed_now or document_changed_now
+        ):
+            raise AppError(
+                "INDEX_CREATION_REASON_MISMATCH",
+                "当前已检测到配置、组件或文档变化，请选择对应的变化场景。",
+                409,
+            )
+        if reason == "consistency_repair":
+            raise AppError(
+                "INDEX_HEALTH_EVIDENCE_REQUIRED",
+                "索引一致性修复必须关联真实健康检查证据；当前入口暂未开放。",
+                409,
+            )
+
+        connection.execute(
+            """INSERT INTO index_definitions
+               (knowledge_base_id, chunk_size, chunk_overlap, updated_by)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (knowledge_base_id) DO UPDATE
+               SET chunk_size=EXCLUDED.chunk_size,
+                   chunk_overlap=EXCLUDED.chunk_overlap,
+                   updated_by=EXCLUDED.updated_by,
+                   updated_at=now()""",
+            (knowledge_base_id, chunk_size, chunk_overlap, requested_by),
+        )
 
         batch_id = f"rbd_{uuid4().hex[:16]}"
+        parser_runtime_versions = [
+            item for item in str(parser["parser_version"] or "").split(",") if item
+        ]
         config_snapshot = {
             "chunking": {
                 "version": target_chunking_version,
                 "chunk_size": chunk_size,
                 "chunk_overlap": chunk_overlap,
             },
-            "parser": {"version": str(parser["parser_version"] or "legacy")},
+            "parser": {
+                "schema_version": components["parser_schema_version"],
+                "runtime_versions": parser_runtime_versions,
+            },
             "embedding": {
                 "model": str(registered["embedding_model"]),
                 "dimension": int(registered["embedding_dimension"]),
@@ -1368,6 +1531,7 @@ def create_index_version_candidate(
             creation_idempotency_key=idempotency_key,
             config_snapshot=config_snapshot,
             components=components,
+            excluded_documents_acknowledged=excluded_documents_acknowledged,
         )
         index_build_id = ensure_index_build(
             connection,
@@ -1823,6 +1987,8 @@ class IndexWorker:
                     self.database_url, str(job["rebuild_batch_id"]),
                     str(job["document_version_id"]), succeeded=True, terminal=True,
                 )
+        except _SourceFileMissing as exc:
+            self._fail(str(job["index_job_id"]), str(exc), SOURCE_FILE_MISSING)
         except Exception as exc:
             self._fail(str(job["index_job_id"]), str(exc))
         return True
@@ -2036,7 +2202,8 @@ class IndexWorker:
                 processing_status = "building" if stage in {"vector", "keyword", "metadata"} else stage
                 with psycopg.connect(self.database_url) as stage_connection, stage_connection.transaction():
                     stage_connection.execute(
-                        "UPDATE document_processing_runs SET status=%s, updated_at=now() WHERE operation_id=%s",
+                        """UPDATE document_processing_runs SET status=%s, updated_at=now()
+                           WHERE operation_id=%s""",
                         (processing_status, job["operation_id"]),
                     )
                     stage_connection.execute(
@@ -2051,7 +2218,15 @@ class IndexWorker:
             or chunking_version(self.settings.chunk_size, self.settings.chunk_overlap)
         )
         _, chunk_size, chunk_overlap = parse_chunking_version(target_version)
-        content = (self.settings.upload_path / version["source_path"]).read_bytes()
+        try:
+            content = (self.settings.upload_path / version["source_path"]).read_bytes()
+        except FileNotFoundError as exc:
+            # 并发丢失：创建候选版本时文件还在，轮到这个任务时已经不在了。此前它冒到
+            # run_once 的兜底 except，被记成 PARSER_FAILED——「解析器坏了」会让人去查
+            # 解析代码，而实际该做的是重新上传或删掉这条失效资料。
+            raise _SourceFileMissing(
+                f"{version['filename']}（{version['source_path']}）"
+            ) from exc
         mark_stage("parsing")
         with psycopg.connect(self.database_url) as connection:
             connection.execute(
@@ -2284,7 +2459,7 @@ class IndexWorker:
                 (job_id,),
             )
 
-    def _fail(self, job_id: str, reason: str) -> None:
+    def _fail(self, job_id: str, reason: str, failure_code: str = "INDEX_BUILD_FAILED") -> None:
         with psycopg.connect(self.database_url) as connection, connection.transaction():
             job = connection.execute(
                 """SELECT attempt_count, max_attempts, document_version_id, job_type, sync_run_id,
@@ -2296,6 +2471,13 @@ class IndexWorker:
                 return
             terminal = int(job[0]) >= int(job[1])
             status = "failed" if terminal else "queued"
+            # index_jobs.failure_reason 保留技术详情（含相对路径），那是管理员排查用的；
+            # 面向页面的 Operation 与 Document Index State 只写稳定用户文案。
+            user_reason = (
+                SOURCE_FILE_MISSING_MESSAGE
+                if failure_code == SOURCE_FILE_MISSING
+                else reason[:1000]
+            )
             connection.execute(
                 """UPDATE index_jobs SET status = %s, failure_reason = %s,
                           available_at = now() + make_interval(secs => %s), locked_at = NULL,
@@ -2322,7 +2504,11 @@ class IndexWorker:
                         "failed" if terminal else "pending",
                         reason[:1000],
                         "failed" if terminal else "pending",
-                        "PARSER_FAILED" if terminal else None,
+                        (
+                            SOURCE_FILE_MISSING
+                            if failure_code == SOURCE_FILE_MISSING
+                            else "PARSER_FAILED"
+                        ) if terminal else None,
                         job[2],
                     ),
                 )
@@ -2333,17 +2519,18 @@ class IndexWorker:
                     # 进度投影，且紧接着的下一条语句就会把它改写成 retry_wait，于是
                     # 同一次失败记下的阶段取决于两条语句的先后，而不是失败本身。
                     """UPDATE document_processing_runs SET status=%s, failure_stage='build',
-                              failure_code='INDEX_BUILD_FAILED', failure_reason=%s, updated_at=now()
+                              failure_code=%s, failure_reason=%s, updated_at=now()
                        WHERE operation_id=%s""",
-                    ("failed" if terminal else "building", reason[:1000], job[5]),
+                    ("failed" if terminal else "building", failure_code, user_reason, job[5]),
                 )
                 connection.execute(
                     """UPDATE operations SET status=%s,
                               current_stage=CASE WHEN %s THEN current_stage ELSE 'retry_wait' END,
-                              error_code='INDEX_BUILD_FAILED', error_message=%s,
+                              error_code=%s, error_message=%s,
                               finished_at=CASE WHEN %s THEN now() ELSE NULL END, updated_at=now()
                        WHERE operation_id=%s""",
-                    ("failed" if terminal else "running", terminal, reason[:1000], terminal, job[5]),
+                    ("failed" if terminal else "running", terminal, failure_code, user_reason,
+                     terminal, job[5]),
                 )
         if job[4] and str(job[3]) == "index":
             update_sync_resource_for_job(
@@ -2353,5 +2540,5 @@ class IndexWorker:
         if str(job[3]) == "rebuild" and rebuild_batch_id:
             update_index_build_for_job(
                 self.database_url, rebuild_batch_id, str(job[2]), succeeded=False,
-                terminal=terminal, failure_reason=reason[:1000],
+                terminal=terminal, failure_reason=user_reason, failure_code=failure_code,
             )

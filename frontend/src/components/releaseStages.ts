@@ -22,9 +22,16 @@ export function releaseStages(
   const active = versions.find((item) => item.status === "active") ?? null;
   const candidate = versions.find((item) => CANDIDATE_STATUSES.has(item.status)) ?? null;
   const status = candidate?.status;
-  const hasReport = Boolean(
-    candidate && reports.some((report) => report.passed && report.config_fingerprint === candidate.config_fingerprint),
-  );
+  // 判据是 official（这份报告来自受控的正式运行）而不是 passed（达到了冻结阈值）。
+  // 两者此前被绑在一起：未达标的报告根本不标 official，于是「跑过但没达标」在页面上
+  // 显示成「缺少可用报告」——用户被引导去重跑评测，而真正该看的是哪项指标没到线。
+  // 能不能发布由三层验证给结论，不由绝对阈值提前筛掉证据。
+  const matchingReport = candidate
+    ? reports.find(
+        (report) => report.official && report.config_fingerprint === candidate.config_fingerprint,
+      ) ?? null
+    : null;
+  const hasReport = Boolean(matchingReport);
 
   const definition: ReleaseStage = {
     key: "definition",
@@ -33,22 +40,28 @@ export function releaseStages(
     note: drift.length ? `配置已更新 ${drift.length} 项，新建索引版本后生效` : undefined,
   };
   const version: ReleaseStage = candidate
-    ? { key: "version", label: "版本", state: "done" }
-    : { key: "version", label: "版本", state: "todo", note: "没有正在发布的候选版本" };
+    ? { key: "version", label: "版本快照", state: "done" }
+    : { key: "version", label: "版本快照", state: "todo", note: "没有正在发布的候选版本" };
 
-  const build: ReleaseStage = { key: "build", label: "构建", state: "todo" };
+  const build: ReleaseStage = { key: "build", label: "索引构建", state: "todo" };
   if (status === "building") build.state = "current";
   else if (status === "build_failed") { build.state = "failed"; build.note = "构建失败，可重新构建"; }
   else if (candidate) build.state = "done";
 
   const evaluation: ReleaseStage = { key: "evaluation", label: "正式评测", state: "todo" };
-  if (hasReport) evaluation.state = "done";
-  else if (candidate && status !== "building" && status !== "build_failed") {
+  if (hasReport) {
+    evaluation.state = "done";
+    // 阈值结论如实显示，但它不改变这一格的完成状态：正式评测的任务是产出证据，
+    // 不是给放行结论。
+    if (matchingReport && !matchingReport.passed) {
+      evaluation.note = "报告已产出，但部分指标未达冻结阈值";
+    }
+  } else if (candidate && status !== "building" && status !== "build_failed") {
     evaluation.state = "blocked";
-    evaluation.note = "缺少可用于发布的正式质量报告";
+    evaluation.note = "缺少可用于发布的正式质量报告，可直接运行正式评测";
   }
 
-  const validation: ReleaseStage = { key: "validation", label: "发布验证", state: "todo" };
+  const validation: ReleaseStage = { key: "validation", label: "三层验证", state: "todo" };
   if (status === "validating") validation.state = "current";
   else if (status === "validation_failed") { validation.state = "failed"; validation.note = "部分发布条件未满足，可重新验证"; }
   else if (status === "ready") validation.state = "done";
@@ -65,8 +78,8 @@ export function releaseStages(
     : { key: "pending", label: "待激活", state: "todo" };
 
   const live: ReleaseStage = active
-    ? { key: "live", label: "生效", state: "done", note: `当前线上版本 ${active.version_no ? `v${active.version_no}` : active.index_version_id}` }
-    : { key: "live", label: "生效", state: "todo", note: "还没有线上生效的索引版本" };
+    ? { key: "live", label: "当前生效", state: "done", note: `当前线上版本 ${active.version_no ? `v${active.version_no}` : active.index_version_id}` }
+    : { key: "live", label: "当前生效", state: "todo", note: "还没有线上生效的索引版本" };
 
   return [definition, version, build, evaluation, validation, pending, live];
 }

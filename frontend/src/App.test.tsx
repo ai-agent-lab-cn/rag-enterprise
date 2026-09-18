@@ -284,6 +284,10 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if (url === "/api/data-sources?offset=0&limit=100") return Promise.resolve(json([dataSource]));
   if (url === "/api/knowledge-bases/kb_default/documents/doc_1/acl" && init?.method === "PUT")
     return Promise.resolve(json({ version: 2, allow_user_ids: [member.user_id], deny_user_ids: [] }));
+  if (url === "/api/knowledge-bases/kb_default" && init?.method === "PUT") {
+    const payload = JSON.parse(String(init.body)) as { name: string; description: string };
+    return Promise.resolve(json({ ...base, ...payload, updated_at: "2026-09-15T08:00:00Z" }));
+  }
   if (url === "/api/knowledge-bases/kb_default") return Promise.resolve(json(base));
   if (url === "/api/knowledge-bases/kb_default/documents" && init?.method === "POST")
     return Promise.resolve(json({ ...document, status: "pending" }, 201));
@@ -459,6 +463,125 @@ test("知识库列表可进入绑定 knowledge_base_id 的详情", async () => {
     expect.objectContaining({ method: "PUT" }),
   ));
   expect(window.location.pathname).toBe("/knowledge-bases/kb_default");
+});
+
+test("知识库列表移除编辑入口并保留详情与删除", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases");
+  render(<App />);
+
+  const baseName = await screen.findByRole("button", { name: "默认知识库" });
+  const baseRow = baseName.closest("tr") as HTMLElement;
+  expect(within(baseRow).getByRole("button", { name: "详情" })).toBeInTheDocument();
+  expect(within(baseRow).getByRole("button", { name: "删除" })).toBeInTheDocument();
+  expect(within(baseRow).queryByRole("button", { name: "编辑" })).toBeNull();
+  expect(screen.queryByRole("dialog", { name: "编辑知识库" })).toBeNull();
+});
+
+test("管理员可在知识库详情编辑基础信息并立即刷新摘要", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default");
+  render(<App />);
+
+  const editButton = await screen.findByRole("button", { name: "编辑基础信息" });
+  await userEvent.click(editButton);
+  const dialog = screen.getByRole("dialog", { name: "编辑知识库" });
+  expect(within(dialog).getByLabelText("知识库名称")).toHaveValue("默认知识库");
+  expect(within(dialog).getByLabelText("描述 选填")).toHaveValue("V2 迁移资料");
+
+  await userEvent.clear(within(dialog).getByLabelText("知识库名称"));
+  await userEvent.type(within(dialog).getByLabelText("知识库名称"), "   ");
+  await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+  expect(await within(dialog).findByText("请输入知识库名称。")).toBeInTheDocument();
+  expect(fetchMock.mock.calls.some(([url, init]) => String(url) === "/api/knowledge-bases/kb_default" && init?.method === "PUT")).toBe(false);
+
+  await userEvent.clear(within(dialog).getByLabelText("知识库名称"));
+  await userEvent.type(within(dialog).getByLabelText("知识库名称"), "  新知识库名称  ");
+  await userEvent.clear(within(dialog).getByLabelText("描述 选填"));
+  await userEvent.type(within(dialog).getByLabelText("描述 选填"), "  新描述  ");
+  await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+    "/api/knowledge-bases/kb_default",
+    expect.objectContaining({
+      method: "PUT",
+      body: JSON.stringify({ name: "新知识库名称", description: "新描述" }),
+    }),
+  ));
+  expect(await screen.findByText("新知识库名称")).toBeInTheDocument();
+  expect(screen.getByText("新描述")).toBeInTheDocument();
+  expect(screen.getByText("基础信息已更新")).toBeInTheDocument();
+  expect(screen.queryByRole("dialog", { name: "编辑知识库" })).toBeNull();
+  await waitFor(() => expect(editButton).toHaveFocus());
+});
+
+test("无 edit 动作的成员看不到详情页编辑入口", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/knowledge-bases/kb_default") {
+      return Promise.resolve(json({
+        ...base,
+        current_user_permission: "use",
+        allowed_actions: ["detail"],
+      }));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default");
+  render(<App />);
+
+  expect(await screen.findByText("V2 迁移资料")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "编辑基础信息" })).toBeNull();
+  expect(screen.getByRole("button", { name: "在此知识库提问 →" })).toBeInTheDocument();
+});
+
+test("知识库名称冲突时保留编辑内容并显示后端错误", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/knowledge-bases/kb_default" && init?.method === "PUT") {
+      return Promise.resolve(json({ error: { code: "KNOWLEDGE_BASE_NAME_CONFLICT", message: "知识库名称已存在。" } }, 409));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default");
+  render(<App />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "编辑基础信息" }));
+  const dialog = screen.getByRole("dialog", { name: "编辑知识库" });
+  const nameInput = within(dialog).getByLabelText("知识库名称");
+  await userEvent.clear(nameInput);
+  await userEvent.type(nameInput, "重复名称");
+  await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+
+  expect(await within(dialog).findByText("知识库名称已存在。")).toBeInTheDocument();
+  expect(nameInput).toHaveValue("重复名称");
+  expect(screen.getByRole("dialog", { name: "编辑知识库" })).toBeInTheDocument();
+});
+
+test("知识库基础信息保存期间阻止重复提交和关闭", async () => {
+  let resolveUpdate!: (response: Response) => void;
+  const pendingUpdate = new Promise<Response>((resolve) => { resolveUpdate = resolve; });
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/knowledge-bases/kb_default" && init?.method === "PUT") {
+      return pendingUpdate;
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default");
+  render(<App />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "编辑基础信息" }));
+  const dialog = screen.getByRole("dialog", { name: "编辑知识库" });
+  const nameInput = within(dialog).getByLabelText("知识库名称");
+  await userEvent.clear(nameInput);
+  await userEvent.type(nameInput, "保存中的知识库");
+  await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+
+  expect(within(dialog).getByRole("button", { name: "保存" })).toBeDisabled();
+  expect(within(dialog).getByRole("button", { name: "取消" })).toBeDisabled();
+  await userEvent.click(within(dialog).getByRole("button", { name: "关闭弹框" }));
+  expect(screen.getByRole("dialog", { name: "编辑知识库" })).toBeInTheDocument();
+
+  resolveUpdate(json({ ...base, name: "保存中的知识库" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "编辑知识库" })).toBeNull());
 });
 
 test("编辑资料元数据时按分类 ID 选择并保存分类", async () => {
@@ -758,6 +881,71 @@ test("问答工作台使用所选知识库接口并渲染来源", async () => {
   expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/query/stream", expect.objectContaining({ method: "POST" }));
   const queryCall = fetchMock.mock.calls.find(([url]) => String(url) === "/api/knowledge-bases/kb_default/query/stream");
   expect(JSON.parse(String(queryCall?.[1]?.body))).toMatchObject({ filters: { category_ids: ["cat_1234567890abcdef"], tags: ["ACL"], source_types: ["file"] } });
+});
+
+test("同一会话连续提问后保留全部问答轮次", async () => {
+  const conversationId = "conv_1234567890abcdef";
+  const records = [{
+    record_id: "ans_first", conversation_id: conversationId, knowledge_base_id: "kb_default",
+    question: "第一轮问题", status: "success", answer: "第一轮回答", sources: [],
+    latency_ms: {}, models: {}, model_metadata: {}, prompt_version: null, prompt_hash: null,
+    answer_status: "answered", generation_governance: null, query_metadata: null,
+    error_code: null, error_message: null, created_at: "2026-09-15T05:00:00Z",
+  }];
+  let nextRecord = 2;
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const url = String(input);
+    if (url === `/api/knowledge-bases/kb_default/conversations/${conversationId}`) {
+      return Promise.resolve(json({
+        conversation_id: conversationId, knowledge_base_id: "kb_default", title: "第一轮问题",
+        created_at: "2026-09-15T05:00:00Z", updated_at: "2026-09-15T05:03:00Z",
+        records: [...records],
+      }));
+    }
+    if (url === "/api/knowledge-bases/kb_default/conversations") {
+      return Promise.resolve(json([{
+        conversation_id: conversationId, knowledge_base_id: "kb_default", title: "第一轮问题",
+        created_at: "2026-09-15T05:00:00Z", updated_at: "2026-09-15T05:03:00Z",
+        turn_count: records.length, last_status: "success",
+      }]));
+    }
+    if (url === "/api/knowledge-bases/kb_default/query/stream" && init?.method === "POST") {
+      const payload = JSON.parse(String(init.body)) as { question: string };
+      const record = {
+        ...records[0],
+        record_id: `ans_${nextRecord}`,
+        question: payload.question,
+        answer: `${payload.question}的回答`,
+        created_at: `2026-09-15T05:0${nextRecord}:00Z`,
+      };
+      nextRecord += 1;
+      records.push(record);
+      return Promise.resolve(sse([{ event: "final", data: {
+        ...QUERY_RESULT,
+        answer: record.answer,
+        conversation_id: conversationId,
+        record_id: record.record_id,
+        sources: [],
+      } }]));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", `/chat/${conversationId}?knowledge_base_id=kb_default`);
+  render(<App />);
+
+  expect(await screen.findByText("第一轮回答")).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("向知识库提问"), "第二轮问题");
+  await userEvent.click(screen.getByRole("button", { name: "提问并发送" }));
+  expect(await screen.findByText("第二轮问题的回答")).toBeInTheDocument();
+
+  await userEvent.type(screen.getByLabelText("向知识库提问"), "第三轮问题");
+  await userEvent.click(screen.getByRole("button", { name: "提问并发送" }));
+  expect(await screen.findByText("第三轮问题的回答")).toBeInTheDocument();
+
+  expect(screen.getByText("第一轮回答")).toBeInTheDocument();
+  expect(screen.getByText("第二轮问题的回答")).toBeInTheDocument();
+  expect(screen.getAllByText("第二轮问题的回答")).toHaveLength(1);
+  expect(screen.getByText("3 轮 · 2026/9/15")).toBeInTheDocument();
 });
 
 test("可信引用可以在局部弹窗定位到原文", async () => {
