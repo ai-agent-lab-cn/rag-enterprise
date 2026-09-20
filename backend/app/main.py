@@ -36,6 +36,7 @@ from .index_evaluation_runs import (
     failure_message as evaluation_failure_message,
 )
 from .index_evaluation_worker import require_isolated_evaluation_database
+from .index_evidence import load_index_evidence_chain
 from .index_validation import (
     get_validation_policy,
     validate_index_version,
@@ -139,6 +140,7 @@ from .schemas import (
     IndexEvaluationRunCreateRequest,
     IndexEvaluationRunDetailResponse,
     IndexEvaluationRunResponse,
+    IndexEvidenceChainResponse,
     IndexVersionCandidatePreviewResponse,
     IndexVersionComparisonResponse,
     IndexVersionCreateRequest,
@@ -1928,6 +1930,34 @@ def create_app() -> FastAPI:
             list_evaluation_runs, sources.database_url, knowledge_base_id, index_version_id
         )
         return [_evaluation_run_response(row) for row in rows]
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/index-versions/{index_version_id}/evidence-chain",
+        response_model=IndexEvidenceChainResponse,
+    )
+    async def get_scoped_index_evidence_chain(
+        knowledge_base_id: str,
+        index_version_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        sources: DataSourcesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> IndexEvidenceChainResponse:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(
+            knowledge_bases, auth, current.user, knowledge_base_id
+        )
+        if sources is None:
+            raise AppError("POSTGRES_REQUIRED", "证据链需要 PostgreSQL 运行时。", 503)
+        item = await run_in_threadpool(
+            load_index_evidence_chain,
+            sources.database_url,
+            knowledge_base_id,
+            index_version_id,
+        )
+        if item is None:
+            raise AppError("INDEX_VERSION_NOT_FOUND", "未找到该知识库的索引版本。", 404)
+        return IndexEvidenceChainResponse(**item)
 
     @app.get(
         "/api/knowledge-bases/{knowledge_base_id}/evaluation-runs",

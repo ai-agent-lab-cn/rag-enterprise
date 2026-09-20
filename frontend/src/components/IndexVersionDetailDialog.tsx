@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type {
   IndexEvaluationRun,
+  IndexEvidenceChain,
   IndexVersion,
   LifecycleEvent,
   ValidationLayerResult,
@@ -67,12 +68,6 @@ const LAYER_STATUS: Record<string, string> = {
   running: "检查中", blocked: "等待前置条件", pending: "未开始", unknown: "无法核对",
 };
 
-/** Hash 与长 ID 的统一缩写。完整值留给可复制的详情行——64 位十六进制对判断没有帮助。 */
-function shortHash(value: string | null | undefined) {
-  if (!value) return "—";
-  return value.length > 20 ? `${value.slice(0, 8)}…${value.slice(-5)}` : value;
-}
-
 function valueLabel(value: unknown) {
   if (value === null || value === undefined || value === "") return "—";
   if (typeof value === "object") return JSON.stringify(value);
@@ -118,6 +113,7 @@ export function IndexVersionDetailDialog({
   const [reports, setReports] = useState<ValidationReport[]>([]);
   const [events, setEvents] = useState<LifecycleEvent[]>([]);
   const [evaluations, setEvaluations] = useState<IndexEvaluationRun[]>([]);
+  const [evidence, setEvidence] = useState<IndexEvidenceChain | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   /** 治理数据单独记错误：拿不到它不该让整个弹框失败，配置与指纹仍然该看得到。 */
@@ -132,14 +128,16 @@ export function IndexVersionDetailDialog({
       setVersion(found);
       if (!found) return;
       try {
-        const [reportItems, eventItems, evaluationItems] = await Promise.all([
+        const [reportItems, eventItems, evaluationItems, evidenceItem] = await Promise.all([
           api.listIndexVersionValidations(knowledgeBaseId, versionId),
           api.listIndexVersionEvents(knowledgeBaseId, versionId),
           api.listIndexEvaluationRuns(knowledgeBaseId, versionId),
+          api.getIndexEvidenceChain(knowledgeBaseId, versionId),
         ]);
         setReports(reportItems);
         setEvents(eventItems);
         setEvaluations(evaluationItems);
+        setEvidence(evidenceItem);
         setGovernanceError("");
       } catch (reason) {
         // 静默吞掉会让「治理数据拉取失败」看起来像「这个版本没有治理数据」——
@@ -255,6 +253,24 @@ export function IndexVersionDetailDialog({
                 还没有针对本版本的正式评测。三层验证需要一份使用本版本配置跑出来的正式报告。
               </p>
             )}
+          </section>
+
+          <section className="grid gap-2 border-t border-divider pt-3">
+            <h3 className="m-0 text-md font-semibold text-ink">证据链</h3>
+            <ol className="m-0 grid grid-cols-5 gap-2 p-0 max-lg:grid-cols-3 max-sm:grid-cols-1">
+              {[
+                ["索引版本", evidence?.version.index_version_id],
+                ["正式评测运行", evidence?.evaluation_run?.evaluation_run_id],
+                ["正式报告", evidence?.formal_report?.report_id],
+                ["验证报告", evidence?.validation_report?.validation_report_id],
+                ["线上激活", evidence?.activation?.event_id],
+              ].map(([label, value], index) => (
+                <li key={label} className="grid list-none gap-1 rounded-md border border-divider p-2 text-sm">
+                  <span className="text-ink-faint">{index + 1}. {label}</span>
+                  <strong className="break-all font-mono text-xs">{value || "未形成证据"}</strong>
+                </li>
+              ))}
+            </ol>
           </section>
 
           <section className="grid gap-2 border-t border-divider pt-3">

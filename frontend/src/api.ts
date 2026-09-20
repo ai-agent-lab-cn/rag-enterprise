@@ -43,6 +43,7 @@ import type {
   IndexBuild,
   IndexEvaluationRun,
   IndexEvaluationRunDetail,
+  IndexEvidenceChain,
   DocumentIndexState,
   Citation,
   QueryExecutionDetail,
@@ -286,6 +287,7 @@ export const api = {
   cancelIndexVersionBuild: (id: string, versionId: string) => request<Record<string, unknown>>(`/api/knowledge-bases/${id}/index-versions/${versionId}/builds/cancel`, { method: "POST" }),
   createIndexEvaluationRun: (id: string, versionId: string, datasetId: string) => request<IndexEvaluationRun>(`/api/knowledge-bases/${id}/index-versions/${versionId}/evaluation-runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dataset_id: datasetId }) }),
   listIndexEvaluationRuns: (id: string, versionId: string) => request<IndexEvaluationRun[]>(`/api/knowledge-bases/${id}/index-versions/${versionId}/evaluation-runs`),
+  getIndexEvidenceChain: (id: string, versionId: string) => request<IndexEvidenceChain>(`/api/knowledge-bases/${id}/index-versions/${versionId}/evidence-chain`),
   // 整库列表：运行记录里的评测行要按 operation_id 找回对应 run，而版本一旦激活就不再是
   // 候选，按候选版本取会让那次评测的详情永远打不开。
   listKnowledgeBaseEvaluationRuns: (id: string) => request<IndexEvaluationRun[]>(`/api/knowledge-bases/${id}/evaluation-runs`),

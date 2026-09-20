@@ -148,8 +148,48 @@ function json(value: unknown, status = 200) {
  * 兜底一律 404 而不是空 200：漏 mock 的接口若返回 `[]`，组件会安静地走「没有数据」
  * 分支，断言看起来全绿实际什么都没测到。
  */
+const EVIDENCE_CHAIN = {
+  knowledge_base_id: KB,
+  index_version_id: VERSION_ID,
+  version: {
+    index_version_id: VERSION_ID,
+    version_no: 3,
+    status: "active",
+    config_fingerprint: "a".repeat(64),
+  },
+  evaluation_run: {
+    evaluation_run_id: "er_1",
+    status: "succeeded",
+    official: true,
+    passed: true,
+    config_fingerprint: "a".repeat(64),
+    created_at: "2026-09-01T00:00:00Z",
+  },
+  formal_report: {
+    report_id: "rep_official_1",
+    official: true,
+    passed: true,
+    config_fingerprint: "a".repeat(64),
+    run_at: "2026-09-01T00:05:00Z",
+  },
+  validation_report: {
+    validation_report_id: "vr_1",
+    status: "pass",
+    report_source: "standard",
+    evaluation_report_id: "rep_official_1",
+    created_at: "2026-09-01T00:20:00Z",
+  },
+  activation: {
+    event_id: "ev_1",
+    event_type: "activated",
+    actor_id: "admin",
+    validation_report_id: "vr_1",
+    created_at: "2026-09-01T01:00:00Z",
+  },
+};
+
 function stubFetch(
-  routes: Partial<Record<"versions" | "validations" | "events" | "evaluations", () => Response>> = {},
+  routes: Partial<Record<"versions" | "validations" | "events" | "evaluations" | "evidence", () => Response>> = {},
 ) {
   const list = `/api/knowledge-bases/${KB}/index-versions`;
   const detail = `${list}/${VERSION_ID}`;
@@ -159,6 +199,7 @@ function stubFetch(
     if (url === `${detail}/validations`) return Promise.resolve((routes.validations ?? (() => json([REPORT])))());
     if (url === `${detail}/events`) return Promise.resolve((routes.events ?? (() => json([EVENT])))());
     if (url === `${detail}/evaluation-runs`) return Promise.resolve((routes.evaluations ?? (() => json([EVALUATION])))());
+    if (url === `${detail}/evidence-chain`) return Promise.resolve((routes.evidence ?? (() => json(EVIDENCE_CHAIN)))());
     return Promise.resolve(json({ error: { message: `未 mock 的接口 ${url}` } }, 404));
   });
 }
@@ -204,6 +245,7 @@ test("加载完成后六个区块全部渲染，并显示各自的关键内容",
 
   expect(await screen.findByRole("heading", { name: "版本信息" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "正式评测" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "证据链" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "三层验证" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "发布记录" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "组件清单" })).toBeInTheDocument();
@@ -219,6 +261,8 @@ test("加载完成后六个区块全部渲染，并显示各自的关键内容",
   expect(screen.getByText("hnsw-v2")).toBeInTheDocument();
   // 生命周期：事件类型翻译，activated 不出现在页面上。
   expect(screen.getByText("激活")).toBeInTheDocument();
+  expect(screen.getByText(/索引版本$/)).toBeInTheDocument();
+  expect(screen.getByText(/正式报告$/)).toBeInTheDocument();
 
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });

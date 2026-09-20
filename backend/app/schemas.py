@@ -1099,6 +1099,56 @@ class IndexVersionResponse(BaseModel):
     cleaned_at: datetime | None = None
 
 
+class IndexEvidenceVersionResponse(BaseModel):
+    index_version_id: str
+    version_no: int | None = None
+    status: str
+    config_fingerprint: str | None = None
+
+
+class IndexEvidenceEvaluationRunResponse(BaseModel):
+    evaluation_run_id: str
+    status: str
+    official: bool | None = None
+    passed: bool | None = None
+    config_fingerprint: str | None = None
+    created_at: datetime | None = None
+
+
+class IndexEvidenceFormalReportResponse(BaseModel):
+    report_id: str
+    official: bool | None = None
+    passed: bool | None = None
+    config_fingerprint: str | None = None
+    run_at: datetime | None = None
+
+
+class IndexEvidenceValidationReportResponse(BaseModel):
+    validation_report_id: str
+    status: str
+    report_source: Literal["standard", "legacy_backfill", "bootstrap"]
+    evaluation_report_id: str | None = None
+    created_at: datetime | None = None
+
+
+class IndexEvidenceActivationResponse(BaseModel):
+    event_id: str
+    event_type: Literal["activated", "rolled_back"]
+    actor_id: str | None = None
+    validation_report_id: str | None = None
+    created_at: datetime | None = None
+
+
+class IndexEvidenceChainResponse(BaseModel):
+    knowledge_base_id: str
+    index_version_id: str
+    version: IndexEvidenceVersionResponse
+    evaluation_run: IndexEvidenceEvaluationRunResponse | None = None
+    formal_report: IndexEvidenceFormalReportResponse | None = None
+    validation_report: IndexEvidenceValidationReportResponse | None = None
+    activation: IndexEvidenceActivationResponse | None = None
+
+
 class IndexVersionValidationRequest(BaseModel):
     evaluation_report_id: str = Field(min_length=1, max_length=160)
 

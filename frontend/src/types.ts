@@ -683,6 +683,46 @@ export interface IndexVersion {
   cleaned_at: string | null;
 }
 
+export interface IndexEvidenceChain {
+  knowledge_base_id: string;
+  index_version_id: string;
+  version: {
+    index_version_id: string;
+    version_no: number | null;
+    status: string;
+    config_fingerprint: string | null;
+  };
+  evaluation_run: {
+    evaluation_run_id: string;
+    status: string;
+    official: boolean | null;
+    passed: boolean | null;
+    config_fingerprint: string | null;
+    created_at: string | null;
+  } | null;
+  formal_report: {
+    report_id: string;
+    official: boolean | null;
+    passed: boolean | null;
+    config_fingerprint: string | null;
+    run_at: string | null;
+  } | null;
+  validation_report: {
+    validation_report_id: string;
+    status: string;
+    report_source: "standard" | "legacy_backfill" | "bootstrap";
+    evaluation_report_id: string | null;
+    created_at: string | null;
+  } | null;
+  activation: {
+    event_id: string;
+    event_type: "activated" | "rolled_back";
+    actor_id: string | null;
+    validation_report_id: string | null;
+    created_at: string | null;
+  } | null;
+}
+
 export type IndexVersionCreationReason =
   | "initial_build"
   | "config_changed"
