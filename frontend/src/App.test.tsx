@@ -344,6 +344,17 @@ test("默认进入概览并汇总知识库、资料、会话和回答质量", as
   expect(screen.getByRole("button", { name: /^上传资料/ })).toBeInTheDocument();
 });
 
+test("概览快捷操作使用稳定唯一 key", async () => {
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+
+  render(<App />);
+
+  expect(await screen.findByRole("button", { name: /^回答评测/ })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /^检索评测/ })).toBeInTheDocument();
+  expect(consoleError.mock.calls.flat().join(" ")).not.toContain("Encountered two children with the same key");
+});
+
 test("侧栏展示真实可用的数据源管理入口", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
 
