@@ -721,6 +721,13 @@ export interface IndexEvidenceChain {
     validation_report_id: string | null;
     created_at: string | null;
   } | null;
+  governance: {
+    traceability: "complete" | "partial" | "missing";
+    configuration: "match" | "mismatch" | "unknown";
+    validation: "passed" | "failed" | "pending" | "missing" | "historical";
+    release: "released" | "eligible" | "blocked" | "pending" | "historical";
+    reasons: Array<{ code: string; message: string }>;
+  };
 }
 
 export type IndexVersionCreationReason =

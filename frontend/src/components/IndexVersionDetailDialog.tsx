@@ -46,6 +46,19 @@ const EVALUATION_STATUS: Record<string, string> = {
   queued: "排队中", running: "评测中", succeeded: "已完成", failed: "失败", cancelled: "已取消",
 };
 
+const EVIDENCE_STATUS: Record<string, string> = {
+  complete: "链路完整", partial: "链路不完整", missing: "缺少证据",
+  match: "配置一致", mismatch: "配置不一致", unknown: "无法核对",
+  passed: "验证通过", failed: "验证未通过", pending: "尚未完成",
+  historical: "历史证据", released: "已发布", eligible: "可发布", blocked: "禁止发布",
+};
+
+function evidenceTone(value: string) {
+  if (["mismatch", "failed", "blocked", "missing"].includes(value)) return "danger" as const;
+  if (["partial", "unknown", "pending", "historical"].includes(value)) return "warning" as const;
+  return "success" as const;
+}
+
 /**
  * 三层发布检查。区域标题用「三层验证」，不用 Validation Gate / 门禁这类内部治理术语。
  */
@@ -257,6 +270,23 @@ export function IndexVersionDetailDialog({
 
           <section className="grid gap-2 border-t border-divider pt-3">
             <h3 className="m-0 text-md font-semibold text-ink">证据链</h3>
+            {evidence ? (
+              <dl className="grid grid-cols-4 gap-2 text-sm max-md:grid-cols-2 max-sm:grid-cols-1">
+                {[
+                  ["可追溯性", evidence.governance.traceability],
+                  ["配置一致性", evidence.governance.configuration],
+                  ["验证结论", evidence.governance.validation],
+                  ["发布状态", evidence.governance.release],
+                ].map(([label, value]) => (
+                  <div key={label} className="flex items-center justify-between gap-2 rounded-md bg-canvas p-2">
+                    <dt className="text-ink-faint">{label}</dt>
+                    <dd className="m-0">
+                      <Badge shape="status" tone={evidenceTone(value)}>{EVIDENCE_STATUS[value] || value}</Badge>
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            ) : null}
             <ol className="m-0 grid grid-cols-5 gap-2 p-0 max-lg:grid-cols-3 max-sm:grid-cols-1">
               {[
                 ["索引版本", evidence?.version.index_version_id],
@@ -271,6 +301,15 @@ export function IndexVersionDetailDialog({
                 </li>
               ))}
             </ol>
+            {evidence?.governance.reasons.length ? (
+              <ul className="m-0 grid gap-1 pl-5 text-sm text-warning">
+                {evidence.governance.reasons.map((reason) => (
+                  <li key={reason.code}>
+                    {reason.message} <code className="text-xs text-ink-faint">{reason.code}</code>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </section>
 
           <section className="grid gap-2 border-t border-divider pt-3">

@@ -33,6 +33,138 @@ def _report_id(
     return next((str(candidate) for candidate in candidates if candidate), None)
 
 
+def _reason(reasons: list[dict[str, str]], code: str, message: str) -> None:
+    if not any(item["code"] == code for item in reasons):
+        reasons.append({"code": code, "message": message})
+
+
+def _validation_check(validation_report: Mapping[str, Any] | None, check_key: str) -> str | None:
+    retrieval = _value(validation_report, "retrieval_result") or {}
+    for check in retrieval.get("checks", []):
+        if check.get("check_key") == check_key:
+            return str(check.get("status")) if check.get("status") else None
+    return None
+
+
+def derive_evidence_governance(
+    *,
+    index_version: Mapping[str, Any],
+    evaluation_run: Mapping[str, Any] | None,
+    validation_report: Mapping[str, Any] | None,
+    activation_event: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """从不可变事实派生证据语义；时间戳只展示，不参与有效性判断。"""
+
+    reasons: list[dict[str, str]] = []
+    report_id = _report_id(index_version, evaluation_run, validation_report)
+    nodes = (
+        evaluation_run is not None,
+        report_id is not None,
+        validation_report is not None,
+        activation_event is not None,
+    )
+    traceability = "complete" if all(nodes) else "missing" if not any(nodes) else "partial"
+
+    evaluation_report_id = None
+    if evaluation_run:
+        evaluation_report_id = (evaluation_run.get("report_payload") or {}).get("report_id")
+    validation_report_id = None
+    if validation_report:
+        validation_report_id = (validation_report.get("retrieval_result") or {}).get(
+            "evaluation_report_id"
+        ) or validation_report.get("evaluation_set_version")
+    report_ids = {
+        str(item)
+        for item in (evaluation_report_id, validation_report_id, index_version.get("evaluation_report_id"))
+        if item
+    }
+    activation_validation_id = _value(activation_event, "validation_report_id")
+    linked_validation_id = _value(validation_report, "validation_report_id")
+    if len(report_ids) > 1 or (
+        activation_validation_id and linked_validation_id and activation_validation_id != linked_validation_id
+    ):
+        traceability = "partial"
+        _reason(reasons, "EVIDENCE_LINK_MISMATCH", "证据节点指向的报告不一致。")
+
+    if evaluation_run is None:
+        _reason(reasons, "EVALUATION_RUN_MISSING", "缺少该索引版本的正式评测运行记录。")
+    if report_id is None:
+        _reason(reasons, "FORMAL_REPORT_MISSING", "缺少可绑定的正式评测报告。")
+    if validation_report is None:
+        _reason(reasons, "VALIDATION_REPORT_MISSING", "缺少三层验证报告。")
+    if (
+        index_version.get("status") in {"active", "previous", "retired", "cleaned"}
+        and activation_event is None
+    ):
+        _reason(reasons, "ACTIVATION_EVIDENCE_MISSING", "版本存在发布状态，但缺少激活事件证据。")
+
+    version_fingerprint = index_version.get("config_fingerprint")
+    config_completeness = index_version.get("config_completeness", "unknown")
+    evaluation_fingerprint = _value(evaluation_run, "config_fingerprint")
+    report_fingerprint = (_value(evaluation_run, "report_payload") or {}).get("config_fingerprint")
+    config_check = _validation_check(validation_report, "config_fingerprint_matches")
+    if config_completeness != "complete" or not version_fingerprint:
+        configuration = "unknown"
+        _reason(reasons, "CONFIG_FINGERPRINT_UNKNOWN", "历史版本缺少完整配置指纹，无法核对一致性。")
+    elif config_check == "fail" or any(
+        fingerprint and fingerprint != version_fingerprint
+        for fingerprint in (evaluation_fingerprint, report_fingerprint)
+    ):
+        configuration = "mismatch"
+        _reason(reasons, "CONFIG_FINGERPRINT_MISMATCH", "正式评测配置与索引版本不一致。")
+    elif config_check == "pass" or evaluation_fingerprint or report_fingerprint:
+        configuration = "match"
+    else:
+        configuration = "unknown"
+        _reason(reasons, "CONFIG_FINGERPRINT_UNKNOWN", "缺少可用于配置一致性核对的证据。")
+
+    if validation_report is None:
+        validation = "missing"
+    elif validation_report.get("report_source") != "standard" or config_completeness != "complete":
+        validation = "historical"
+        _reason(reasons, "HISTORICAL_EVIDENCE", "该结论来自历史证据，只可追溯，不能替代当前验证。")
+    elif validation_report.get("status") == "pass":
+        validation = "passed"
+    elif validation_report.get("status") in {"failed", "cancelled"}:
+        validation = "failed"
+        _reason(reasons, "VALIDATION_FAILED", "三层验证未通过。")
+    else:
+        validation = "pending"
+        _reason(reasons, "VALIDATION_PENDING", "三层验证尚未形成最终结论。")
+
+    status = str(index_version.get("status") or "")
+    if validation == "historical":
+        release = "historical"
+    elif (
+        configuration == "mismatch"
+        or validation == "failed"
+        or status
+        in {
+            "build_failed",
+            "validation_failed",
+        }
+    ):
+        release = "blocked"
+    elif status in {"active", "previous", "retired", "cleaned"}:
+        release = (
+            "released"
+            if activation_event is not None and validation == "passed" and configuration == "match"
+            else "blocked"
+        )
+    elif status == "ready" and validation == "passed" and configuration == "match":
+        release = "eligible"
+    else:
+        release = "pending"
+
+    return {
+        "traceability": traceability,
+        "configuration": configuration,
+        "validation": validation,
+        "release": release,
+        "reasons": reasons,
+    }
+
+
 def assemble_index_evidence_chain(
     *,
     knowledge_base_id: str,
@@ -65,8 +197,7 @@ def assemble_index_evidence_chain(
             "official": _value(evaluation_run, "official"),
             "passed": _value(evaluation_run, "passed"),
             "config_fingerprint": (
-                report_payload.get("config_fingerprint")
-                or _value(evaluation_run, "config_fingerprint")
+                report_payload.get("config_fingerprint") or _value(evaluation_run, "config_fingerprint")
             ),
             "run_at": report_payload.get("run_at") or _value(evaluation_run, "run_at"),
         }
@@ -78,8 +209,7 @@ def assemble_index_evidence_chain(
             "status": validation_report["status"],
             "report_source": validation_report["report_source"],
             "evaluation_report_id": (
-                retrieval.get("evaluation_report_id")
-                or validation_report.get("evaluation_set_version")
+                retrieval.get("evaluation_report_id") or validation_report.get("evaluation_set_version")
             ),
             "created_at": validation_report.get("created_at"),
         }
@@ -107,6 +237,12 @@ def assemble_index_evidence_chain(
         "formal_report": formal_report_node,
         "validation_report": validation_node,
         "activation": activation_node,
+        "governance": derive_evidence_governance(
+            index_version=index_version,
+            evaluation_run=evaluation_run,
+            validation_report=validation_report,
+            activation_event=activation_event,
+        ),
     }
 
 
@@ -121,7 +257,7 @@ def load_index_evidence_chain(
         version = connection.execute(
             """SELECT index_version_id, knowledge_base_id, version_no, status,
                       config_fingerprint, evaluation_report_id, validation_report_id,
-                      activated_at
+                      config_completeness, activated_at
                FROM index_versions
                WHERE knowledge_base_id=%s AND index_version_id=%s""",
             (knowledge_base_id, index_version_id),

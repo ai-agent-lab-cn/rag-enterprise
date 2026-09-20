@@ -1139,6 +1139,19 @@ class IndexEvidenceActivationResponse(BaseModel):
     created_at: datetime | None = None
 
 
+class IndexEvidenceReasonResponse(BaseModel):
+    code: str
+    message: str
+
+
+class IndexEvidenceGovernanceResponse(BaseModel):
+    traceability: Literal["complete", "partial", "missing"]
+    configuration: Literal["match", "mismatch", "unknown"]
+    validation: Literal["passed", "failed", "pending", "missing", "historical"]
+    release: Literal["released", "eligible", "blocked", "pending", "historical"]
+    reasons: list[IndexEvidenceReasonResponse] = Field(default_factory=list)
+
+
 class IndexEvidenceChainResponse(BaseModel):
     knowledge_base_id: str
     index_version_id: str
@@ -1147,6 +1160,7 @@ class IndexEvidenceChainResponse(BaseModel):
     formal_report: IndexEvidenceFormalReportResponse | None = None
     validation_report: IndexEvidenceValidationReportResponse | None = None
     activation: IndexEvidenceActivationResponse | None = None
+    governance: IndexEvidenceGovernanceResponse
 
 
 class IndexVersionValidationRequest(BaseModel):

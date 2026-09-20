@@ -186,6 +186,13 @@ const EVIDENCE_CHAIN = {
     validation_report_id: "vr_1",
     created_at: "2026-09-01T01:00:00Z",
   },
+  governance: {
+    traceability: "complete",
+    configuration: "match",
+    validation: "passed",
+    release: "released",
+    reasons: [],
+  },
 };
 
 function stubFetch(
@@ -263,8 +270,36 @@ test("加载完成后六个区块全部渲染，并显示各自的关键内容",
   expect(screen.getByText("激活")).toBeInTheDocument();
   expect(screen.getByText(/索引版本$/)).toBeInTheDocument();
   expect(screen.getByText(/正式报告$/)).toBeInTheDocument();
+  expect(screen.getByText("链路完整")).toBeInTheDocument();
+  expect(screen.getByText("配置一致")).toBeInTheDocument();
+  expect(screen.getByText("验证通过")).toBeInTheDocument();
+  expect(screen.getByText("已发布")).toBeInTheDocument();
 
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+test("证据失效原因使用稳定语义显示，而不是根据时间猜测过期", async () => {
+  stubFetch({
+    evidence: () => json({
+      ...EVIDENCE_CHAIN,
+      governance: {
+        traceability: "partial",
+        configuration: "mismatch",
+        validation: "passed",
+        release: "blocked",
+        reasons: [
+          { code: "CONFIG_FINGERPRINT_MISMATCH", message: "正式评测配置与索引版本不一致。" },
+        ],
+      },
+    }),
+  });
+
+  renderDialog();
+
+  expect(await screen.findByText("配置不一致")).toBeInTheDocument();
+  expect(screen.getByText("禁止发布")).toBeInTheDocument();
+  expect(screen.getByText("正式评测配置与索引版本不一致。")).toBeInTheDocument();
+  expect(screen.queryByText(/过期|有效期/)).not.toBeInTheDocument();
 });
 
 test("发布记录中的验证报告 ID 可点击查看完整报告", async () => {
