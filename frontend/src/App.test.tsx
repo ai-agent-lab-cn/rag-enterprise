@@ -307,7 +307,7 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   }));
   if (url.startsWith("/api/evaluation-center/pipeline")) return Promise.resolve(json({ run_count: 2, added_count: 4, updated_count: 1, deleted_count: 1, skipped_count: 2, failed_count: 1, retry_count: 3, failure_rate: 0.5, average_duration_ms: 20000, rag_profiles: [] }));
   if (url.startsWith("/api/evaluation-center/bad-cases")) return Promise.resolve(json([{ case_id: "case_1234567890abcdef", source_type: "online", source_record_id: "ans_1", knowledge_base_id: "kb_default", dataset_version: null, question: "为什么没有召回？", expected_source_ids: [], actual_source_ids: [], expected_answer_status: "answered", actual_answer_status: "insufficient_evidence", actual_answer: "资料不足。", failure_stage: "retrieval", root_cause: null, category: "没召回", severity: "high", assignee: null, fix_commit: null, status: "new", regression_added: false, created_at: "2026-08-30T00:00:00Z", confirmed_at: null, resolved_at: null, updated_at: "2026-08-30T00:00:00Z" }]));
-  if (url.startsWith("/api/evaluation-center/acceptance-runs")) return Promise.resolve(json([{ acceptance_run_id: "acc_1", knowledge_base_id: "kb_default", status: "blocked", commit_sha: "local-working-tree", schema_version: 14, steps: [{ step_key: "external_source", title: "真实数据源", status: "blocked", summary: "缺少 S3 兼容外部数据源。", evidence: { external_source_count: 0 } }], limitations: ["缺少 S3 兼容外部数据源。"], created_by: admin.user_id, created_at: "2026-08-30T00:00:00Z" }]));
+  if (url.startsWith("/api/evaluation-center/acceptance-runs")) return Promise.resolve(json([{ acceptance_run_id: "acc_1", knowledge_base_id: "kb_default", status: "blocked", commit_sha: "local-working-tree", schema_version: 14, steps: [{ step_key: "external_source", title: "真实数据源", status: "blocked", summary: "缺少 S3 兼容外部数据源。", evidence: { external_source_count: 0 } }, { step_key: "parse_and_index", title: "解析与索引", status: "passed", summary: "解析版本与活动索引均可用。", evidence: { active_index_count: 1, active_index_version_id: "iv_active" } }, { step_key: "retrieval_and_acl", title: "检索与 ACL", status: "passed", summary: "检索质量门通过且 ACL 泄漏为 0。", evidence: { acl_leak_count: 0, retrieval_report_id: "retrieval-official" } }], limitations: ["缺少 S3 兼容外部数据源。"], created_by: admin.user_id, created_at: "2026-08-30T00:00:00Z" }]));
   // 两条路径共用同一份 payload：/query 仍被少数直接断言用到，/query/stream 是问答工作台
   // 现在真正走的那条（api.ts:308）。流式那条把整个结果作为一个 final 事件发出——
   // 组件对 final 的处理与非流式返回等价，测试要断言的是渲染结果不是分块过程。
@@ -1067,9 +1067,15 @@ test("Bad Case 是独立菜单与独立路由", async () => {
   render(<App />);
 
   expect(await screen.findByText("为什么没有召回？")).toBeInTheDocument();
+  expect(screen.getByLabelText("Bad Case 筛选与统计")).toHaveClass("flex-col");
+  expect(screen.getByLabelText("Bad Case 筛选条件")).toHaveClass("flex-wrap");
   expect(screen.getByLabelText("Bad Case 状态筛选")).toBeInTheDocument();
   expect(screen.getByLabelText("Bad Case 严重级别筛选")).toBeInTheDocument();
   expect(screen.getByText("治理详情")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "治理详情" }));
+  expect(screen.getByText("来源证据")).toBeInTheDocument();
+  expect(screen.getByText(/线上回答$/)).toBeInTheDocument();
+  expect(screen.getByText("ans_1")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Bad Case" })).toHaveAttribute("aria-current", "page");
 });
 
@@ -1080,7 +1086,11 @@ test("链路验收是独立菜单与独立路由", async () => {
   render(<App />);
 
   expect(await screen.findByText("缺少 S3 兼容外部数据源。")).toBeInTheDocument();
+  expect(screen.queryByText(/\{"external_source_count"/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "链路验收" })).toHaveAttribute("aria-current", "page");
+  await userEvent.click(screen.getByRole("button", { name: "查看正式报告 retrieval-official" }));
+  expect(window.location.pathname).toBe("/evaluation");
+  expect(new URLSearchParams(window.location.search).get("report")).toBe("retrieval-official");
 });
 
 test("概览页的评测入口打开正式报告工作区", async () => {

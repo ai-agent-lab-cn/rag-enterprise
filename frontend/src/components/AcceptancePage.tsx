@@ -49,7 +49,7 @@ const RUN_COLUMNS: Column<AcceptanceRun>[] = [
  * `blocked` 是有意的第三态：缺少真实 S3、增量删除或 ACL 证据时必须显示 blocked，
  * 不能塌缩成 passed/failed 两态——见结论条与步骤列表里各自独立的 `blocked` 分支。
  */
-export function AcceptancePage({ isAdmin }: { isAdmin: boolean }) {
+export function AcceptancePage({ isAdmin, onOpen }: { isAdmin: boolean; onOpen: (path: string) => void }) {
   const [runs, setRuns] = useState<AcceptanceRun[] | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -69,6 +69,7 @@ export function AcceptancePage({ isAdmin }: { isAdmin: boolean }) {
           runs={runs}
           isAdmin={isAdmin}
           busy={busy}
+          onOpen={onOpen}
           onStarted={(run) => {
             setRuns((current) => [run, ...(current ?? [])]);
             setBusy(false);
@@ -98,12 +99,14 @@ function AcceptancePanel({
   busy,
   onStarted,
   onError,
+  onOpen,
 }: {
   runs: AcceptanceRun[];
   isAdmin: boolean;
   busy: boolean;
   onStarted: (run: AcceptanceRun) => void;
   onError: (message: string) => void;
+  onOpen: (path: string) => void;
 }) {
   const latest = runs[0] ?? null;
   const start = async () => {
@@ -146,7 +149,13 @@ function AcceptancePanel({
                 <div>
                   <strong>{step.title}</strong>
                   <p className="mt-0.5 mb-0 text-[#7b8395]">{step.summary}</p>
-                  {Object.keys(step.evidence).length ? <small className="mt-0.5 block text-[#7b8395]">{JSON.stringify(step.evidence)}</small> : null}
+                  {Object.keys(step.evidence).length ? (
+                    <AcceptanceEvidence
+                      evidence={step.evidence}
+                      knowledgeBaseId={latest.knowledge_base_id}
+                      onOpen={onOpen}
+                    />
+                  ) : null}
                 </div>
               </li>
             ))}
@@ -167,5 +176,64 @@ function AcceptancePanel({
         </div>
       )}
     </div>
+  );
+}
+
+const EVIDENCE_LABEL: Record<string, string> = {
+  external_source_count: "外部数据源",
+  successful_sync_runs: "成功同步",
+  incremental_change_count: "增量变更",
+  deleted_count: "删除记录",
+  acl_change_count: "ACL 变更",
+  parsed_version_count: "可用解析版本",
+  active_index_count: "活动索引",
+  acl_leak_count: "ACL 泄漏",
+  citation_failure_count: "Citation 失败",
+  regression_failed_count: "回归失败",
+};
+
+function AcceptanceEvidence({
+  evidence,
+  knowledgeBaseId,
+  onOpen,
+}: {
+  evidence: Record<string, unknown>;
+  knowledgeBaseId: string | null;
+  onOpen: (path: string) => void;
+}) {
+  return (
+    <dl className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-faint">
+      {Object.entries(evidence).map(([key, value]) => {
+        if (value === null || value === undefined) return null;
+        if (key === "active_index_version_id" && knowledgeBaseId) {
+          const id = String(value);
+          return (
+            <div key={key} className="flex items-center gap-1">
+              <dt>索引版本</dt>
+              <dd className="m-0">
+                <Button variant="link" className="h-auto px-0 py-0 font-mono text-xs" aria-label={`查看索引版本 ${id}`} onClick={() => onOpen(`/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/index-versions/${encodeURIComponent(id)}`)}>{id}</Button>
+              </dd>
+            </div>
+          );
+        }
+        if (key === "retrieval_report_id" || key === "answer_report_id") {
+          const id = String(value);
+          return (
+            <div key={key} className="flex items-center gap-1">
+              <dt>{key === "retrieval_report_id" ? "检索报告" : "回答报告"}</dt>
+              <dd className="m-0">
+                <Button variant="link" className="h-auto px-0 py-0 font-mono text-xs" aria-label={`查看正式报告 ${id}`} onClick={() => onOpen(`/evaluation?view=reports&report=${encodeURIComponent(id)}`)}>{id}</Button>
+              </dd>
+            </div>
+          );
+        }
+        return (
+          <div key={key} className="flex items-center gap-1">
+            <dt>{EVIDENCE_LABEL[key] || key}</dt>
+            <dd className="m-0 font-mono">{typeof value === "object" ? JSON.stringify(value) : String(value)}</dd>
+          </div>
+        );
+      })}
+    </dl>
   );
 }

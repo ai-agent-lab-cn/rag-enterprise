@@ -13,8 +13,11 @@ class AcceptanceSnapshot(BaseModel):
     acl_change_count: int = 0
     parsed_version_count: int = 0
     active_index_count: int = 0
+    active_index_version_id: str | None = None
     retrieval_report_passed: bool = False
+    retrieval_report_id: str | None = None
     answer_report_passed: bool = False
+    answer_report_id: str | None = None
     acl_leak_count: int = 0
     citation_failure_count: int = 0
     regression_failed_count: int = 0
@@ -88,6 +91,11 @@ def evaluate_acceptance(snapshot: AcceptanceSnapshot) -> AcceptanceResult:
             evidence={
                 "parsed_version_count": snapshot.parsed_version_count,
                 "active_index_count": snapshot.active_index_count,
+                **(
+                    {"active_index_version_id": snapshot.active_index_version_id}
+                    if snapshot.active_index_version_id
+                    else {}
+                ),
             },
         ),
         AcceptanceStep(
@@ -97,7 +105,14 @@ def evaluate_acceptance(snapshot: AcceptanceSnapshot) -> AcceptanceResult:
             summary="检索质量门通过且 ACL 泄漏为 0。"
             if retrieval_status == "passed"
             else "ACL 泄漏或检索正式报告尚未通过。",
-            evidence={"acl_leak_count": snapshot.acl_leak_count},
+            evidence={
+                "acl_leak_count": snapshot.acl_leak_count,
+                **(
+                    {"retrieval_report_id": snapshot.retrieval_report_id}
+                    if snapshot.retrieval_report_id
+                    else {}
+                ),
+            },
         ),
         AcceptanceStep(
             step_key="trusted_answer",
@@ -106,7 +121,10 @@ def evaluate_acceptance(snapshot: AcceptanceSnapshot) -> AcceptanceResult:
             summary="回答与 Citation 质量门通过。"
             if answer_status == "passed"
             else "可信回答报告缺失或 Citation 安全门失败。",
-            evidence={"citation_failure_count": snapshot.citation_failure_count},
+            evidence={
+                "citation_failure_count": snapshot.citation_failure_count,
+                **({"answer_report_id": snapshot.answer_report_id} if snapshot.answer_report_id else {}),
+            },
         ),
         AcceptanceStep(
             step_key="evaluation_and_regression",

@@ -2728,6 +2728,8 @@ def create_app() -> FastAPI:
             retrieval_passed,
             answer_passed,
             acl_leak_count,
+            overview.retrieval_report.report_id if overview.retrieval_report else None,
+            overview.answer_report.report_id if overview.answer_report else None,
         )
         return AcceptanceRunResponse(**item)
 

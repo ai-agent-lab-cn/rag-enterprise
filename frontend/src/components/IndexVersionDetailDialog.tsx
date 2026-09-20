@@ -9,6 +9,7 @@ import type {
   ValidationReport,
 } from "../types";
 import { Badge } from "./ui/Badge";
+import { Button } from "./ui/Button";
 import { DataTable, type Column } from "./ui/DataTable";
 import { Dialog } from "./ui/Dialog";
 import { ErrorBanner } from "./ui/ErrorBanner";
@@ -114,6 +115,7 @@ export function IndexVersionDetailDialog({
   versionId,
   onClose,
   onActionComplete,
+  onOpen,
 }: {
   open: boolean;
   knowledgeBaseId: string;
@@ -121,6 +123,7 @@ export function IndexVersionDetailDialog({
   onClose: () => void;
   /** 弹框内触发了会改变列表的动作时通知父组件刷新。本轮只有关闭时的一次收口。 */
   onActionComplete?: () => void;
+  onOpen?: (path: string) => void;
 }) {
   const [version, setVersion] = useState<IndexVersion | null>(null);
   const [reports, setReports] = useState<ValidationReport[]>([]);
@@ -289,15 +292,19 @@ export function IndexVersionDetailDialog({
             ) : null}
             <ol className="m-0 grid grid-cols-5 gap-2 p-0 max-lg:grid-cols-3 max-sm:grid-cols-1">
               {[
-                ["索引版本", evidence?.version.index_version_id],
-                ["正式评测运行", evidence?.evaluation_run?.evaluation_run_id],
-                ["正式报告", evidence?.formal_report?.report_id],
-                ["验证报告", evidence?.validation_report?.validation_report_id],
-                ["线上激活", evidence?.activation?.event_id],
-              ].map(([label, value], index) => (
-                <li key={label} className="grid list-none gap-1 rounded-md border border-divider p-2 text-sm">
-                  <span className="text-ink-faint">{index + 1}. {label}</span>
-                  <strong className="break-all font-mono text-xs">{value || "未形成证据"}</strong>
+                { label: "索引版本", value: evidence?.version.index_version_id },
+                { label: "正式评测运行", value: evidence?.evaluation_run?.evaluation_run_id },
+                { label: "正式报告", value: evidence?.formal_report?.report_id, report: true },
+                { label: "验证报告", value: evidence?.validation_report?.validation_report_id },
+                { label: "线上激活", value: evidence?.activation?.event_id },
+              ].map((node, index) => (
+                <li key={node.label} className="grid list-none gap-1 rounded-md border border-divider p-2 text-sm">
+                  <span className="text-ink-faint">{index + 1}. {node.label}</span>
+                  {node.report && node.value && onOpen ? (
+                    <Button variant="link" className="h-auto min-w-0 justify-start break-all px-0 py-0 text-left font-mono text-xs" aria-label={`查看正式报告 ${node.value}`} onClick={() => onOpen(`/evaluation?view=reports&report=${encodeURIComponent(node.value!)}`)}>{node.value}</Button>
+                  ) : (
+                    <strong className="break-all font-mono text-xs">{node.value || "未形成证据"}</strong>
+                  )}
                 </li>
               ))}
             </ol>

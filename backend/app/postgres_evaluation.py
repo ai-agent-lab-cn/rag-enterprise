@@ -213,6 +213,8 @@ class PostgresEvaluationGovernanceRepository:
         retrieval_passed: bool,
         answer_passed: bool,
         acl_leak_count: int,
+        retrieval_report_id: str | None = None,
+        answer_report_id: str | None = None,
     ) -> dict[str, object]:
         run_id = f"acc_{uuid4().hex[:16]}"
         evaluation_run_id = f"eval_{uuid4().hex[:16]}"
@@ -247,16 +249,21 @@ class PostgresEvaluationGovernanceRepository:
                            AS parsed_version_count,
                        (SELECT count(*) FROM index_versions
                          WHERE knowledge_base_id=%s AND status='active') AS active_index_count,
+                       (SELECT index_version_id FROM index_versions
+                         WHERE knowledge_base_id=%s AND status='active'
+                         ORDER BY activated_at DESC NULLS LAST LIMIT 1) AS active_index_version_id,
                        (SELECT count(*) FROM regression_cases r
                           JOIN bad_cases b ON b.case_id=r.case_id
                          WHERE b.knowledge_base_id=%s AND r.last_passed=false)
                            AS regression_failed_count""",
-                    (knowledge_base_id,) * 9,
+                    (knowledge_base_id,) * 10,
                 ).fetchone()
                 snapshot = AcceptanceSnapshot(
                     **dict(row or {}),
                     retrieval_report_passed=retrieval_passed,
+                    retrieval_report_id=retrieval_report_id,
                     answer_report_passed=answer_passed,
+                    answer_report_id=answer_report_id,
                     acl_leak_count=acl_leak_count,
                     citation_failure_count=0,
                 )

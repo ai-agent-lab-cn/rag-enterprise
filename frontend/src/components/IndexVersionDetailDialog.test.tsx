@@ -212,7 +212,7 @@ function stubFetch(
 }
 
 function renderDialog(
-  overrides: { versionId?: string; onClose?: () => void; onActionComplete?: () => void } = {},
+  overrides: { versionId?: string; onClose?: () => void; onActionComplete?: () => void; onOpen?: (path: string) => void } = {},
 ) {
   return render(
     <IndexVersionDetailDialog
@@ -221,6 +221,7 @@ function renderDialog(
       versionId={overrides.versionId ?? VERSION_ID}
       onClose={overrides.onClose ?? (() => undefined)}
       onActionComplete={overrides.onActionComplete}
+      onOpen={overrides.onOpen}
     />,
   );
 }
@@ -313,6 +314,16 @@ test("发布记录中的验证报告 ID 可点击查看完整报告", async () =
   expect(reportDialog).toHaveTextContent("完整性检查");
   expect(reportDialog).toHaveTextContent("技术检查");
   expect(reportDialog).toHaveTextContent("检索质量检查");
+});
+
+test("证据链中的正式报告可跳转到评测中心报告详情", async () => {
+  stubFetch();
+  const onOpen = vi.fn();
+  renderDialog({ onOpen });
+
+  await userEvent.click(await screen.findByRole("button", { name: "查看正式报告 rep_official_1" }));
+
+  expect(onOpen).toHaveBeenCalledWith("/evaluation?view=reports&report=rep_official_1");
 });
 
 /**

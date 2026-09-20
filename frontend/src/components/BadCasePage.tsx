@@ -29,6 +29,12 @@ const SEVERITY_TONE: Record<
   low: "neutral",
 };
 
+const SOURCE_LABEL: Record<GovernedBadCase["source_type"], string> = {
+  online: "线上回答",
+  evaluation: "评测样本",
+  manual: "人工录入",
+};
+
 // 加载态占位列：表头文案与 BadCasePanel 的真实列一一对应，render 不会被调用
 // （DataTable 在 rows===null 时只画 SkeletonRows），这里只是为了让表头在加载
 // 完成前后保持一致，不产生跳动。
@@ -211,8 +217,11 @@ function BadCasePanel({
 
   return (
     <div>
-      <div className="flex justify-between gap-2 pb-2.5 text-[12.8px] text-ink-muted">
-        <div className="flex gap-2">
+      <div
+        className="flex flex-col gap-2.5 pb-2.5 text-[12.8px] text-ink-muted min-[769px]:flex-row min-[769px]:items-center min-[769px]:justify-between"
+        aria-label="Bad Case 筛选与统计"
+      >
+        <div className="flex flex-wrap gap-2" aria-label="Bad Case 筛选条件">
           <label className="flex items-center gap-[5px]">
             <span className="shrink-0">状态</span>
             <Select
@@ -267,7 +276,7 @@ function BadCasePanel({
             </Select>
           </label>
         </div>
-        <span>
+        <span className="shrink-0">
           {visible.length} / {items.length} 个案例 · 管理员治理，成员只读
         </span>
       </div>
@@ -341,6 +350,14 @@ function BadCaseGovernanceDetails({
             : "";
   return (
     <div className="w-full">
+      <section className="my-2 grid gap-1 rounded-md bg-canvas p-2" aria-label="来源证据">
+        <strong className="text-sm">来源证据</strong>
+        <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-ink-faint">
+          <span>来源类型：{SOURCE_LABEL[item.source_type]}</span>
+          <span>来源记录：<code>{item.source_record_id}</code></span>
+          {item.dataset_version ? <span>数据集版本：<code>{item.dataset_version}</code></span> : null}
+        </div>
+      </section>
       <dl className="my-1.5">
         <div className="flex my-2">
           <dt className="text-[11.52px] text-ink-muted">期望状态：</dt>

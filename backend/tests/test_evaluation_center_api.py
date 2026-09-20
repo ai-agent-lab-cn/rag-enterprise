@@ -66,7 +66,16 @@ class _GovernanceStub:
     def list_acceptance_runs(self, knowledge_base_id=None, limit=50):
         return [self.run_acceptance(knowledge_base_id or "kb_default", "user_admin", True, True, 0)]
 
-    def run_acceptance(self, knowledge_base_id, created_by, retrieval_passed, answer_passed, acl_leak_count):
+    def run_acceptance(
+        self,
+        knowledge_base_id,
+        created_by,
+        retrieval_passed,
+        answer_passed,
+        acl_leak_count,
+        retrieval_report_id=None,
+        answer_report_id=None,
+    ):
         return {
             "acceptance_run_id": "acc_1234567890abcdef",
             "knowledge_base_id": knowledge_base_id,

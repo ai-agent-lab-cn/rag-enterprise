@@ -10,8 +10,11 @@ def complete_snapshot() -> AcceptanceSnapshot:
         acl_change_count=1,
         parsed_version_count=2,
         active_index_count=1,
+        active_index_version_id="iv_active",
         retrieval_report_passed=True,
+        retrieval_report_id="retrieval-official",
         answer_report_passed=True,
+        answer_report_id="answer-official",
         acl_leak_count=0,
         citation_failure_count=0,
         regression_failed_count=0,
@@ -53,3 +56,12 @@ def test_acl_or_citation_security_failure_fails_acceptance() -> None:
     assert result.status == "failed"
     failed = {step.step_key for step in result.steps if step.status == "failed"}
     assert {"retrieval_and_acl", "trusted_answer"} <= failed
+
+
+def test_acceptance_steps_bind_their_release_evidence_ids() -> None:
+    result = evaluate_acceptance(complete_snapshot())
+    steps = {step.step_key: step for step in result.steps}
+
+    assert steps["parse_and_index"].evidence["active_index_version_id"] == "iv_active"
+    assert steps["retrieval_and_acl"].evidence["retrieval_report_id"] == "retrieval-official"
+    assert steps["trusted_answer"].evidence["answer_report_id"] == "answer-official"
