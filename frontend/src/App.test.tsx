@@ -300,7 +300,8 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if (url === "/api/knowledge-bases/kb_default/conversations") return Promise.resolve(json([]));
   if (url === "/api/evaluations/answers/reports") return Promise.resolve(json([answerSummary]));
   if (url === "/api/evaluation-center/overview") return Promise.resolve(json({
-    passed: true, report_count: 2,
+    passed: true, status: "passed", report_count: 2,
+    required_scopes: ["retrieval", "answer"], available_scopes: ["retrieval", "answer"], missing_scopes: [], failed_scopes: [], generated_at: "2026-09-20T00:00:00Z",
     retrieval_report: { report_id: "retrieval-official", dataset_id: "retrieval", dataset_version: "2.0.0", commit: "a".repeat(40), run_at: "2026-08-30T00:00:00Z", models: {}, passed: true },
     answer_report: answerSummary,
   }));
@@ -1018,44 +1019,33 @@ test("回答评测页只读展示正式指标", async () => {
       );
     return Promise.resolve(json({}, 404));
   });
-  window.history.replaceState({}, "", "/evaluation");
+  window.history.replaceState({}, "", "/evaluation?view=reports&report=answer-official");
   render(<App />);
-  // 顶栏只留评测中心的统一质量门结论：三个 Section 各塞一个徽章会并排堆在一起，
-  // 既重复又说不清哪个是哪个。分项结论回到各自小节内部。
-  expect(await screen.findByText("回答质量门已通过")).toBeInTheDocument();
-  expect(screen.getByText("回答质量门已通过").closest("header")).toBeNull();
-  expect(screen.getByText("回答质量门已通过").closest('[aria-label="回答评测"]')).not.toBeNull();
-  expect(screen.queryByText("只读质量证据")).not.toBeInTheDocument();
-  expect(screen.queryByText("正确性、引用准确性、幻觉风险与失败策略的正式基线。")).not.toBeInTheDocument();
-  expect(screen.getByText("回答正确性")).toBeInTheDocument();
-  expect(screen.getByText("无支持声明率")).toBeInTheDocument();
-  // Section 标题（h2）与组件内部的指标分组（h3）同名，按层级精确定位后者。
-  expect(screen.getByRole("heading", { name: "回答质量", level: 3 })).toBeInTheDocument();
-  expect(screen.getByRole("heading", { name: "证据质量" })).toBeInTheDocument();
-  expect(screen.getByRole("heading", { name: "幻觉风险" })).toBeInTheDocument();
-  expect(screen.getByRole("heading", { name: "失败控制" })).toBeInTheDocument();
-  expect(screen.getByText(/页面不会启动模型评测/)).toBeInTheDocument();
+  const detail = await screen.findByRole("dialog", { name: "正式报告详情" });
+  expect(detail).toHaveTextContent("回答报告");
+  expect(detail).toHaveTextContent("正式");
+  expect(detail).toHaveTextContent("通过");
+  expect(detail).toHaveTextContent("答案正确性");
+  expect(detail).toHaveTextContent("无支持声明率");
+  expect(detail).toHaveTextContent("回答报告是横向质量证据，不参与索引版本放行");
 });
 
-test("评测中心用纵向 Section 呈现四类质量，不再使用 Tabs", async () => {
-  // 指标不是工作场景，不该各占一个 Tab 或一个左侧菜单。四类质量在同一页纵向排开，
-  // 一屏就能回答「当前系统质量怎么样」，不必逐个 Tab 点过去拼图。
+test("评测中心用三个可深链工作区承载质量治理", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
   window.history.replaceState({}, "", "/evaluation");
   render(<App />);
 
   expect(await screen.findByRole("heading", { name: "质量总览" })).toBeInTheDocument();
-  for (const name of ["检索质量", "回答质量", "工程指标", "最近评测"]) {
-    expect(screen.getByRole("heading", { name })).toBeInTheDocument();
-  }
-  expect(screen.queryByRole("tab")).toBeNull();
+  expect(screen.getByRole("tab", { name: "质量总览" })).toHaveAttribute("data-state", "active");
+  expect(screen.getByRole("tab", { name: "正式报告" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "运行观测" })).toBeInTheDocument();
+  expect(screen.getByText(/证据覆盖 2\/2/)).toBeInTheDocument();
 
-  // 工程指标不再需要点 Tab 才加载。
-  expect(await screen.findByText("2 个同步批次")).toBeInTheDocument();
-
-  // 锚点导航滚动到对应 Section，而不是切换内容。
-  const anchors = screen.getByRole("navigation", { name: "评测中心小节" });
-  expect(within(anchors).getByRole("link", { name: "检索质量" })).toHaveAttribute("href", "#retrieval");
+  await userEvent.click(screen.getByRole("tab", { name: "运行观测" }));
+  expect(await screen.findByRole("heading", { name: "运行观测" })).toBeInTheDocument();
+  expect(await screen.findByText("同步批次")).toBeInTheDocument();
+  expect(screen.getAllByText("2").length).toBeGreaterThan(0);
+  expect(new URLSearchParams(window.location.search).get("view")).toBe("observations");
 });
 
 test("Bad Case 是独立菜单与独立路由", async () => {
@@ -1082,24 +1072,23 @@ test("链路验收是独立菜单与独立路由", async () => {
   expect(screen.getByRole("button", { name: "链路验收" })).toHaveAttribute("aria-current", "page");
 });
 
-test("概览页的评测入口指向评测中心的页面内锚点", async () => {
-  // /evaluation/retrieval 与 /evaluation/answers 作为独立路由已删除，改为 Section 锚点。
+test("概览页的评测入口打开正式报告工作区", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
   window.history.replaceState({}, "", "/overview");
   render(<App />);
 
   await userEvent.click(await screen.findByRole("button", { name: /查看回答评测详情/ }));
 
-  expect(await screen.findByRole("heading", { name: "质量总览" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "正式报告" })).toBeInTheDocument();
   expect(window.location.pathname).toBe("/evaluation");
-  expect(window.location.hash).toBe("#answer");
+  expect(new URLSearchParams(window.location.search).get("view")).toBe("reports");
 });
 
 test("保留检索评测页且可直接访问", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation((input) => (String(input) === "/api/auth/me" ? Promise.resolve(json(admin)) : String(input) === "/api/evaluations" ? Promise.resolve(json([])) : Promise.resolve(json({}, 404))));
-  window.history.replaceState({}, "", "/evaluation");
+  window.history.replaceState({}, "", "/evaluation?view=reports");
   render(<App />);
-  expect(await screen.findByText("还没有正式评测报告")).toBeInTheDocument();
+  expect(await screen.findByText("还没有正式报告。")).toBeInTheDocument();
 });
 
 test("页面显示稳定 API 错误", async () => {

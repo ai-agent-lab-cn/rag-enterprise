@@ -1,6 +1,10 @@
 from datetime import UTC, datetime
 
-from backend.app.main import _capture_online_bad_case, get_evaluation_governance
+from backend.app.main import (
+    _capture_online_bad_case,
+    get_evaluation_governance,
+    get_evaluation_reports,
+)
 
 
 class _GovernanceStub:
@@ -84,6 +88,40 @@ class _GovernanceStub:
         }
 
 
+class _ReportsStub:
+    def report_associations(self, report_id, accessible_knowledge_base_ids=None):
+        return {
+            "report_id": report_id,
+            "evaluation_type": "retrieval",
+            "origin_evaluation_run_id": "eval_123",
+            "origin_version": {
+                "knowledge_base_id": "kb_default",
+                "index_version_id": "iv_candidate",
+                "version_no": 2,
+                "status": "validating",
+                "config_fingerprint": "a" * 64,
+            },
+            "compatible_versions": [
+                {
+                    "knowledge_base_id": "kb_default",
+                    "index_version_id": "iv_candidate",
+                    "version_no": 2,
+                    "status": "validating",
+                    "config_fingerprint": "a" * 64,
+                }
+            ],
+            "validation_usages": [
+                {
+                    "validation_report_id": "vr_123",
+                    "knowledge_base_id": "kb_default",
+                    "index_version_id": "iv_candidate",
+                    "status": "pass",
+                    "created_at": datetime(2026, 8, 30, tzinfo=UTC),
+                }
+            ],
+        }
+
+
 def test_evaluation_center_pipeline_and_bad_case_governance(client) -> None:
     client.app.dependency_overrides[get_evaluation_governance] = lambda: _GovernanceStub()
 
@@ -102,6 +140,18 @@ def test_evaluation_center_pipeline_and_bad_case_governance(client) -> None:
     assert updated.status_code == 200
     assert updated.json()["status"] == "confirmed"
     assert updated.json()["severity"] == "critical"
+
+
+def test_evaluation_report_associations_expose_origin_compatibility_and_validation_use(client) -> None:
+    client.app.dependency_overrides[get_evaluation_reports] = lambda: _ReportsStub()
+
+    response = client.get("/api/evaluation-center/reports/retrieval-official/associations")
+
+    assert response.status_code == 200
+    assert response.json()["origin_evaluation_run_id"] == "eval_123"
+    assert response.json()["origin_version"]["index_version_id"] == "iv_candidate"
+    assert response.json()["compatible_versions"][0]["version_no"] == 2
+    assert response.json()["validation_usages"][0]["validation_report_id"] == "vr_123"
 
 
 def test_online_failure_is_captured_with_stable_failure_stage() -> None:

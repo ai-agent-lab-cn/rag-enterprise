@@ -730,7 +730,7 @@ export function KnowledgeBaseDetailPage({ id, onOpen, initialVersionId }: {
           <p className="m-0 text-sm text-ink-faint">用于确认候选索引的检索质量，并作为发布验证依据。</p>
         </div>
         <DataTable label="正式质量评测" rows={releaseReports} rowKey={(item) => item.report_id} density="compact" columns={[
-          { key: "report", header: "报告", width: "26%", render: (item: EvaluationReportSummary) => <span className="grid gap-0.5"><strong className="truncate font-medium text-ink" title={item.report_id}>{item.report_id}</strong><small className="text-ink-faint">{item.dataset_id} · {item.dataset_version}</small></span> },
+          { key: "report", header: "报告", width: "26%", render: (item: EvaluationReportSummary) => <span className="grid justify-items-start gap-0.5"><Button variant="link" className="h-auto max-w-full justify-start truncate px-0 py-0 text-left" title={item.report_id} onClick={() => onOpen(`/evaluation?view=reports&report=${encodeURIComponent(item.report_id)}`)}>{item.report_id}</Button><small className="text-ink-faint">{item.dataset_id} · {item.dataset_version}</small></span> },
           { key: "config", header: "评测配置", width: "20%", render: (item: EvaluationReportSummary) => {
             if (!item.config_fingerprint) return <span className="text-ink-faint">历史报告</span>;
             const scope = reportScope(item);

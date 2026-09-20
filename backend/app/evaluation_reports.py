@@ -1,5 +1,6 @@
 """正式检索评测报告的只读查询：合并版本化 JSON 文件与产品内评测运行。"""
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
@@ -15,6 +16,7 @@ from .schemas import (
     AnswerEvaluationReportResponse,
     AnswerEvaluationReportSummary,
     EvaluationCenterOverviewResponse,
+    EvaluationReportAssociationsResponse,
     EvaluationReportResponse,
     EvaluationReportSummary,
 )
@@ -117,12 +119,113 @@ class EvaluationReportRepository:
         answers = self.list_official_answers()
         latest_retrieval = retrieval[0] if retrieval else None
         latest_answer = answers[0] if answers else None
-        reports = [item for item in (latest_retrieval, latest_answer) if item is not None]
+        required_scopes = ["retrieval", "answer"]
+        available_scopes = [
+            scope
+            for scope, report in (("retrieval", latest_retrieval), ("answer", latest_answer))
+            if report is not None
+        ]
+        missing_scopes = [scope for scope in required_scopes if scope not in available_scopes]
+        failed_scopes = [
+            scope
+            for scope, report in (("retrieval", latest_retrieval), ("answer", latest_answer))
+            if report is not None and not report.passed
+        ]
+        status = "failed" if failed_scopes else "incomplete" if missing_scopes else "passed"
         return EvaluationCenterOverviewResponse(
-            passed=bool(reports) and all(item.passed for item in reports),
+            passed=status == "passed",
+            status=status,
+            required_scopes=required_scopes,
+            available_scopes=available_scopes,
+            missing_scopes=missing_scopes,
+            failed_scopes=failed_scopes,
+            generated_at=datetime.now(UTC),
             retrieval_report=latest_retrieval,
             answer_report=latest_answer,
             report_count=len(retrieval) + len(answers),
+        )
+
+    def report_associations(
+        self,
+        report_id: str,
+        accessible_knowledge_base_ids: set[str] | None = None,
+    ) -> EvaluationReportAssociationsResponse:
+        """返回检索报告的来源版本、可匹配版本与门禁使用记录。
+
+        关联完全从已有运行事实、配置指纹和验证报告推导，不新增一套关系表。历史文件报告
+        没有产品内运行记录时，来源版本明确为空；只要配置指纹可用，仍可以展示当前兼容版本。
+        """
+
+        report = self.load_official_model(report_id)
+        empty = EvaluationReportAssociationsResponse(
+            report_id=report_id,
+            evaluation_type="retrieval",
+        )
+        if not self.database_url or accessible_knowledge_base_ids == set():
+            return empty
+
+        access_clause = ""
+        access_values: tuple[object, ...] = ()
+        if accessible_knowledge_base_ids is not None:
+            access_clause = " AND iv.knowledge_base_id = ANY(%s)"
+            access_values = (list(accessible_knowledge_base_ids),)
+
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            origin = connection.execute(
+                f"""SELECT er.evaluation_run_id, iv.knowledge_base_id,
+                           iv.index_version_id, iv.version_no, iv.status,
+                           iv.config_fingerprint
+                    FROM evaluation_runs er
+                    JOIN index_versions iv ON iv.index_version_id=er.index_version_id
+                    WHERE er.evaluation_type='retrieval'
+                      AND er.report_payload->>'report_id'=%s{access_clause}
+                    ORDER BY er.finished_at DESC NULLS LAST, er.created_at DESC
+                    LIMIT 1""",  # noqa: S608 -- access_clause 只来自上面的固定字符串。
+                (report_id, *access_values),
+            ).fetchone()
+
+            compatible: list[dict[str, object]] = []
+            if report.config_fingerprint:
+                compatible = connection.execute(
+                    f"""SELECT iv.knowledge_base_id, iv.index_version_id, iv.version_no,
+                               iv.status, iv.config_fingerprint
+                        FROM index_versions iv
+                        WHERE iv.config_fingerprint=%s{access_clause}
+                        ORDER BY iv.created_at DESC""",  # noqa: S608
+                    (report.config_fingerprint, *access_values),
+                ).fetchall()
+
+            validations = connection.execute(
+                f"""SELECT vr.validation_report_id, iv.knowledge_base_id,
+                           vr.index_version_id, vr.status, vr.created_at
+                    FROM validation_reports vr
+                    JOIN index_versions iv ON iv.index_version_id=vr.index_version_id
+                    WHERE vr.evaluation_set_version=%s{access_clause}
+                    ORDER BY vr.created_at DESC""",  # noqa: S608
+                (report_id, *access_values),
+            ).fetchall()
+
+        origin_payload = None
+        origin_run_id = None
+        if origin is not None:
+            origin_run_id = str(origin["evaluation_run_id"])
+            origin_payload = {
+                "knowledge_base_id": str(origin["knowledge_base_id"]),
+                "index_version_id": str(origin["index_version_id"]),
+                "version_no": int(origin["version_no"]) if origin["version_no"] else None,
+                "status": str(origin["status"]),
+                "config_fingerprint": (
+                    str(origin["config_fingerprint"]) if origin["config_fingerprint"] else None
+                ),
+            }
+
+        return EvaluationReportAssociationsResponse(
+            report_id=report_id,
+            evaluation_type="retrieval",
+            origin_evaluation_run_id=origin_run_id,
+            origin_version=origin_payload,
+            compatible_versions=[dict(item) for item in compatible],
+            validation_usages=[dict(item) for item in validations],
         )
 
     @staticmethod

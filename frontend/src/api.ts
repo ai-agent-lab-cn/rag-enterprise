@@ -13,6 +13,7 @@ import type {
   AnswerEvaluationReport,
   AnswerEvaluationSummary,
   EvaluationCenterOverview,
+  EvaluationReportAssociations,
   GovernedBadCase,
   GenerationModelItem,
   GenerationModels,
@@ -372,6 +373,9 @@ export const api = {
   getAnswerEvaluation: (reportId: string) =>
     request<AnswerEvaluationReport>(`/api/evaluations/answers/reports/${encodeURIComponent(reportId)}`),
   getEvaluationCenterOverview: () => request<EvaluationCenterOverview>("/api/evaluation-center/overview"),
+  getEvaluationAssociations: (reportId: string) => request<EvaluationReportAssociations>(
+    `/api/evaluation-center/reports/${encodeURIComponent(reportId)}/associations`,
+  ),
   getPipelineEvaluation: (knowledgeBaseId?: string) => request<PipelineEvaluation>(
     `/api/evaluation-center/pipeline${knowledgeBaseId ? `?knowledge_base_id=${encodeURIComponent(knowledgeBaseId)}` : ""}`,
   ),

@@ -385,6 +385,9 @@ export interface EvaluationReport extends EvaluationReportSummary {
   ndcg_at_5?: EvaluationMetric | null;
   ndcg_at_10?: EvaluationMetric | null;
   metadata_filter_accuracy?: EvaluationMetric | null;
+  query_rewrite_success_rate?: EvaluationMetric | null;
+  query_rewrite_fallback_rate?: EvaluationMetric | null;
+  no_result_rate?: EvaluationMetric | null;
   acl_leak_count?: number | null;
 }
 
@@ -541,9 +544,40 @@ export interface AnswerEvaluationReport extends AnswerEvaluationSummary {
 
 export interface EvaluationCenterOverview {
   passed: boolean;
+  status: "passed" | "failed" | "incomplete";
+  required_scopes: Array<"retrieval" | "answer">;
+  available_scopes: Array<"retrieval" | "answer">;
+  missing_scopes: Array<"retrieval" | "answer">;
+  failed_scopes: Array<"retrieval" | "answer">;
+  generated_at: string;
   report_count: number;
   retrieval_report: EvaluationReportSummary | null;
   answer_report: AnswerEvaluationSummary | null;
+}
+
+export interface EvaluationAssociationVersion {
+  knowledge_base_id: string;
+  index_version_id: string;
+  version_no: number | null;
+  status: string;
+  config_fingerprint: string | null;
+}
+
+export interface EvaluationValidationUsage {
+  validation_report_id: string;
+  knowledge_base_id: string;
+  index_version_id: string;
+  status: string;
+  created_at: string;
+}
+
+export interface EvaluationReportAssociations {
+  report_id: string;
+  evaluation_type: "retrieval";
+  origin_evaluation_run_id: string | null;
+  origin_version: EvaluationAssociationVersion | null;
+  compatible_versions: EvaluationAssociationVersion[];
+  validation_usages: EvaluationValidationUsage[];
 }
 
 export interface PipelineEvaluation {

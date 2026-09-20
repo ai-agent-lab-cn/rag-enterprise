@@ -150,3 +150,22 @@ def test_evaluation_center_overview_unifies_latest_official_reports(client, tmp_
     assert response.json()["retrieval_report"]["report_id"] == "retrieval-official"
     assert response.json()["answer_report"]["dataset_id"] == "rag-enterprise-answer-quality"
     assert response.json()["passed"] is True
+    assert response.json()["status"] == "passed"
+    assert response.json()["required_scopes"] == ["retrieval", "answer"]
+    assert response.json()["available_scopes"] == ["retrieval", "answer"]
+    assert response.json()["missing_scopes"] == []
+    assert response.json()["failed_scopes"] == []
+
+
+def test_evaluation_center_overview_marks_missing_required_evidence_incomplete(client, tmp_path) -> None:
+    _write_report(tmp_path / "retrieval.json", report_id="retrieval-only")
+    _use_reports(client, tmp_path)
+
+    response = client.get("/api/evaluation-center/overview")
+
+    assert response.status_code == 200
+    assert response.json()["passed"] is False
+    assert response.json()["status"] == "incomplete"
+    assert response.json()["available_scopes"] == ["retrieval"]
+    assert response.json()["missing_scopes"] == ["answer"]
+    assert response.json()["failed_scopes"] == []

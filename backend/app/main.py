@@ -25,7 +25,6 @@ from .evaluation_governance import BadCaseUpdate
 from .evaluation_reports import EvaluationReportRepository
 from .generation_models import GenerationProviderState
 from .history import ConversationRepository
-from .modular_rag import DEFAULT_PIPELINE_PROFILES, RAGPolicy
 from .index_evaluation_runs import (
     cancel_evaluation_run,
     create_evaluation_run,
@@ -63,6 +62,7 @@ from .knowledge_bases import (
     KnowledgeBaseScope,
 )
 from .models import SwitchableGenerator, get_embedding_model, get_generator, get_reranker
+from .modular_rag import DEFAULT_PIPELINE_PROFILES, RAGPolicy
 from .observability import MetricsRegistry, ObservabilityMiddleware, bind_actor, hash_identifier
 from .pipeline_governance import (
     cancel_sync_run,
@@ -125,6 +125,7 @@ from .schemas import (
     DocumentMetadata,
     DocumentVersionResponse,
     EvaluationCenterOverviewResponse,
+    EvaluationReportAssociationsResponse,
     EvaluationReportResponse,
     EvaluationReportSummary,
     GenerationModelActivateRequest,
@@ -2555,6 +2556,26 @@ def create_app() -> FastAPI:
         current: CurrentSessionDependency,
     ) -> EvaluationCenterOverviewResponse:
         return await run_in_threadpool(reports.center_overview)
+
+    @app.get(
+        "/api/evaluation-center/reports/{report_id}/associations",
+        response_model=EvaluationReportAssociationsResponse,
+    )
+    async def get_evaluation_report_associations(
+        report_id: str,
+        reports: EvaluationReportsDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> EvaluationReportAssociationsResponse:
+        accessible_ids = await run_in_threadpool(
+            auth.accessible_knowledge_base_ids,
+            current.user,
+        )
+        return await run_in_threadpool(
+            reports.report_associations,
+            report_id,
+            accessible_ids,
+        )
 
     @app.get("/api/evaluation-center/pipeline", response_model=PipelineEvaluationResponse)
     async def get_pipeline_evaluation(

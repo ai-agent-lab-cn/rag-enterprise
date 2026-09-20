@@ -1309,8 +1309,45 @@ class AnswerEvaluationReportResponse(AnswerEvaluationReportSummary):
     metrics: dict[str, AnswerEvaluationMetricResponse | None]
 
 
+class EvaluationAssociationVersionResponse(BaseModel):
+    """正式检索报告关联到的索引版本。"""
+
+    knowledge_base_id: str
+    index_version_id: str
+    version_no: int | None = None
+    status: str
+    config_fingerprint: str | None = None
+
+
+class EvaluationValidationUsageResponse(BaseModel):
+    """正式检索报告作为三层验证输入时形成的使用记录。"""
+
+    validation_report_id: str
+    knowledge_base_id: str
+    index_version_id: str
+    status: str
+    created_at: datetime
+
+
+class EvaluationReportAssociationsResponse(BaseModel):
+    """报告与索引治理之间可审计、可跳转的关联证据。"""
+
+    report_id: str
+    evaluation_type: Literal["retrieval"]
+    origin_evaluation_run_id: str | None = None
+    origin_version: EvaluationAssociationVersionResponse | None = None
+    compatible_versions: list[EvaluationAssociationVersionResponse] = Field(default_factory=list)
+    validation_usages: list[EvaluationValidationUsageResponse] = Field(default_factory=list)
+
+
 class EvaluationCenterOverviewResponse(BaseModel):
     passed: bool
+    status: Literal["passed", "failed", "incomplete"]
+    required_scopes: list[Literal["retrieval", "answer"]]
+    available_scopes: list[Literal["retrieval", "answer"]]
+    missing_scopes: list[Literal["retrieval", "answer"]]
+    failed_scopes: list[Literal["retrieval", "answer"]]
+    generated_at: datetime
     retrieval_report: EvaluationReportSummary | None = None
     answer_report: AnswerEvaluationReportSummary | None = None
     report_count: int = Field(ge=0)

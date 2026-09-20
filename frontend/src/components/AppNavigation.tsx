@@ -9,7 +9,7 @@ const ITEMS: Array<{ page: AppPage; path: string; label: string; icon: LucideIco
   { page: "chat", path: "/chat", label: "问答工作台", icon: MessageSquareText, group: "应用" },
   { page: "knowledge-bases", path: "/knowledge-bases", label: "知识库管理", icon: Database, group: "知识库管理" },
   { page: "data-sources", path: "/data-sources", label: "数据源管理", icon: Plug },
-  { page: "evaluation-center", path: "/evaluation", label: "评测中心", icon: SearchCheck, group: "测评评估" },
+  { page: "evaluation-center", path: "/evaluation", label: "评测中心", icon: SearchCheck, group: "评测治理" },
   { page: "bad-cases", path: "/evaluation/bad-cases", label: "Bad Case", icon: Bug },
   { page: "acceptance", path: "/evaluation/acceptance", label: "链路验收", icon: ClipboardCheck },
 ];
