@@ -73,14 +73,23 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
   useEffect(() => { api.listKnowledgeBases().then(setBases, (reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取知识库。")); }, []);
   useEffect(() => { Promise.resolve().then(() => loadBase(baseId)).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取工作台。")); }, [baseId, loadBase]);
   useEffect(() => {
-    if (!conversationId) { Promise.resolve().then(() => setHistory(null)); return; }
+    if (!conversationId) {
+      Promise.resolve().then(() => {
+        setHistory(null); setStreamingText(""); setStreamingSources([]); setPendingQuestion("");
+      });
+      return;
+    }
+    setHistory(null);
+    setStreamingText("");
+    setStreamingSources([]);
+    setPendingQuestion("");
     api.getConversation(baseId, conversationId).then((value) => { setHistory(value); setResult(null); }, (reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取会话。"));
   }, [baseId, conversationId]);
   useEffect(() => {
     const messageList = messageListRef.current;
     if (!messageList) return;
     messageList.scrollTop = messageList.scrollHeight;
-  }, [history?.conversation_id, history?.records.length, result?.record_id]);
+  }, [history?.conversation_id, history?.records.length, pendingQuestion, result?.record_id, streamingText]);
 
   const activeRecord = useMemo(() => history?.records.at(-1) ?? null, [history]);
   const historicalResult = useMemo<QueryResult | null>(() => activeRecord ? {
@@ -99,11 +108,19 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
     prompt_hash: activeRecord.prompt_hash,
     generation_governance: activeRecord.generation_governance,
     query_metadata: activeRecord.query_metadata,
+    execution_id: activeRecord.execution_id,
+    routing: activeRecord.routing,
+    pipeline_profile: activeRecord.pipeline_profile,
+    profile_version: activeRecord.profile_version,
+    module_executions: activeRecord.module_summary,
+    policy_snapshot: activeRecord.policy_snapshot,
+    active_index_version_id: activeRecord.active_index_version_id,
   } : null, [activeRecord]);
   const sources = result?.sources ?? (streamingSources.length ? streamingSources : activeRecord?.sources) ?? [];
-  const selectBase = (id: string) => { setResult(null); setHistory(null); setCategoryFilter(""); setTagFilter(""); setSourceTypeFilter(""); setBaseId(id); onOpen(`/chat?knowledge_base_id=${id}`); };
-  const newConversation = () => { setResult(null); setHistory(null); onOpen(`/chat?knowledge_base_id=${baseId}`); };
-  const openConversation = (id: string) => { setResult(null); onOpen(`/chat/${id}?knowledge_base_id=${baseId}`); };
+  const resetTransientAnswer = () => { setResult(null); setStreamingText(""); setStreamingSources([]); setPendingQuestion(""); setStreamingStage(""); };
+  const selectBase = (id: string) => { resetTransientAnswer(); setHistory(null); setCategoryFilter(""); setTagFilter(""); setSourceTypeFilter(""); setBaseId(id); onOpen(`/chat?knowledge_base_id=${id}`); };
+  const newConversation = () => { resetTransientAnswer(); setHistory(null); onOpen(`/chat?knowledge_base_id=${baseId}`); };
+  const openConversation = (id: string) => { resetTransientAnswer(); onOpen(`/chat/${id}?knowledge_base_id=${baseId}`); };
   const ask = async (event: FormEvent) => {
     event.preventDefault();
     const value = question.trim();
@@ -115,16 +132,32 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
     setBusy(true); setError(""); setResult(null); setStreamingText(""); setStreamingSources([]); setStreamingStage("正在检索资料"); setPendingQuestion(value); setQuestion("");
     let finalAnswer: QueryResult | null = null;
     let streamError = "";
+    let failedConversationId: string | undefined = conversationId;
     try {
       await api.streamKnowledgeBaseQuery(baseId, value, conversationId, filters, controller.signal, (message) => {
         if (message.event === "stage") setStreamingStage(message.data.message);
+        else if (message.event === "routing_completed") setStreamingStage(message.data.intent ? "已选择受控问答管线" : "正在确认问题范围");
         else if (message.event === "answer_delta") setStreamingText((current) => current + message.data.text);
         else if (message.event === "sources") setStreamingSources(message.data.items);
         else if (message.event === "replace") setStreamingText(message.data.answer);
         else if (message.event === "final") { finalAnswer = message.data; setResult(message.data); setStreamingText(""); }
-        else if (message.event === "error") { streamError = message.data.message; setError(message.data.message); }
+        else if (message.event === "error") {
+          streamError = message.data.message; setError(message.data.message);
+          const details = message.data.details;
+          if (details && typeof details === "object" && "conversation_id" in details && typeof details.conversation_id === "string") {
+            failedConversationId = details.conversation_id;
+          }
+        }
       });
-      if (streamError) return;
+      if (streamError) {
+        await loadBase(baseId);
+        if (failedConversationId) {
+          const refreshedHistory = await api.getConversation(baseId, failedConversationId);
+          setHistory(refreshedHistory);
+          if (!conversationId) onOpen(`/chat/${failedConversationId}?knowledge_base_id=${baseId}`);
+        }
+        return;
+      }
       window.dispatchEvent(new Event("rag-generation-status-changed"));
       await loadBase(baseId);
       // finalAnswer 在流式回调里赋值，TS 的控制流分析追不进闭包，会认定它此处仍是初始的

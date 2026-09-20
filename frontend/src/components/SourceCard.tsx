@@ -10,9 +10,16 @@ export function SourceCard({ source, index, defaultOpen = false }: SourceCardPro
   const [citation, setCitation] = useState<Citation | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const location = source.page ? `第 ${source.page} 页` : `第 ${source.paragraph + 1} 段`;
+  const isWeb = source.evidence_source_type === "web";
+  const location = isWeb
+    ? `Web 来源${source.retrieved_at ? ` · ${new Date(source.retrieved_at).toLocaleString("zh-CN")}` : ""}`
+    : source.page ? `第 ${source.page} 页` : `第 ${source.paragraph + 1} 段`;
   const channels = source.retrieval_channels ?? [];
   const openOriginal = async () => {
+    if (isWeb) {
+      if (source.source_url) window.open(source.source_url, "_blank", "noopener,noreferrer");
+      return;
+    }
     setLoading(true); setError("");
     try { setCitation(await api.getCitation(source.knowledge_base_id, source.chunk_id)); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "原文定位失败。"); }
@@ -31,7 +38,7 @@ export function SourceCard({ source, index, defaultOpen = false }: SourceCardPro
       <summary className="flex list-none items-start gap-2.5 p-3 cursor-pointer">
         <span className="grid h-6 w-6 flex-none place-items-center rounded-sm border border-[#d9d5fa] text-[9px] text-[#574ad0]">{index + 1}</span>
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <strong className="overflow-hidden text-ellipsis whitespace-nowrap text-[13px]">{source.filename}</strong>
+          <strong className="overflow-hidden text-ellipsis whitespace-nowrap text-[13px]">{source.filename}{isWeb ? " · Web" : ""}</strong>
           <small className="text-[11px] text-ink-faint">{location} · 片段 {source.chunk_index}</small>
           <span className="mt-[7px] line-clamp-2 text-[10px] font-normal leading-[1.55] text-[#6f778a]">{source.summary}</span>
         </span>
@@ -42,7 +49,7 @@ export function SourceCard({ source, index, defaultOpen = false }: SourceCardPro
       </summary>
       <p className="m-0 max-h-[170px] overflow-y-auto border-t border-divider px-3 pt-[11px] pb-[13px] text-[11px] leading-[1.65] text-[#6c7487]">{source.text}</p>
       {/* 内边距接原来的 .source-original-action：卡片本体没有 padding，不给就贴边。 */}
-      <Button className="mx-3.5 mb-3" variant="ghost" size="sm" loading={loading} onClick={() => void openOriginal()}>查看 {source.filename} 原文</Button>
+      <Button className="mx-3.5 mb-3" variant="ghost" size="sm" loading={loading} blockedReason={isWeb && !source.source_url ? "该 Web 来源没有可打开的地址" : undefined} onClick={() => void openOriginal()}>{isWeb ? "打开 Web 原文" : `查看 ${source.filename} 原文`}</Button>
       {/* text-danger-text 而不是"如实复刻" var(--danger) 死变量导致的墨色：这是
           role="alert" 的错误提示，颜色是它唯一的表意信号，属于全局约束点名的
           "颜色只留给表意"一类，不适用装饰色的"如实迁移"豁免。仓库已有判例——

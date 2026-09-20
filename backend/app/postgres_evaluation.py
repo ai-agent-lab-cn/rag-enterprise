@@ -40,6 +40,53 @@ class PostgresEvaluationGovernanceRepository:
             ).fetchall()
         return summarize_pipeline_runs(rows).model_dump()
 
+    def rag_pipeline_summary(
+        self,
+        knowledge_base_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        condition = "WHERE q.knowledge_base_id = %s" if knowledge_base_id else ""
+        parameters = [knowledge_base_id] if knowledge_base_id else []
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                f"""SELECT q.intent, q.pipeline_profile, q.profile_version,
+                           count(*)::integer AS execution_count,
+                           count(*) FILTER (
+                             WHERE a.answer_status IN ('answered','source_conflict')
+                           )::integer AS successful_count,
+                           count(*) FILTER (
+                             WHERE a.answer_status = 'insufficient_evidence'
+                           )::integer AS insufficient_evidence_count,
+                           count(*) FILTER (
+                             WHERE q.fallback_used OR EXISTS (
+                               SELECT 1 FROM module_executions m
+                               WHERE m.execution_id=q.execution_id AND m.status='degraded'
+                             )
+                           )::integer AS fallback_count,
+                           COALESCE(percentile_cont(0.95) WITHIN GROUP (
+                             ORDER BY q.total_latency_ms
+                           ), 0)::double precision AS p95_latency_ms
+                    FROM query_executions q
+                    LEFT JOIN answer_records a ON a.execution_id=q.execution_id
+                    {condition}
+                    GROUP BY q.intent,q.pipeline_profile,q.profile_version
+                    ORDER BY q.intent,q.pipeline_profile""",  # noqa: S608
+                parameters,
+            ).fetchall()
+        results: list[dict[str, object]] = []
+        for row in rows:
+            total = int(row["execution_count"])
+            results.append(
+                {
+                    **dict(row),
+                    "task_success_rate": int(row["successful_count"]) / total if total else 0,
+                    "insufficient_evidence_rate": (
+                        int(row["insufficient_evidence_count"]) / total if total else 0
+                    ),
+                    "fallback_rate": int(row["fallback_count"]) / total if total else 0,
+                }
+            )
+        return results
+
     def capture_online_bad_case(
         self,
         *,

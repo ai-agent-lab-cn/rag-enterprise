@@ -103,6 +103,14 @@ class ConversationRepository:
         bad_case_category: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        execution_id: str | None = None,
+        routing: dict[str, Any] | None = None,
+        pipeline_profile: str | None = None,
+        profile_version: str | None = None,
+        policy_snapshot: dict[str, Any] | None = None,
+        active_index_version_id: str | None = None,
+        module_executions: list[dict[str, Any]] | None = None,
+        execution_started_at: datetime | None = None,
     ) -> dict[str, Any]:
         if status not in {"success", "failed"}:
             raise ValueError("answer status is invalid")
@@ -140,6 +148,16 @@ class ConversationRepository:
                 "bad_case_category": bad_case_category,
                 "error_code": error_code,
                 "error_message": error_message,
+                "execution_id": execution_id,
+                "routing": routing,
+                "pipeline_profile": pipeline_profile,
+                "profile_version": profile_version,
+                "policy_snapshot": policy_snapshot,
+                "active_index_version_id": active_index_version_id,
+                "module_summary": module_executions or [],
+                "execution_started_at": (
+                    execution_started_at.isoformat() if execution_started_at else None
+                ),
                 "created_at": now,
             }
             payload["answers"].append(record)

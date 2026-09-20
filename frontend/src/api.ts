@@ -44,6 +44,7 @@ import type {
   IndexEvaluationRunDetail,
   DocumentIndexState,
   Citation,
+  QueryExecutionDetail,
 } from "./types";
 
 let accessToken: string | null = null;
@@ -105,11 +106,16 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export type QueryStreamEvent =
   | { event: "stage"; data: { stage: string; message: string } }
+  | { event: "routing_completed"; data: NonNullable<QueryResult["routing"]> }
+  | { event: "module_started"; data: { module_key: string } }
+  | { event: "module_completed"; data: { module_key: string; status: string } }
+  | { event: "evidence_gate_completed"; data: { sufficient: boolean; evidence_count: number } }
+  | { event: "generation_verified"; data: { citation_valid: boolean; claim_citation_coverage: boolean } }
   | { event: "answer_delta"; data: { text: string } }
   | { event: "sources"; data: { items: QueryResult["sources"] } }
   | { event: "replace"; data: { answer: string; answer_status: QueryResult["answer_status"] } }
   | { event: "final"; data: QueryResult }
-  | { event: "error"; data: { code: string; message: string } };
+  | { event: "error"; data: { code: string; message: string; details?: unknown } };
 
 async function streamQuery(
   url: string,
@@ -353,6 +359,15 @@ export const api = {
     request<ConversationDetail>(`/api/knowledge-bases/${knowledgeBaseId}/conversations/${conversationId}`),
   deleteConversation: (knowledgeBaseId: string, conversationId: string) =>
     request<void>(`/api/knowledge-bases/${knowledgeBaseId}/conversations/${conversationId}`, { method: "DELETE" }),
+  getRagPolicy: (knowledgeBaseId: string) =>
+    request<import("./types").RAGPolicy>(`/api/knowledge-bases/${knowledgeBaseId}/rag-policy`),
+  updateRagPolicy: (knowledgeBaseId: string, payload: Omit<import("./types").RAGPolicy, "knowledge_base_id" | "profile_versions">) =>
+    request<import("./types").RAGPolicy>(`/api/knowledge-bases/${knowledgeBaseId}/rag-policy`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    }),
+  getQueryExecution: (executionId: string) => request<QueryExecutionDetail>(
+    `/api/query-executions/${encodeURIComponent(executionId)}`,
+  ),
   listAnswerEvaluations: () => request<AnswerEvaluationSummary[]>("/api/evaluations/answers/reports"),
   getAnswerEvaluation: (reportId: string) =>
     request<AnswerEvaluationReport>(`/api/evaluations/answers/reports/${encodeURIComponent(reportId)}`),

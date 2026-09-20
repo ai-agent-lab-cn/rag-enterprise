@@ -8,7 +8,10 @@ metadata:
 data:
   APP_ENVIRONMENT: test
   FRONTEND_ORIGIN: http://127.0.0.1:30080
-  REQUIRED_DATABASE_SCHEMA_VERSION: "40"
+  REQUIRED_DATABASE_SCHEMA_VERSION: "41"
+  SEARXNG_BASE_URL: http://searxng:8080
+  WEB_FETCH_TIMEOUT_SECONDS: "8"
+  WEB_FETCH_MAX_BYTES: "2097152"
   MAX_CONCURRENT_INDEX_BUILDS: "2"
   MAX_INDEX_BUILD_DOCUMENTS: "10000"
   INDEX_RETENTION_COUNT: "2"
@@ -31,3 +34,22 @@ data:
   MKL_NUM_THREADS: "1"
   OPENBLAS_NUM_THREADS: "1"
   TOKENIZERS_PARALLELISM: "false"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-searxng-config
+  namespace: rag-enterprise
+  labels:
+    app.kubernetes.io/part-of: rag-enterprise
+    app.kubernetes.io/component: searxng
+data:
+  settings.yml: |
+    use_default_settings: true
+    search:
+      formats:
+        - html
+        - json
+    server:
+      limiter: false
+      image_proxy: false

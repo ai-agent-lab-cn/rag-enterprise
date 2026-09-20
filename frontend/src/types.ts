@@ -145,6 +145,8 @@ export interface Source {
   column_end?: number | null;
   source_url?: string | null;
   external_resource_id?: string | null;
+  evidence_source_type?: "knowledge_base" | "web";
+  retrieved_at?: string | null;
 }
 
 export interface Citation extends Source {
@@ -157,6 +159,61 @@ export interface GenerationGovernance {
   acl_revalidated: boolean; current_version_revalidated: boolean; retrieval_status_revalidated: boolean;
   citation_indices: number[]; citation_valid: boolean; claim_citation_coverage: boolean;
   outcome_reason: string | null;
+}
+
+export interface RoutingMetadata {
+  intent: "fact_lookup" | "summarize" | "compare" | "procedure" | null;
+  confidence: number;
+  reason: string;
+  control_outcome: "route" | "clarify" | "out_of_scope";
+  original_question: string;
+  effective_question: string;
+  follow_up_rewritten: boolean;
+  requires_web: boolean;
+  classifier_model: string | null;
+  fallback_used: boolean;
+  pipeline_profile?: string | null;
+  profile_version?: string | null;
+}
+
+export interface ModuleExecution {
+  module_execution_id: string;
+  sequence: number;
+  module_key: string;
+  module_version: string;
+  status: "succeeded" | "failed" | "skipped" | "degraded";
+  attempt: number;
+  duration_ms: number;
+  metrics: Record<string, unknown>;
+  error_code: string | null;
+  error_message: string | null;
+  fallback_reason: string | null;
+}
+
+export interface RAGPolicy {
+  knowledge_base_id: string;
+  rollout_stage: "shadow" | "canary" | "full";
+  web_search_enabled: boolean;
+  allowed_domains: string[];
+  intent_confidence_threshold: number;
+  minimum_evidence_count: number;
+  max_web_results: number;
+  profile_versions: Record<string, string>;
+}
+
+export interface QueryExecutionDetail {
+  execution_id: string;
+  knowledge_base_id: string;
+  conversation_id: string;
+  status: "succeeded" | "failed";
+  routing: RoutingMetadata | null;
+  pipeline_profile: string | null;
+  profile_version: string | null;
+  active_index_version_id: string | null;
+  policy_snapshot: Record<string, unknown>;
+  total_latency_ms: number;
+  modules: ModuleExecution[];
+  created_at: string;
 }
 
 export interface QueryResult {
@@ -189,6 +246,13 @@ export interface QueryResult {
       created_from: string | null; created_to: string | null;
     } | null;
   } | null;
+  execution_id?: string | null;
+  routing?: RoutingMetadata | null;
+  pipeline_profile?: string | null;
+  profile_version?: string | null;
+  active_index_version_id?: string | null;
+  policy_snapshot?: Record<string, unknown>;
+  module_executions?: ModuleExecution[];
 }
 
 export interface ApiErrorPayload {
@@ -447,6 +511,13 @@ export interface AnswerRecord {
   error_code: string | null;
   error_message: string | null;
   created_at: string;
+  execution_id?: string | null;
+  routing?: RoutingMetadata | null;
+  pipeline_profile?: string | null;
+  profile_version?: string | null;
+  module_summary?: ModuleExecution[];
+  policy_snapshot?: Record<string, unknown>;
+  active_index_version_id?: string | null;
 }
 
 export interface ConversationDetail extends Omit<ConversationSummary, "turn_count" | "last_status"> {
@@ -485,6 +556,19 @@ export interface PipelineEvaluation {
   retry_count: number;
   failure_rate: number;
   average_duration_ms: number;
+  rag_profiles: Array<{
+    intent: "fact_lookup" | "summarize" | "compare" | "procedure" | null;
+    pipeline_profile: string | null;
+    profile_version: string | null;
+    execution_count: number;
+    successful_count: number;
+    insufficient_evidence_count: number;
+    fallback_count: number;
+    task_success_rate: number;
+    insufficient_evidence_rate: number;
+    fallback_rate: number;
+    p95_latency_ms: number;
+  }>;
 }
 
 export interface GovernedBadCase {

@@ -23,6 +23,9 @@ class _GovernanceStub:
             "average_duration_ms": 20_000,
         }
 
+    def rag_pipeline_summary(self, knowledge_base_id=None):
+        return []
+
     def list_bad_cases(self, **_filters):
         return [
             {
@@ -93,6 +96,7 @@ def test_evaluation_center_pipeline_and_bad_case_governance(client) -> None:
 
     assert pipeline.status_code == 200
     assert pipeline.json()["average_duration_ms"] == 20_000
+    assert pipeline.json()["rag_profiles"] == []
     assert bad_cases.status_code == 200
     assert bad_cases.json()[0]["failure_stage"] == "retrieval"
     assert updated.status_code == 200

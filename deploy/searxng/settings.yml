@@ -1,0 +1,12 @@
+use_default_settings: true
+
+# SearXNG 默认只开放 HTML。Modular RAG 的 WebSearchProvider 使用 JSON Search API，
+# 因此必须显式启用 json；服务本身只绑定在 Compose/Kubernetes 私有网络中。
+search:
+  formats:
+    - html
+    - json
+
+server:
+  limiter: false
+  image_proxy: false

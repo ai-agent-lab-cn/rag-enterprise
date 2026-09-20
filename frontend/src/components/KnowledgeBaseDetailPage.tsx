@@ -1,6 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { api } from "../api";
-import type { ConversationSummary, DataSource, DocumentCategory, DocumentIndexState, DocumentInfo, DocumentVersion, EvaluationReportSummary, GovernedOperation, IndexBuild, IndexEvaluationRun, IndexEvaluationRunDetail, IndexVersion, IndexVersionCandidatePreview, IndexVersionComparison, IndexVersionCreationContext, KnowledgeBase, User, } from "../types";
+import type { ConversationSummary, DataSource, DocumentCategory, DocumentIndexState, DocumentInfo, DocumentVersion, EvaluationReportSummary, GovernedOperation, IndexBuild, IndexEvaluationRun, IndexEvaluationRunDetail, IndexVersion, IndexVersionCandidatePreview, IndexVersionComparison, IndexVersionCreationContext, KnowledgeBase, RAGPolicy, User, } from "../types";
 import { DocumentPanel } from "./DocumentPanel";
 import { IndexVersionDetailDialog } from "./IndexVersionDetailDialog";
 import { KnowledgeBaseForm } from "./KnowledgeBaseForm";
@@ -176,6 +176,11 @@ export function KnowledgeBaseDetailPage({ id, onOpen, initialVersionId }: {
   const [deletingCategory, setDeletingCategory] = useState<DocumentCategory | null>(null);
   const [categoryDraft, setCategoryDraft] = useState({ name: "", description: "", sort_order: 100 });
   const [conversations, setConversations] = useState<ConversationSummary[]>([]); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const [ragPolicy, setRagPolicy] = useState<RAGPolicy | null>(null);
+  const [ragPolicyDraft, setRagPolicyDraft] = useState<RAGPolicy | null>(null);
+  const [ragPolicyOpen, setRagPolicyOpen] = useState(false);
+  const [savingRagPolicy, setSavingRagPolicy] = useState(false);
+  const [ragPolicyError, setRagPolicyError] = useState("");
   const [aclTarget, setAclTarget] = useState<{ kind: "document" | "source"; id: string; name: string; version: number; allow: string[]; deny: string[] } | null>(null);
   const [aclDraft, setAclDraft] = useState<Record<string, "inherit" | "allow" | "deny">>({});
   const [savingAcl, setSavingAcl] = useState(false);
@@ -226,6 +231,30 @@ export function KnowledgeBaseDetailPage({ id, onOpen, initialVersionId }: {
       setSavingBase(false);
     }
   };
+  const openRagPolicy = async () => {
+    setRagPolicyError("");
+    try {
+      const policy = ragPolicy ?? await api.getRagPolicy(id);
+      setRagPolicy(policy); setRagPolicyDraft({ ...policy, allowed_domains: [...policy.allowed_domains] }); setRagPolicyOpen(true);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "无法读取 RAG 策略。"); }
+  };
+  const saveRagPolicy = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!ragPolicyDraft || savingRagPolicy) return;
+    setSavingRagPolicy(true); setRagPolicyError("");
+    try {
+      const updated = await api.updateRagPolicy(id, {
+        rollout_stage: ragPolicyDraft.rollout_stage,
+        web_search_enabled: ragPolicyDraft.web_search_enabled,
+        allowed_domains: ragPolicyDraft.allowed_domains.map((item) => item.trim()).filter(Boolean),
+        intent_confidence_threshold: ragPolicyDraft.intent_confidence_threshold,
+        minimum_evidence_count: ragPolicyDraft.minimum_evidence_count,
+        max_web_results: ragPolicyDraft.max_web_results,
+      });
+      setRagPolicy(updated); setRagPolicyDraft(updated); setRagPolicyOpen(false); toast.success("RAG 策略已更新");
+    } catch (reason) { setRagPolicyError(reason instanceof Error ? reason.message : "RAG 策略保存失败。"); }
+    finally { setSavingRagPolicy(false); }
+  };
   const openCreationWizard = async () => {
     setCreationContextLoading(true); setError("");
     try {
@@ -272,8 +301,11 @@ export function KnowledgeBaseDetailPage({ id, onOpen, initialVersionId }: {
     if (admin) {
       try { setEvaluationRuns(await api.listKnowledgeBaseEvaluationRuns(id)); }
       catch { setEvaluationRuns([]); }
+      try { setRagPolicy(await api.getRagPolicy(id)); }
+      catch { setRagPolicy(null); }
     } else {
       setEvaluationRuns([]);
+      setRagPolicy(null);
     }
   }, [id]);
   useEffect(() => { Promise.resolve().then(load).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取知识库。")); }, [load]);
@@ -525,7 +557,7 @@ export function KnowledgeBaseDetailPage({ id, onOpen, initialVersionId }: {
   ];
   // 弹层打开时错误只显示在弹层内：Radix 给背景内容加了 aria-hidden，
   // 顶部横幅在弹层背后，既看不见也不会被屏幕阅读器读到。
-  const dialogOpen = Boolean(editingBase || categoryForm || deletingCategory || aclTarget || activationTarget || validationTarget || cleanupTarget || cancelBuildTarget || retireTarget || rollbackTarget || creationContext || selectedOperation || selectedVersionId || evaluationTarget);
+  const dialogOpen = Boolean(ragPolicyOpen || editingBase || categoryForm || deletingCategory || aclTarget || activationTarget || validationTarget || cleanupTarget || cancelBuildTarget || retireTarget || rollbackTarget || creationContext || selectedOperation || selectedVersionId || evaluationTarget);
   // 可选报告的判据是 official + 指纹一致，与质量状态列、releaseStages 同源。
   // 不再要求 passed：未达阈值的受控报告也是三层验证的合法证据，是否可发布由验证决定。
   const compatibleEvaluationReports = validationTarget
@@ -597,7 +629,7 @@ export function KnowledgeBaseDetailPage({ id, onOpen, initialVersionId }: {
     { value: "conversations", label: "会话", count: conversations.length },
   ];
 
-  return <section className="mx-auto max-w-[1440px] p-[26px_24px_52px] min-[1025px]:p-[20px_20px_40px]"><div className="mb-[22px] flex items-center justify-between gap-4 max-md:flex-col max-md:items-stretch"><Button variant="link" className="max-md:self-start" onClick={() => onOpen("/knowledge-bases")}>← 返回知识库</Button>{base ? <div className="flex flex-wrap items-center justify-end gap-2">{base.current_user_permission === "admin" && (base.allowed_actions ?? []).includes("edit") ? <Button variant="secondary" size="sm" onClick={openBaseEditor}>编辑基础信息</Button> : null}<Button size="sm" onClick={() => onOpen(`/chat?knowledge_base_id=${id}`)}>在此知识库提问 →</Button></div> : null}</div>{error && !dialogOpen ? <ErrorBanner>{error}</ErrorBanner> : null}{/* 加载中整页空白会让人以为知识库打不开——骨架按真实高度占位，读屏由 role="status" 播报。 */}{!base && !error ? <div className="grid gap-4"><span role="status" className="sr-only">正在读取知识库</span><Skeleton className="h-7 w-48"/><Skeleton className="h-[104px] w-full"/><Skeleton className="h-10 w-full"/><Skeleton className="h-64 w-full"/></div> : null}{base ? <>
+  return <section className="mx-auto max-w-[1440px] p-[26px_24px_52px] min-[1025px]:p-[20px_20px_40px]"><div className="mb-[22px] flex items-center justify-between gap-4 max-md:flex-col max-md:items-stretch"><Button variant="link" className="max-md:self-start" onClick={() => onOpen("/knowledge-bases")}>← 返回知识库</Button>{base ? <div className="flex flex-wrap items-center justify-end gap-2">{base.current_user_permission === "admin" ? <Button variant="secondary" size="sm" onClick={() => void openRagPolicy()}>RAG 策略</Button> : null}{base.current_user_permission === "admin" && (base.allowed_actions ?? []).includes("edit") ? <Button variant="secondary" size="sm" onClick={openBaseEditor}>编辑基础信息</Button> : null}<Button size="sm" onClick={() => onOpen(`/chat?knowledge_base_id=${id}`)}>在此知识库提问 →</Button></div> : null}</div>{error && !dialogOpen ? <ErrorBanner>{error}</ErrorBanner> : null}{/* 加载中整页空白会让人以为知识库打不开——骨架按真实高度占位，读屏由 role="status" 播报。 */}{!base && !error ? <div className="grid gap-4"><span role="status" className="sr-only">正在读取知识库</span><Skeleton className="h-7 w-48"/><Skeleton className="h-[104px] w-full"/><Skeleton className="h-10 w-full"/><Skeleton className="h-64 w-full"/></div> : null}{base ? <>
     <section className="mb-3.5 grid grid-cols-[1.1fr_1.5fr_0.7fr_0.7fr_1fr] overflow-hidden rounded-[10px] border border-line bg-surface max-md:grid-cols-2">
       <div className="grid min-h-16 min-w-0 content-center gap-[5px] border-r border-divider px-3 py-[9px] max-md:border-r-0 max-md:border-b max-md:even:border-r-0">
         <span className="text-[10px] text-[#8b92a4]">名称</span>
@@ -747,7 +779,7 @@ export function KnowledgeBaseDetailPage({ id, onOpen, initialVersionId }: {
       {activeTab === "members" ? <section className="grid gap-3">{base.current_user_permission === "admin" ? <><p className="m-0 text-[12px] text-ink-faint">Deny 优先；未配置时继承知识库成员权限。ACL 更新后立即影响下一次检索。</p><h3 className="mt-2 mb-0 text-[13px] text-[#151a31]">数据源 ACL</h3><DataTable label="数据源 ACL" rows={dataSources} rowKey={(item) => item.data_source_id} columns={dataSourceAclColumns} emptyState={{ kind: "empty", title: "暂无数据源 ACL", description: "当前知识库没有独立数据源。" }}/><h3 className="mt-2 mb-0 text-[13px] text-[#151a31]">文档 ACL</h3><DataTable label="文档 ACL" rows={documents} rowKey={(item) => item.document_id} columns={documentAclColumns} emptyState={{ kind: "empty", title: "暂无文档 ACL", description: "当前知识库没有资料。" }}/></> : <p className="text-md text-[#737c90] leading-[1.6]">你拥有该知识库的使用权限；ACL 策略仅管理员可见。</p>}</section> : null}
       {activeTab === "conversations" ? <DataTable label="会话列表" rows={conversations} rowKey={(item) => item.conversation_id} columns={conversationColumns} emptyState={{ kind: "empty", title: "还没有会话", description: "在此知识库发起问答后，会话将显示在这里。" }}/> : null}
     </Tabs>
-  </> : null}{editingBase && base ? <Dialog open title="编辑知识库" description="修改知识库名称和描述，保存后立即生效。" onClose={closeBaseEditor}>{baseEditError ? <ErrorBanner>{baseEditError}</ErrorBanner> : null}<KnowledgeBaseForm name={baseNameDraft} description={baseDescriptionDraft} busy={savingBase} submitText="保存" onName={(value) => { setBaseNameDraft(value); setBaseEditError(""); }} onDescription={(value) => { setBaseDescriptionDraft(value); setBaseEditError(""); }} onCancel={closeBaseEditor} onSubmit={saveBase}/></Dialog> : null}{selectedVersionId ? <IndexVersionDetailDialog
+  </> : null}{ragPolicyOpen && ragPolicyDraft ? <Dialog open size="md" title="RAG 策略" description="选择受控管线发布阶段，并限制 Web 检索范围。" onClose={() => { if (!savingRagPolicy) setRagPolicyOpen(false); }}><form className="grid gap-4" onSubmit={(event) => void saveRagPolicy(event)}>{ragPolicyError ? <ErrorBanner>{ragPolicyError}</ErrorBanner> : null}<label className="grid gap-2 text-sm text-ink-muted">发布阶段<Select value={ragPolicyDraft.rollout_stage} onChange={(event) => setRagPolicyDraft((current) => current ? { ...current, rollout_stage: event.target.value as RAGPolicy["rollout_stage"] } : current)}><option value="shadow">Shadow · 只记录路由，执行当前默认管线</option><option value="canary">Canary · 当前知识库执行差异管线</option><option value="full">Full · 正式启用受控模块编排</option></Select></label><label className="flex items-center gap-2 text-sm text-ink-muted"><input type="checkbox" checked={ragPolicyDraft.web_search_enabled} onChange={(event) => setRagPolicyDraft((current) => current ? { ...current, web_search_enabled: event.target.checked } : current)}/>启用受控 Web 检索</label><label className="grid gap-2 text-sm text-ink-muted">可信域名白名单<Input value={ragPolicyDraft.allowed_domains.join(", ")} placeholder="docs.example.com, support.example.com" onChange={(event) => setRagPolicyDraft((current) => current ? { ...current, allowed_domains: event.target.value.split(/[，,]/) } : current)}/><small className="text-ink-faint">只填写域名；Web 检索仅访问这些域及其子域。</small></label><div className="grid grid-cols-3 gap-3 max-sm:grid-cols-1"><label className="grid gap-2 text-sm text-ink-muted">意图置信度<Input type="number" min={0.5} max={1} step={0.05} value={ragPolicyDraft.intent_confidence_threshold} onChange={(event) => setRagPolicyDraft((current) => current ? { ...current, intent_confidence_threshold: Number(event.target.value) } : current)}/></label><label className="grid gap-2 text-sm text-ink-muted">最少证据<Input type="number" min={1} max={10} value={ragPolicyDraft.minimum_evidence_count} onChange={(event) => setRagPolicyDraft((current) => current ? { ...current, minimum_evidence_count: Number(event.target.value) } : current)}/></label><label className="grid gap-2 text-sm text-ink-muted">Web 结果上限<Input type="number" min={1} max={5} value={ragPolicyDraft.max_web_results} onChange={(event) => setRagPolicyDraft((current) => current ? { ...current, max_web_results: Number(event.target.value) } : current)}/></label></div><div className="rounded-md border border-divider bg-canvas p-3 text-xs leading-6 text-ink-faint">管线顺序由系统内置 Profile 管理，管理员不能自由增删或重新排序模块。Web 内容不会自动写入知识库。</div><DialogActions><Button variant="secondary" loading={savingRagPolicy} onClick={() => setRagPolicyOpen(false)}>取消</Button><Button type="submit" loading={savingRagPolicy}>保存策略</Button></DialogActions></form></Dialog> : null}{editingBase && base ? <Dialog open title="编辑知识库" description="修改知识库名称和描述，保存后立即生效。" onClose={closeBaseEditor}>{baseEditError ? <ErrorBanner>{baseEditError}</ErrorBanner> : null}<KnowledgeBaseForm name={baseNameDraft} description={baseDescriptionDraft} busy={savingBase} submitText="保存" onName={(value) => { setBaseNameDraft(value); setBaseEditError(""); }} onDescription={(value) => { setBaseDescriptionDraft(value); setBaseEditError(""); }} onCancel={closeBaseEditor} onSubmit={saveBase}/></Dialog> : null}{selectedVersionId ? <IndexVersionDetailDialog
     open
     knowledgeBaseId={id}
     versionId={selectedVersionId}

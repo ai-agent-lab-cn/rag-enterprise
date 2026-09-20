@@ -23,9 +23,27 @@ services:
     command: ["python", "-m", "scripts.database_migrate", "apply"]
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rag_enterprise}"
+    volumes:
+      - conversations_data:/app/data/conversations
     depends_on:
       postgres:
         condition: service_healthy
+
+  # Modular RAG 的受控 Web 补检只访问这一个自托管搜索入口；正文抓取仍由 Backend
+  # 按知识库可信域名白名单和 SSRF 规则执行。JSON API 由挂载的 settings.yml 显式开启。
+  searxng:
+    image: "${SEARXNG_IMAGE:-ghcr.io/searxng/searxng:2026.9.17-274b63b67}"
+    user: "977:977"
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: "http://127.0.0.1:8081/"
+      SEARXNG_SECRET: "${SEARXNG_SECRET:-rag-enterprise-local-searxng-secret}"
+      FORCE_OWNERSHIP: "false"
+    ports:
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - searxng_cache:/var/cache/searxng
 
   backend:
     build:
@@ -33,7 +51,10 @@ services:
       dockerfile: backend/Dockerfile
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rag_enterprise}"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "40"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "41"
+      SEARXNG_BASE_URL: "http://searxng:8080"
+      WEB_FETCH_TIMEOUT_SECONDS: "${WEB_FETCH_TIMEOUT_SECONDS:-8}"
+      WEB_FETCH_MAX_BYTES: "${WEB_FETCH_MAX_BYTES:-2097152}"
       # Backend 自己不跑评测，只据此判断「运行正式评测」能不能入队；缺这一项时创建
       # 评测任务返回 503 EVALUATION_DATABASE_NOT_CONFIGURED，其余接口不受影响。
       EVALUATION_DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/rag_enterprise_evaluation"
@@ -72,6 +93,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      searxng:
+        condition: service_started
     healthcheck:
       test:
         - CMD
@@ -92,7 +115,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rag_enterprise}"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "40"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "41"
       EMBEDDING_MODEL: "${EMBEDDING_MODEL:-shibing624/text2vec-base-chinese}"
       INDEX_WORKER_ID: "${INDEX_WORKER_ID:-worker-compose}"
       OMP_NUM_THREADS: "${OMP_NUM_THREADS:-1}"
@@ -124,7 +147,7 @@ services:
       # 库名固定为 rag_enterprise_evaluation：Worker 只允许自动创建这一个专用库，
       # 指到别处会拒绝启动，避免把临时语料写进开发或生产业务库。
       EVALUATION_DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/rag_enterprise_evaluation"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "40"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "41"
       EMBEDDING_MODEL: "${EMBEDDING_MODEL:-shibing624/text2vec-base-chinese}"
       RERANKER_MODEL: "${RERANKER_MODEL:-cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}"
       EVALUATION_WORKER_ID: "${EVALUATION_WORKER_ID:-evaluation-worker-compose}"
@@ -170,3 +193,4 @@ volumes:
   conversations_data:
   auth_data:
   audit_data:
+  searxng_cache:

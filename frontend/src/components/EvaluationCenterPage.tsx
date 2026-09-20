@@ -236,6 +236,15 @@ function PipelinePanel({ summary }: { summary: PipelineEvaluation }) {
         columns={PIPELINE_COLUMNS}
         emptyState={{ kind: "empty", title: "没有工程指标。", description: "六项计数是固定的，出现这句说明数据构造失败。" }}
       />
+      <h4 className="mt-6 mb-2 text-sm text-ink">Modular RAG 分管线指标</h4>
+      {summary.rag_profiles.length ? (
+        <div className="overflow-x-auto rounded-md border border-divider">
+          <table className="w-full min-w-[720px] border-collapse text-left text-xs">
+            <thead className="bg-canvas text-ink-faint"><tr><th className="p-3">意图 / Profile</th><th className="p-3 text-right">执行</th><th className="p-3 text-right">任务成功率</th><th className="p-3 text-right">证据不足率</th><th className="p-3 text-right">降级率</th><th className="p-3 text-right">P95</th></tr></thead>
+            <tbody>{summary.rag_profiles.map((item) => <tr className="border-t border-divider" key={`${item.intent}-${item.pipeline_profile}-${item.profile_version}`}><td className="p-3"><strong>{item.intent ?? "受控返回"}</strong><span className="ml-2 text-ink-faint">{item.pipeline_profile ?? "—"}@{item.profile_version ?? "—"}</span></td><td className="p-3 text-right tabular-nums">{item.execution_count}</td><td className="p-3 text-right tabular-nums">{(item.task_success_rate * 100).toFixed(1)}%</td><td className="p-3 text-right tabular-nums">{(item.insufficient_evidence_rate * 100).toFixed(1)}%</td><td className="p-3 text-right tabular-nums">{(item.fallback_rate * 100).toFixed(1)}%</td><td className="p-3 text-right tabular-nums">{(item.p95_latency_ms / 1000).toFixed(2)} s</td></tr>)}</tbody>
+          </table>
+        </div>
+      ) : <p className="text-xs text-ink-faint">尚无 Modular RAG 在线执行记录。</p>}
     </div>
   );
 }

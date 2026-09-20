@@ -51,11 +51,13 @@ from .pipeline_governance import (
     update_sync_resource_for_job,
     upsert_document_index_state,
 )
+from .postgres_history import PostgresRAGPolicyRepository
 from .retrieval_access import RetrievalAccessContext
 from .schemas import DocumentInfo, QueryMetadataFilter
 from .security import write_private_file
 from .service import RAGService
 from .store import RetrievedChunk
+from .web_retrieval import SafeWebContentFetcher, SearXNGWebSearchProvider
 
 # 任务失败后的退避间隔。索引与分类共用同一个值：两者的失败原因同源（外部依赖
 # 暂时不可用），没有理由给它们两套节奏。
@@ -584,6 +586,18 @@ class PostgresAsyncRAGService(RAGService):
                 lambda knowledge_base_id, index_version_id: store.chunk_fingerprint(
                     knowledge_base_id, index_version_id=index_version_id
                 ),
+            ),
+            policy_repository=PostgresRAGPolicyRepository(settings.database_url),
+            web_provider=(
+                SearXNGWebSearchProvider(
+                    settings.searxng_base_url,
+                    SafeWebContentFetcher(
+                        settings.web_fetch_timeout_seconds,
+                        settings.web_fetch_max_bytes,
+                    ),
+                )
+                if settings.searxng_base_url
+                else None
             ),
         )
 

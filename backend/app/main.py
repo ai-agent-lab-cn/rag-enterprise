@@ -3,7 +3,7 @@ import json
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Annotated
 
@@ -25,6 +25,7 @@ from .evaluation_governance import BadCaseUpdate
 from .evaluation_reports import EvaluationReportRepository
 from .generation_models import GenerationProviderState
 from .history import ConversationRepository
+from .modular_rag import DEFAULT_PIPELINE_PROFILES, RAGPolicy
 from .index_evaluation_runs import (
     cancel_evaluation_run,
     create_evaluation_run,
@@ -78,6 +79,7 @@ from .postgres_documents import (
     retry_index_version_build,
 )
 from .postgres_evaluation import PostgresEvaluationGovernanceRepository
+from .postgres_history import PostgresConversationRepository, PostgresRAGPolicyRepository
 from .postgres_repositories import (
     PostgresAuthRepository,
     PostgresCategoryRepository,
@@ -155,8 +157,12 @@ from .schemas import (
     OperationResponse,
     ParsingPreviewResponse,
     PipelineEvaluationResponse,
+    PipelineProfileResponse,
+    QueryExecutionDetailResponse,
     QueryRequest,
     QueryResponse,
+    RAGPolicyResponse,
+    RAGPolicyUpdate,
     ReadinessResponse,
     ReprocessDocumentVersionRequest,
     SyncEnqueueResponse,
@@ -265,11 +271,31 @@ CategoryTemplatesDependency = Annotated[
 
 
 @lru_cache
-def get_conversations() -> ConversationRepository:
-    return ConversationRepository(get_settings().conversations_path)
+def get_conversations() -> ConversationRepository | PostgresConversationRepository:
+    settings = get_settings()
+    if settings.database_url:
+        repository = PostgresConversationRepository(settings.database_url)
+        repository.ensure_cutover_ready(settings.conversations_path)
+        return repository
+    return ConversationRepository(settings.conversations_path)
 
 
-ConversationsDependency = Annotated[ConversationRepository, Depends(get_conversations)]
+ConversationsDependency = Annotated[
+    ConversationRepository | PostgresConversationRepository,
+    Depends(get_conversations),
+]
+
+
+@lru_cache
+def get_rag_policies() -> PostgresRAGPolicyRepository | None:
+    database_url = get_settings().database_url
+    return PostgresRAGPolicyRepository(database_url) if database_url else None
+
+
+RAGPoliciesDependency = Annotated[
+    PostgresRAGPolicyRepository | None,
+    Depends(get_rag_policies),
+]
 
 
 @lru_cache
@@ -2540,6 +2566,9 @@ def create_app() -> FastAPI:
         if governance is None:
             raise AppError("POSTGRES_REQUIRED", "工程指标需要 PostgreSQL 运行时。", 503)
         summary = await run_in_threadpool(governance.pipeline_summary, knowledge_base_id, data_source_id)
+        summary["rag_profiles"] = await run_in_threadpool(
+            governance.rag_pipeline_summary, knowledge_base_id
+        )
         return PipelineEvaluationResponse(**summary)
 
     @app.get(
@@ -2851,6 +2880,114 @@ def create_app() -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    @app.get("/api/rag/pipeline-profiles", response_model=list[PipelineProfileResponse])
+    async def list_rag_pipeline_profiles(
+        current: CurrentSessionDependency,
+    ) -> list[PipelineProfileResponse]:
+        _require_admin(current.user)
+        return [
+            PipelineProfileResponse(
+                profile_id=item.profile_id,
+                version=item.version,
+                intent=item.intent,
+                modules=list(item.modules),
+                required_capabilities=list(item.required_capabilities),
+                parameters=item.parameters,
+            )
+            for item in DEFAULT_PIPELINE_PROFILES.values()
+        ]
+
+    @app.get(
+        "/api/knowledge-bases/{knowledge_base_id}/rag-policy",
+        response_model=RAGPolicyResponse,
+    )
+    async def get_knowledge_base_rag_policy(
+        knowledge_base_id: str,
+        knowledge_bases: KnowledgeBasesDependency,
+        policies: RAGPoliciesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> RAGPolicyResponse:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if policies is None:
+            raise AppError("POSTGRES_REQUIRED", "RAG 策略依赖 PostgreSQL 运行时。", 503)
+        policy = await run_in_threadpool(policies.get, knowledge_base_id)
+        return RAGPolicyResponse(knowledge_base_id=knowledge_base_id, **policy.snapshot())
+
+    @app.put(
+        "/api/knowledge-bases/{knowledge_base_id}/rag-policy",
+        response_model=RAGPolicyResponse,
+    )
+    async def update_knowledge_base_rag_policy(
+        knowledge_base_id: str,
+        payload: RAGPolicyUpdate,
+        knowledge_bases: KnowledgeBasesDependency,
+        policies: RAGPoliciesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> RAGPolicyResponse:
+        _require_admin(current.user)
+        await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
+        if policies is None:
+            raise AppError("POSTGRES_REQUIRED", "RAG 策略依赖 PostgreSQL 运行时。", 503)
+        policy = RAGPolicy(
+            rollout_stage=payload.rollout_stage,
+            web_search_enabled=payload.web_search_enabled,
+            allowed_domains=tuple(payload.allowed_domains),
+            intent_confidence_threshold=payload.intent_confidence_threshold,
+            minimum_evidence_count=payload.minimum_evidence_count,
+            max_web_results=payload.max_web_results,
+            profile_versions={
+                item.intent: item.version for item in DEFAULT_PIPELINE_PROFILES.values()
+            },
+        )
+        try:
+            updated = await run_in_threadpool(
+                policies.update, knowledge_base_id, policy, current.user.user_id
+            )
+        except ValueError as exc:
+            raise AppError("RAG_ROLLOUT_GATE_BLOCKED", str(exc), 409) from exc
+        await _record_audit(
+            audit,
+            "knowledge_base.rag_policy.update",
+            current.user,
+            "knowledge_base",
+            knowledge_base_id,
+            metadata={
+                "rollout_stage": updated.rollout_stage,
+                "web_search_enabled": updated.web_search_enabled,
+                "allowed_domain_count": len(updated.allowed_domains),
+            },
+        )
+        return RAGPolicyResponse(knowledge_base_id=knowledge_base_id, **updated.snapshot())
+
+    @app.get(
+        "/api/query-executions/{execution_id}",
+        response_model=QueryExecutionDetailResponse,
+    )
+    async def get_query_execution(
+        execution_id: str,
+        conversations: ConversationsDependency,
+        knowledge_bases: KnowledgeBasesDependency,
+        current: CurrentSessionDependency,
+        auth: AuthRepositoryDependency,
+    ) -> QueryExecutionDetailResponse:
+        if not isinstance(conversations, PostgresConversationRepository):
+            raise AppError("POSTGRES_REQUIRED", "模块执行记录依赖 PostgreSQL 运行时。", 503)
+        item = await run_in_threadpool(
+            conversations.get_execution,
+            execution_id,
+            current.user.user_id,
+        )
+        if item is None:
+            raise AppError("QUERY_EXECUTION_NOT_FOUND", "未找到该查询执行记录。", 404)
+        await _require_accessible_knowledge_base(
+            knowledge_bases, auth, current.user, str(item["knowledge_base_id"])
+        )
+        return QueryExecutionDetailResponse(**item)
+
     @app.get(
         "/api/knowledge-bases/{knowledge_base_id}/conversations",
         response_model=list[ConversationSummaryResponse],
@@ -3133,8 +3270,9 @@ def _redact_unreadable_sources(
     名单、下架或删除之后，历史会话里那段原文仍可无限期读取——检索侧的收紧对已生成的
     记录完全无效。
 
-    只遮蔽 ``text``，保留 filename / 定位信息与分数：用户需要知道「当时引用过这份资料」，
+    只遮蔽知识库证据的 ``text``，保留 filename / 定位信息与分数：用户需要知道「当时引用过这份资料」，
     否则历史会话会变成一段没有出处的答案，看起来像记录损坏。这也是为什么不整条删掉。
+    Web 证据不属于知识库 Chunk ACL，保留提问时已通过白名单和 SSRF 校验的只读快照。
 
     ``sources`` 为 None（非 PostgreSQL 运行时）时不遮蔽——那种部署没有 ACL 数据可查，
     静默放行比静默清空更可预期。
@@ -3146,7 +3284,11 @@ def _redact_unreadable_sources(
         str(item["chunk_id"])
         for record in records
         for item in (record.get("sources") or [])
-        if isinstance(item, dict) and item.get("chunk_id")
+        if (
+            isinstance(item, dict)
+            and item.get("chunk_id")
+            and item.get("evidence_source_type", "knowledge_base") != "web"
+        )
     ]
     if not chunk_ids:
         return
@@ -3154,6 +3296,8 @@ def _redact_unreadable_sources(
     for record in records:
         for item in record.get("sources") or []:
             if not isinstance(item, dict):
+                continue
+            if item.get("evidence_source_type", "knowledge_base") == "web":
                 continue
             if str(item.get("chunk_id")) not in readable:
                 item["text"] = ""
@@ -3368,7 +3512,7 @@ async def _delete_document(
 async def _execute_recorded_query(
     payload: QueryRequest,
     service: RAGServiceProtocol,
-    conversations: ConversationRepository,
+    conversations: ConversationRepository | PostgresConversationRepository,
     knowledge_base_id: str,
     settings,
     abuse_protection: AbuseProtection,
@@ -3390,6 +3534,14 @@ async def _execute_recorded_query(
         raise AppError("CONVERSATION_NOT_FOUND", "未找到该知识库中的会话。", 404) from exc
 
     started = time.perf_counter()
+    execution_started_at = datetime.now(UTC)
+    history = await run_in_threadpool(
+        conversations.get_conversation,
+        knowledge_base_id,
+        conversation["conversation_id"],
+        user_id,
+    )
+    recent_records = list((history or {}).get("records") or [])[-6:]
     try:
         with abuse_protection.concurrency.slot():
             result = await run_in_threadpool(
@@ -3401,6 +3553,8 @@ async def _execute_recorded_query(
                 payload.filters,
                 RetrievalAccessContext(user_id),
                 event_callback,
+                recent_records,
+                None,
             )
     except AppError as exc:
         active_generator = get_generator()
@@ -3431,6 +3585,14 @@ async def _execute_recorded_query(
             bad_case_category=error_details.get("bad_case_category"),
             error_code=exc.code,
             error_message=exc.message,
+            execution_id=error_details.get("execution_id"),
+            routing=error_details.get("routing"),
+            pipeline_profile=error_details.get("pipeline_profile"),
+            profile_version=error_details.get("profile_version"),
+            policy_snapshot=error_details.get("policy_snapshot"),
+            active_index_version_id=error_details.get("active_index_version_id"),
+            module_executions=error_details.get("module_executions"),
+            execution_started_at=execution_started_at,
         )
         governance = get_evaluation_governance()
         if governance and error_details.get("bad_case_category"):
@@ -3485,6 +3647,14 @@ async def _execute_recorded_query(
         bad_case_category=(f"answer_{result.answer_status}" if record_status == "failed" else None),
         error_code=result.error_code,
         error_message=result.error_message,
+        execution_id=result.execution_id,
+        routing=(result.routing.model_dump(mode="json") if result.routing else None),
+        pipeline_profile=result.pipeline_profile,
+        profile_version=result.profile_version,
+        policy_snapshot=result.policy_snapshot,
+        active_index_version_id=result.active_index_version_id,
+        module_executions=[item.model_dump(mode="json") for item in result.module_executions],
+        execution_started_at=execution_started_at,
     )
     if record_status == "failed":
         governance = get_evaluation_governance()

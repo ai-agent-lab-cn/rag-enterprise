@@ -1,3 +1,4 @@
+import ipaddress
 import re
 import unicodedata
 from datetime import datetime
@@ -661,6 +662,8 @@ class Source(BaseModel):
     column_end: int | None = None
     source_url: str | None = None
     external_resource_id: str | None = None
+    evidence_source_type: Literal["knowledge_base", "web"] = "knowledge_base"
+    retrieved_at: datetime | None = None
 
 
 class CitationResponse(BaseModel):
@@ -698,6 +701,108 @@ class QueryExecutionMetadata(BaseModel):
     uncategorized_candidate_count: int = Field(default=0, ge=0)
 
 
+class RoutingMetadata(BaseModel):
+    intent: Literal["fact_lookup", "summarize", "compare", "procedure"] | None = None
+    confidence: float = Field(ge=0, le=1)
+    reason: str
+    control_outcome: Literal["route", "clarify", "out_of_scope"]
+    original_question: str
+    effective_question: str
+    follow_up_rewritten: bool = False
+    requires_web: bool = False
+    classifier_model: str | None = None
+    fallback_used: bool = False
+    pipeline_profile: str | None = None
+    profile_version: str | None = None
+
+
+class ModuleExecutionResponse(BaseModel):
+    module_execution_id: str
+    sequence: int = Field(ge=1)
+    module_key: str
+    module_version: str
+    status: Literal["succeeded", "failed", "skipped", "degraded"]
+    attempt: int = Field(default=1, ge=1)
+    duration_ms: float = Field(ge=0)
+    started_at: float | datetime
+    finished_at: float | datetime
+    input_hash: str
+    output_hash: str | None = None
+    metrics: dict[str, object] = Field(default_factory=dict)
+    error_code: str | None = None
+    error_message: str | None = None
+    fallback_reason: str | None = None
+
+
+class RAGPolicyUpdate(BaseModel):
+    rollout_stage: Literal["shadow", "canary", "full"] = "shadow"
+    web_search_enabled: bool = False
+    allowed_domains: list[str] = Field(default_factory=list, max_length=50)
+    intent_confidence_threshold: float = Field(default=0.8, ge=0.5, le=1)
+    minimum_evidence_count: int = Field(default=1, ge=1, le=10)
+    max_web_results: int = Field(default=5, ge=1, le=5)
+
+    @field_validator("allowed_domains")
+    @classmethod
+    def normalize_domains(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw in value:
+            domain = raw.strip().rstrip(".").casefold()
+            if not domain or "://" in domain or "/" in domain or "@" in domain:
+                raise ValueError("可信域名只能填写域名，不包含协议、路径或凭据")
+            if domain == "localhost" or domain.endswith(".localhost"):
+                raise ValueError("可信域名不能指向本机")
+            try:
+                ipaddress.ip_address(domain.strip("[]"))
+            except ValueError:
+                if not re.fullmatch(
+                    r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+                    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+                    domain,
+                ):
+                    raise ValueError("可信域名格式不正确") from None
+            else:
+                raise ValueError("可信域名不能直接填写 IP 地址")
+            if domain not in normalized:
+                normalized.append(domain)
+        return normalized
+
+    @model_validator(mode="after")
+    def require_allowlist_for_web(self) -> "RAGPolicyUpdate":
+        if self.web_search_enabled and not self.allowed_domains:
+            raise ValueError("启用 Web 检索前至少配置一个可信域名")
+        return self
+
+
+class RAGPolicyResponse(RAGPolicyUpdate):
+    knowledge_base_id: str
+    profile_versions: dict[str, str] = Field(default_factory=dict)
+
+
+class PipelineProfileResponse(BaseModel):
+    profile_id: str
+    version: str
+    intent: Literal["fact_lookup", "summarize", "compare", "procedure"]
+    modules: list[str]
+    required_capabilities: list[str]
+    parameters: dict[str, object] = Field(default_factory=dict)
+
+
+class QueryExecutionDetailResponse(BaseModel):
+    execution_id: str
+    knowledge_base_id: str
+    conversation_id: str
+    status: Literal["succeeded", "failed"]
+    routing: RoutingMetadata | None = None
+    pipeline_profile: str | None = None
+    profile_version: str | None = None
+    active_index_version_id: str | None = None
+    policy_snapshot: dict[str, object] = Field(default_factory=dict)
+    total_latency_ms: float = 0
+    modules: list[ModuleExecutionResponse] = Field(default_factory=list)
+    created_at: datetime
+
+
 class GenerationGovernance(BaseModel):
     minimum_evidence_count: int = Field(default=1, ge=1)
     evidence_count: int = Field(ge=0)
@@ -732,6 +837,13 @@ class QueryResponse(BaseModel):
     prompt_hash: str | None = None
     query_metadata: QueryExecutionMetadata | None = None
     generation_governance: GenerationGovernance | None = None
+    execution_id: str | None = None
+    routing: RoutingMetadata | None = None
+    pipeline_profile: str | None = None
+    profile_version: str | None = None
+    active_index_version_id: str | None = None
+    policy_snapshot: dict[str, object] = Field(default_factory=dict)
+    module_executions: list[ModuleExecutionResponse] = Field(default_factory=list)
 
 
 class AnswerRecordResponse(BaseModel):
@@ -763,6 +875,13 @@ class AnswerRecordResponse(BaseModel):
     error_code: str | None
     error_message: str | None
     created_at: datetime
+    execution_id: str | None = None
+    routing: RoutingMetadata | None = None
+    pipeline_profile: str | None = None
+    profile_version: str | None = None
+    module_summary: list[ModuleExecutionResponse] = Field(default_factory=list)
+    policy_snapshot: dict[str, object] = Field(default_factory=dict)
+    active_index_version_id: str | None = None
 
 
 class BadCaseResponse(BaseModel):
@@ -777,6 +896,20 @@ class BadCaseResponse(BaseModel):
     created_at: datetime
 
 
+class RAGPipelineMetricResponse(BaseModel):
+    intent: Literal["fact_lookup", "summarize", "compare", "procedure"] | None = None
+    pipeline_profile: str | None = None
+    profile_version: str | None = None
+    execution_count: int = Field(ge=0)
+    successful_count: int = Field(ge=0)
+    insufficient_evidence_count: int = Field(ge=0)
+    fallback_count: int = Field(ge=0)
+    task_success_rate: float = Field(ge=0, le=1)
+    insufficient_evidence_rate: float = Field(ge=0, le=1)
+    fallback_rate: float = Field(ge=0, le=1)
+    p95_latency_ms: float = Field(ge=0)
+
+
 class PipelineEvaluationResponse(BaseModel):
     run_count: int = Field(ge=0)
     added_count: int = Field(ge=0)
@@ -787,6 +920,7 @@ class PipelineEvaluationResponse(BaseModel):
     retry_count: int = Field(ge=0)
     failure_rate: float = Field(ge=0, le=1)
     average_duration_ms: float = Field(ge=0)
+    rag_profiles: list[RAGPipelineMetricResponse] = Field(default_factory=list)
 
 
 class GovernedBadCaseResponse(BaseModel):

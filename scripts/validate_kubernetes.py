@@ -81,7 +81,16 @@ def validate(manifest_root: Path = MANIFEST_ROOT) -> list[str]:
         ):
             errors.append(f"{name} 未显式使用非 root 数字 UID")
         for container in containers:
-            if container.get("imagePullPolicy") != "Never":
+            if name == "rag-searxng":
+                image = str(container.get("image", ""))
+                if container.get("imagePullPolicy") != "IfNotPresent":
+                    errors.append("rag-searxng 必须使用 IfNotPresent 拉取固定第三方镜像")
+                if not re.fullmatch(
+                    r"ghcr\.io/searxng/searxng:\d{4}\.\d{1,2}\.\d{1,2}-[a-f0-9]{9}",
+                    image,
+                ):
+                    errors.append("rag-searxng 必须固定到官方日期与 commit 镜像标签")
+            elif container.get("imagePullPolicy") != "Never":
                 errors.append(f"{name}/{container.get('name')} 未锁定为 Docker Desktop 本地镜像")
             if not container.get("resources", {}).get("requests") or not container.get("resources", {}).get(
                 "limits"

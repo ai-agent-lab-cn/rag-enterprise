@@ -12,6 +12,7 @@ const LATENCY_LABELS: Record<string, string> = {
   total: "总耗时",
 };
 const SOURCE_TYPE_LABELS: Record<string, string> = { file: "文件", object_storage: "对象存储", web: "网页", connector: "连接器" };
+const INTENT_LABELS: Record<string, string> = { fact_lookup: "事实查找", summarize: "摘要总结", compare: "对比分析", procedure: "操作流程" };
 
 /** 统计候选分别由哪几路召回命中；通路缺失的历史记录不参与统计。 */
 function channelBreakdown(sources: Source[]) {
@@ -38,6 +39,10 @@ export function TechnicalDrawer({ result }: TechnicalDrawerProps) {
   const hybrid = breakdown.labelled > 0 && (breakdown.both > 0 || breakdown.lexicalOnly > 0);
   const queryMetadata = result.query_metadata;
   const governance = result.generation_governance;
+  const routing = result.routing;
+  const modules = result.module_executions ?? [];
+  const webSourceCount = result.sources.filter((item) => item.evidence_source_type === "web").length;
+  const rolloutStage = typeof result.policy_snapshot?.rollout_stage === "string" ? result.policy_snapshot.rollout_stage : null;
   const appliedFilters = queryMetadata?.applied_filters;
   const filterLabels = [
     ...(appliedFilters?.categories ?? []).map((item) => `分类：${item}`),
@@ -59,8 +64,11 @@ export function TechnicalDrawer({ result }: TechnicalDrawerProps) {
       <div className="grid grid-cols-1 border-t border-divider md:grid-cols-3">
         <section className="min-w-0 border-b border-divider p-3.5 last:border-b-0 md:border-r md:border-b-0 md:last:border-r-0">
           <span className="text-[12px] text-[#7165d8] tracking-[0.04em] font-semibold">检索过程</span>
-          <h3 className="mt-[7px] mb-[7px] overflow-hidden text-ellipsis whitespace-nowrap text-sm text-ink">{hybrid ? "向量 + 词法 → 精排 → 生成" : "召回 → 精排 → 生成"}</h3>
+          <h3 className="mt-[7px] mb-[7px] overflow-hidden text-ellipsis whitespace-nowrap text-sm text-ink">{result.pipeline_profile ? `${result.pipeline_profile}@${result.profile_version ?? "—"}` : hybrid ? "向量 + 词法 → 精排 → 生成" : "召回 → 精排 → 生成"}</h3>
+          {routing ? <p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">意图：{routing.intent ? INTENT_LABELS[routing.intent] ?? routing.intent : routing.control_outcome} · 置信度 {(routing.confidence * 100).toFixed(0)}%{routing.follow_up_rewritten ? " · 已改写追问" : ""}{routing.fallback_used ? " · 已降级" : ""}<br/>路由依据：{routing.reason}</p> : null}
           <p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">返回 {result.sources.length} 条来源，并按融合排序结果展示。</p>
+          {webSourceCount ? <p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">来源构成：知识库 {result.sources.length - webSourceCount} 条 / Web {webSourceCount} 条</p> : null}
+          {rolloutStage ? <p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">发布阶段：{rolloutStage} · 联网：{webSourceCount ? "已触发并采用证据" : "未采用 Web 证据"}</p> : null}
           {hybrid ? (
             <p className="mt-[10px] mb-[10px] text-xs leading-[1.5] text-ink-faint">
               命中通路：双路 {breakdown.both} 条 / 仅向量 {breakdown.vectorOnly} 条 / 仅词法{" "}
@@ -96,6 +104,9 @@ export function TechnicalDrawer({ result }: TechnicalDrawerProps) {
               </div>
             ))}
           </dl>
+          {modules.length ? <ol className="mt-3 grid gap-1.5 border-t border-divider pt-3 pl-0 list-none" aria-label="模块执行时间线">{modules.map((item) => <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-2 text-[11px] text-ink-faint" key={item.module_execution_id}><span className="min-w-0 truncate" title={item.module_key}>{item.sequence}. {item.module_key}</span><span className={item.status === "failed" ? "text-danger-text" : item.status === "degraded" ? "text-warning" : ""}>{item.status} · {item.duration_ms.toFixed(0)} ms</span>{item.fallback_reason || item.error_message ? <small className="col-span-2 mt-0.5 leading-5 text-warning">{item.fallback_reason ?? item.error_message}</small> : null}</li>)}</ol> : null}
+          {result.active_index_version_id ? <p className="mt-3 mb-0 break-all text-[10px] text-ink-faint">Active Index：{result.active_index_version_id}</p> : null}
+          {result.execution_id ? <p className="mt-3 mb-0 break-all text-[10px] text-ink-faint" title={result.execution_id}>执行记录：{result.execution_id}</p> : null}
         </section>
       </div>
     </details>

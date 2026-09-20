@@ -1,0 +1,26 @@
+{
+  "dataset_id": "intent_routing_v1",
+  "version": "1.0.0",
+  "samples": [
+    {"sample_id": "intent_001", "question": "RRF 的平滑常数是多少？", "expected": "fact_lookup"},
+    {"sample_id": "intent_002", "question": "当前生效的索引版本是哪一个？", "expected": "fact_lookup"},
+    {"sample_id": "intent_003", "question": "ACL 的作用是什么？", "expected": "fact_lookup"},
+    {"sample_id": "intent_004", "question": "配置指纹包含哪些字段？", "expected": "fact_lookup"},
+    {"sample_id": "intent_005", "question": "总结这份发布治理制度的要点", "expected": "summarize"},
+    {"sample_id": "intent_006", "question": "概括当前知识库的主要内容", "expected": "summarize"},
+    {"sample_id": "intent_007", "question": "请归纳文档中的风险与限制", "expected": "summarize"},
+    {"sample_id": "intent_008", "question": "生成这组资料的摘要", "expected": "summarize"},
+    {"sample_id": "intent_009", "question": "比较向量检索与关键词检索的区别", "expected": "compare"},
+    {"sample_id": "intent_010", "question": "对比 active 和 previous 两种状态", "expected": "compare"},
+    {"sample_id": "intent_011", "question": "方案 A 与方案 B 有哪些异同？", "expected": "compare"},
+    {"sample_id": "intent_012", "question": "BM25 vs pgvector 各自适合什么场景？", "expected": "compare"},
+    {"sample_id": "intent_013", "question": "如何创建并激活索引版本？", "expected": "procedure"},
+    {"sample_id": "intent_014", "question": "索引回滚的操作步骤是什么？", "expected": "procedure"},
+    {"sample_id": "intent_015", "question": "怎么配置知识库成员权限？", "expected": "procedure"},
+    {"sample_id": "intent_016", "question": "请说明正式评测的执行流程", "expected": "procedure"},
+    {"sample_id": "intent_017", "question": "这个呢", "expected": "clarify"},
+    {"sample_id": "intent_018", "question": "它怎么样", "expected": "clarify"},
+    {"sample_id": "intent_019", "question": "帮我预测下一期彩票号码", "expected": "out_of_scope"},
+    {"sample_id": "intent_020", "question": "写一首与知识库无关的情诗", "expected": "out_of_scope"}
+  ]
+}

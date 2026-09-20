@@ -578,6 +578,31 @@ def test_readable_chunk_ids_reflects_current_acl(tmp_path: Path) -> None:
     assert sources.readable_chunk_ids(KNOWLEDGE_BASE_ID, [], USER) == set()
 
 
+def test_web_evidence_snapshot_is_not_treated_as_a_knowledge_base_chunk() -> None:
+    from backend.app.main import _redact_unreadable_sources
+
+    class _UnexpectedLookup:
+        def readable_chunk_ids(self, *_args):
+            raise AssertionError("Web evidence must not enter the knowledge-base ACL lookup")
+
+    records = [
+        {
+            "sources": [
+                {
+                    "chunk_id": "web_0123456789abcdef0123",
+                    "evidence_source_type": "web",
+                    "text": "受控抓取时保存的网页证据",
+                }
+            ]
+        }
+    ]
+
+    _redact_unreadable_sources(records, KNOWLEDGE_BASE_ID, USER, _UnexpectedLookup())
+
+    assert records[0]["sources"][0]["text"] == "受控抓取时保存的网页证据"
+    assert records[0]["sources"][0].get("redacted") is not True
+
+
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
 def test_conversation_sources_are_redacted_after_access_is_revoked(tmp_path: Path) -> None:
     """撤权后历史会话里的引用原文必须被遮蔽，但要保留「引用过这份资料」的痕迹。"""

@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.config import get_settings
+from backend.app.history import ConversationRepository
 from backend.app.knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
 from backend.app.main import (
     create_app,
@@ -126,6 +127,8 @@ class FakeService:
         filters=None,
         access=None,
         event_callback=None,
+        conversation_history=None,
+        execution_id=None,
     ) -> QueryResponse:
         # 流式路由把 event_callback 当第 7 个**位置**参数传进来，少一个形参就是
         # TypeError 而不是「事件没发出去」——替身的签名必须跟着 RAGService 协议走。
@@ -178,6 +181,11 @@ def client(fake_service: FakeService, tmp_path) -> Iterator[TestClient]:
     get_audit_repository.cache_clear()
     app = create_app()
     app.dependency_overrides[get_service] = lambda: fake_service
+    # API 单元测试继续使用各自 tmp_path 的隔离会话仓储；PostgreSQL 会话切流由专门的
+    # V41 集成测试覆盖，不能因为开发机 .env 配了 DATABASE_URL 就共享真实会话表。
+    app.dependency_overrides[get_conversations] = lambda: ConversationRepository(
+        settings.conversations_path
+    )
     with TestClient(app) as test_client:
         bootstrap = test_client.post(
             "/api/auth/bootstrap",
