@@ -64,7 +64,7 @@ jobs:
             --health-interval 5s \
             --health-timeout 5s \
             --health-retries 20 \
-            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
           for _ in $(seq 30); do
             if [ "$(docker inspect --format '{{.State.Health.Status}}' minio)" = healthy ]; then
               echo "MinIO 已就绪"
@@ -218,6 +218,7 @@ jobs:
           RELEASE_FRONTEND_IMAGE: example.invalid/frontend@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
           RELEASE_POSTGRES_IMAGE: docker.io/pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
           POSTGRES_PASSWORD: release-contract-placeholder
+          SEARXNG_SECRET: release-contract-placeholder
           ACTIVE_POSTGRES_ROOT: /tmp/rongrag-release-contract/postgres
           ACTIVE_UPLOADS_ROOT: /tmp/rongrag-release-contract/uploads
           ACTIVE_BACKUPS_ROOT: /tmp/rongrag-release-contract/backups

@@ -19,6 +19,7 @@ from backend.evaluation.intent_routing import (
     load_intent_dataset,
 )
 
+
 # 正式意图路由评测脚本
 def main() -> None:
     parser = argparse.ArgumentParser(description="执行 Modular RAG 正式意图路由评测")
@@ -31,9 +32,7 @@ def main() -> None:
     parser.add_argument("--record", action="store_true", help="通过后写入正式评测运行事实")
     args = parser.parse_args()
     generator = get_generator()
-    result = evaluate_intent_router(
-        QueryIntentRouter(generator), load_intent_dataset(args.dataset)
-    )
+    result = evaluate_intent_router(QueryIntentRouter(generator), load_intent_dataset(args.dataset))
     print(json.dumps({**result.__dict__, "passed": result.passed}, ensure_ascii=False, indent=2))
     if not result.passed:
         raise SystemExit(1)
@@ -47,6 +46,7 @@ def main() -> None:
             classifier_model=generator.model_name,
             result=result,
         )
+
 
 # 记录评测报告
 def _record_report(

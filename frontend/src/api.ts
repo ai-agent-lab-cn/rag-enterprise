@@ -82,12 +82,9 @@ export class ApiError extends Error {
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  let requestInit = init;
-  if (accessToken) {
-    const headers = new Headers(init?.headers);
-    headers.set("Authorization", `Bearer ${accessToken}`);
-    requestInit = { ...init, headers };
-  }
+  const headers = new Headers(init?.headers);
+  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+  const requestInit: RequestInit = { ...init, headers };
   const response = await fetch(url, requestInit);
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as ApiErrorPayload;
@@ -385,9 +382,13 @@ export const api = {
     const query = new URLSearchParams(Object.entries(filters ?? {}).filter((entry): entry is [string, string] => Boolean(entry[1])));
     return request<GovernedBadCase[]>(`/api/evaluation-center/bad-cases${query.size ? `?${query}` : ""}`);
   },
-  updateGovernedBadCase: (caseId: string, update: { status: GovernedBadCase["status"]; severity?: GovernedBadCase["severity"]; root_cause?: string; assignee?: string; fix_commit?: string; regression_passed?: boolean }) => request<GovernedBadCase>(
+  updateGovernedBadCase: (caseId: string, update: { status: GovernedBadCase["status"]; severity?: GovernedBadCase["severity"]; root_cause?: string; assignee?: string; fix_commit?: string }) => request<GovernedBadCase>(
     `/api/evaluation-center/bad-cases/${encodeURIComponent(caseId)}`,
     { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update) },
+  ),
+  runGovernedBadCaseRegression: (caseId: string) => request<GovernedBadCase>(
+    `/api/evaluation-center/bad-cases/${encodeURIComponent(caseId)}/regressions`,
+    { method: "POST" },
   ),
   listAcceptanceRuns: (knowledgeBaseId?: string) => request<AcceptanceRun[]>(`/api/evaluation-center/acceptance-runs${knowledgeBaseId ? `?knowledge_base_id=${encodeURIComponent(knowledgeBaseId)}` : ""}`),
   startAcceptanceRun: (knowledgeBaseId: string) => request<AcceptanceRun>("/api/evaluation-center/acceptance-runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ knowledge_base_id: knowledgeBaseId }) }),

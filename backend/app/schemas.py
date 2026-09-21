@@ -943,6 +943,9 @@ class GovernedBadCaseResponse(BaseModel):
     fix_commit: str | None = None
     status: Literal["new", "confirmed", "fixing", "resolved", "regression_added", "ignored"]
     regression_added: bool = False
+    regression_evaluation_run_id: str | None = None
+    regression_passed: bool | None = None
+    regression_run_at: datetime | None = None
     created_at: datetime
     confirmed_at: datetime | None = None
     resolved_at: datetime | None = None
@@ -955,7 +958,6 @@ class GovernedBadCaseUpdate(BaseModel):
     severity: Literal["low", "medium", "high", "critical"] | None = None
     assignee: str | None = Field(default=None, max_length=120)
     fix_commit: str | None = Field(default=None, pattern=r"^[0-9a-f]{7,40}$")
-    regression_passed: bool | None = None
 
 
 class AcceptanceRunCreate(BaseModel):

@@ -234,12 +234,12 @@ spec:
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
           startupProbe:
             exec:
-              command: [python, -m, scripts.database_migrate, check, --required-version, "41"]
+              command: [python, -m, scripts.database_migrate, check, --required-version, "42"]
             periodSeconds: 5
             failureThreshold: 60
           readinessProbe:
             exec:
-              command: [python, -m, scripts.database_migrate, check, --required-version, "41"]
+              command: [python, -m, scripts.database_migrate, check, --required-version, "42"]
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
@@ -306,12 +306,12 @@ spec:
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
           startupProbe:
             exec:
-              command: [python, -m, scripts.database_migrate, check, --required-version, "41"]
+              command: [python, -m, scripts.database_migrate, check, --required-version, "42"]
             periodSeconds: 5
             failureThreshold: 60
           readinessProbe:
             exec:
-              command: [python, -m, scripts.database_migrate, check, --required-version, "41"]
+              command: [python, -m, scripts.database_migrate, check, --required-version, "42"]
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3

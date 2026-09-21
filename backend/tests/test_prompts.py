@@ -20,7 +20,7 @@ def test_prompt_has_version_hash_and_evidence_contract() -> None:
 
     assert prompt.version == PROMPT_VERSION == "v5-stream-grounded-governance-2"
     assert len(prompt.sha256) == 64
-    assert "禁止补充外部知识或猜测" in prompt.text
+    assert "禁止补充未提供的知识或猜测" in prompt.text
     assert "[STATUS: SOURCE_CONFLICT]" in prompt.text
     assert "[来源 1: guide.md / 第 1 段]" in prompt.text
 

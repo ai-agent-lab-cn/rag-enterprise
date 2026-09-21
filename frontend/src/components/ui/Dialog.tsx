@@ -1,6 +1,6 @@
 import { Dialog as RadixDialog } from "radix-ui";
 import { X } from "lucide-react";
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 import { cn } from "./cn";
 
 /**
@@ -25,14 +25,21 @@ export interface DialogProps {
   onClose: () => void;
   /** sm 确认类、md 表单类、lg 表格类——表格四列在 md 下会被截断。 */
   size?: "sm" | "md" | "lg";
+  /** 受控弹层没有 Radix Trigger 时，显式恢复到打开弹层的控件。 */
+  returnFocusRef?: RefObject<HTMLElement | null>;
 }
 
-export function Dialog({ open, title, description, children, onClose, size = "sm" }: DialogProps) {
+export function Dialog({ open, title, description, children, onClose, size = "sm", returnFocusRef }: DialogProps) {
   return (
     <RadixDialog.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <RadixDialog.Portal>
         <RadixDialog.Overlay className="fixed inset-0 z-50 bg-ink/35" />
         <RadixDialog.Content
+          onCloseAutoFocus={(event) => {
+            if (!returnFocusRef?.current) return;
+            event.preventDefault();
+            returnFocusRef.current.focus();
+          }}
           className={cn(
             "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
             "w-[calc(100vw-32px)] rounded-lg bg-surface shadow-modal",

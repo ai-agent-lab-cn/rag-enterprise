@@ -3,7 +3,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Protocol
 
 from .config import Settings
@@ -50,7 +50,8 @@ def count_uncategorized(candidates: list[RetrievedChunk]) -> int:
 
 
 def _filter_candidates(
-    candidates: list[RetrievedChunk], filters: QueryMetadataFilter | None,
+    candidates: list[RetrievedChunk],
+    filters: QueryMetadataFilter | None,
     access: RetrievalAccessContext | None = None,
 ) -> list[RetrievedChunk]:
     """所有召回通路共用同一判定，过滤发生在融合和 Rerank 之前。"""
@@ -92,7 +93,10 @@ def _filter_candidates(
 
 class RAGServiceProtocol(Protocol):
     def index_document(
-        self, filename: str, content: bytes, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+        self,
+        filename: str,
+        content: bytes,
+        knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
         metadata: dict[str, object] | None = None,
     ) -> DocumentInfo: ...
     def list_documents(
@@ -104,11 +108,16 @@ class RAGServiceProtocol(Protocol):
         self, document_id: str, knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
     ) -> bool: ...
     def update_document_metadata(
-        self, document_id: str, metadata: dict[str, object],
+        self,
+        document_id: str,
+        metadata: dict[str, object],
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
     ) -> bool: ...
     def update_document_acl(
-        self, document_id: str, allow_user_ids: list[str], deny_user_ids: list[str],
+        self,
+        document_id: str,
+        allow_user_ids: list[str],
+        deny_user_ids: list[str],
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
     ) -> int | None: ...
     def query(
@@ -198,9 +207,7 @@ class RAGService:
         deny_user_ids: list[str],
         knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
     ) -> int | None:
-        return self.store.update_document_acl(
-            document_id, allow_user_ids, deny_user_ids, knowledge_base_id
-        )
+        return self.store.update_document_acl(document_id, allow_user_ids, deny_user_ids, knowledge_base_id)
 
     def list_index_versions(
         self,
@@ -245,18 +252,30 @@ class RAGService:
         # 切换时，本次请求仍完整地读同一个版本，不会出现向量 vN、词法 vN-1 的混合结果。
         index_version_id = self.store.resolve_active_version(knowledge_base_id)
         if mode == "vector" or self.lexical is None:
-            return _filter_candidates(self.store.query(
-                embedding, retrieve_k, knowledge_base_id, query_text=question,
-                **({"filters": filters} if filters else {}),
-                **({"access": access} if access else {}),
-                index_version_id=index_version_id,
-            ), filters, access)
+            return _filter_candidates(
+                self.store.query(
+                    embedding,
+                    retrieve_k,
+                    knowledge_base_id,
+                    query_text=question,
+                    **({"filters": filters} if filters else {}),
+                    **({"access": access} if access else {}),
+                    index_version_id=index_version_id,
+                ),
+                filters,
+                access,
+            )
 
         hits = self.lexical.get(knowledge_base_id, index_version_id).search(question, retrieve_k)
-        current_chunks = self.store.load_current_chunks(
-            knowledge_base_id, **({"access": access} if access else {}),
-            index_version_id=index_version_id,
-        ) if filters or access else []
+        current_chunks = (
+            self.store.load_current_chunks(
+                knowledge_base_id,
+                **({"access": access} if access else {}),
+                index_version_id=index_version_id,
+            )
+            if filters or access
+            else []
+        )
         allowed_ids = {item.chunk_id for item in _filter_candidates(current_chunks, filters, access)}
         if filters or access:
             hits = [hit for hit in hits if hit.chunk_id in allowed_ids]
@@ -265,12 +284,19 @@ class RAGService:
             fused_ids = [hit.chunk_id for hit in hits]
             vector_candidates: list[RetrievedChunk] = []
         else:
-            vector_candidates = _filter_candidates(self.store.query(
-                embedding, retrieve_k, knowledge_base_id, query_text=question,
-                **({"filters": filters} if filters else {}),
-                **({"access": access} if access else {}),
-                index_version_id=index_version_id,
-            ), filters, access)
+            vector_candidates = _filter_candidates(
+                self.store.query(
+                    embedding,
+                    retrieve_k,
+                    knowledge_base_id,
+                    query_text=question,
+                    **({"filters": filters} if filters else {}),
+                    **({"access": access} if access else {}),
+                    index_version_id=index_version_id,
+                ),
+                filters,
+                access,
+            )
             fused_ids = [
                 chunk_id
                 for chunk_id, _ in reciprocal_rank_fusion(
@@ -360,7 +386,10 @@ class RAGService:
             event_callback("routing_completed", routing.as_dict())
             event_callback(
                 "module_completed",
-                {"module_key": "intent.router", "status": "degraded" if routing.fallback_used else "succeeded"},
+                {
+                    "module_key": "intent.router",
+                    "status": "degraded" if routing.fallback_used else "succeeded",
+                },
             )
         active_index_version_id: str | None = None
         raw_capabilities: dict[str, object] = {}
@@ -476,8 +505,12 @@ class RAGService:
         if event_callback:
             event_callback("module_started", {"module_key": retrieval_module})
         original_candidates = self.retrieve_candidates(
-            query_plan.normalized, original_embedding, retrieval_limit, knowledge_base_id,
-            filters=filters, access=access,
+            query_plan.normalized,
+            original_embedding,
+            retrieval_limit,
+            knowledge_base_id,
+            filters=filters,
+            access=access,
         )
         query_rankings = [original_candidates]
         fallback_used = False
@@ -485,8 +518,12 @@ class RAGService:
             try:
                 expanded_embedding = self.embedder.encode([expanded_query])[0]
                 expanded_candidates = self.retrieve_candidates(
-                    expanded_query, expanded_embedding, retrieval_limit, knowledge_base_id,
-                    filters=filters, access=access,
+                    expanded_query,
+                    expanded_embedding,
+                    retrieval_limit,
+                    knowledge_base_id,
+                    filters=filters,
+                    access=access,
                 )
             except Exception:
                 fallback_used = True
@@ -742,12 +779,8 @@ class RAGService:
         gate_started = time.perf_counter()
         if event_callback:
             event_callback("module_started", {"module_key": "evidence.gate"})
-        web_requirement_satisfied = bool(
-            not differential_enabled or not routing.requires_web or web_results
-        )
-        evidence_sufficient = (
-            len(ranked) >= policy.minimum_evidence_count and web_requirement_satisfied
-        )
+        web_requirement_satisfied = bool(not differential_enabled or not routing.requires_web or web_results)
+        evidence_sufficient = len(ranked) >= policy.minimum_evidence_count and web_requirement_satisfied
         trace.record(
             "evidence.gate",
             "1",
@@ -758,7 +791,9 @@ class RAGService:
             error_code=(
                 None
                 if evidence_sufficient
-                else "WEB_EVIDENCE_REQUIRED" if not web_requirement_satisfied else "INSUFFICIENT_EVIDENCE"
+                else "WEB_EVIDENCE_REQUIRED"
+                if not web_requirement_satisfied
+                else "INSUFFICIENT_EVIDENCE"
             ),
         )
         if event_callback:
@@ -782,8 +817,10 @@ class RAGService:
                     "generation": self.generator.model_name,
                 },
                 latency_ms={
-                    "routing": _elapsed(routing_started), "retrieval": retrieval_ms,
-                    "rerank": rerank_ms, "total": _elapsed(total_started),
+                    "routing": _elapsed(routing_started),
+                    "retrieval": retrieval_ms,
+                    "rerank": rerank_ms,
+                    "total": _elapsed(total_started),
                 },
                 execution_id=trace.execution_id,
                 routing=routing.as_dict(),
@@ -838,7 +875,10 @@ class RAGService:
         if event_callback:
             event_callback(
                 "module_completed",
-                {"module_key": generation_module, "status": "failed" if parsed_answer.status == "generation_failed" else "succeeded"},
+                {
+                    "module_key": generation_module,
+                    "status": "failed" if parsed_answer.status == "generation_failed" else "succeeded",
+                },
             )
         verify_started = time.perf_counter()
         if event_callback:
@@ -849,14 +889,20 @@ class RAGService:
             "1",
             verify_started,
             {"answer_status": parsed_answer.status},
-            {"citation_valid": parsed_answer.citation_valid, "claim_coverage": parsed_answer.claim_citation_coverage},
+            {
+                "citation_valid": parsed_answer.citation_valid,
+                "claim_coverage": parsed_answer.claim_citation_coverage,
+            },
             status="succeeded" if verified else "failed",
             error_code=None if verified else (parsed_answer.error_code or "GENERATION_VERIFICATION_FAILED"),
         )
         if event_callback:
             event_callback(
                 "generation_verified",
-                {"citation_valid": parsed_answer.citation_valid, "claim_citation_coverage": parsed_answer.claim_citation_coverage},
+                {
+                    "citation_valid": parsed_answer.citation_valid,
+                    "claim_citation_coverage": parsed_answer.claim_citation_coverage,
+                },
             )
             event_callback(
                 "module_completed",
@@ -957,20 +1003,46 @@ class RAGService:
             )
         documents = self.store.list_documents(knowledge_base_id)
         indexed_documents = [
-            item for item in documents
+            item
+            for item in documents
             if item.get("status") == "ready" and int(item.get("chunk_count", 0)) > 0
         ]
         processing_documents = any(item.get("status") in {"pending", "indexing"} for item in documents)
         visible_documents = [item for item in indexed_documents if can_retrieve_metadata(item, access)]
         if not indexed_documents and processing_documents:
-            raise AppError("DOCUMENTS_PROCESSING", "当前资料仍在处理，请稍后重试。", 409, {**details, "bad_case_category": "documents_processing"})
+            raise AppError(
+                "DOCUMENTS_PROCESSING",
+                "当前资料仍在处理，请稍后重试。",
+                409,
+                {**details, "bad_case_category": "documents_processing"},
+            )
         if access is not None and indexed_documents and not visible_documents:
-            raise AppError("NO_AUTHORIZED_DOCUMENTS", "当前权限范围内没有可检索资料。", 403, {**details, "bad_case_category": "acl_no_visible_documents"})
+            raise AppError(
+                "NO_AUTHORIZED_DOCUMENTS",
+                "当前权限范围内没有可检索资料。",
+                403,
+                {**details, "bad_case_category": "acl_no_visible_documents"},
+            )
         if filters and indexed_documents:
-            raise AppError("NO_MATCHING_DOCUMENTS", "没有符合当前过滤条件的资料，请调整分类、标签或来源范围。", 409, {**details, "bad_case_category": "metadata_filter_no_match"})
+            raise AppError(
+                "NO_MATCHING_DOCUMENTS",
+                "没有符合当前过滤条件的资料，请调整分类、标签或来源范围。",
+                409,
+                {**details, "bad_case_category": "metadata_filter_no_match"},
+            )
         if documents:
-            raise AppError("NO_RETRIEVABLE_DOCUMENTS", "当前资料尚不可检索，请检查处理状态。", 409, {**details, "bad_case_category": "no_retrievable_documents"})
-        raise AppError("NO_DOCUMENTS", "知识库为空，请先上传文档。", 409, {**details, "bad_case_category": "knowledge_base_empty"})
+            raise AppError(
+                "NO_RETRIEVABLE_DOCUMENTS",
+                "当前资料尚不可检索，请检查处理状态。",
+                409,
+                {**details, "bad_case_category": "no_retrievable_documents"},
+            )
+        raise AppError(
+            "NO_DOCUMENTS",
+            "知识库为空，请先上传文档。",
+            409,
+            {**details, "bad_case_category": "knowledge_base_empty"},
+        )
 
     def _generate_answer(
         self,
@@ -1020,8 +1092,13 @@ class RAGService:
             raw_answer = "".join(chunks)
         except AppError as exc:
             if exc.code not in {
-                "MODEL_REGION_UNSUPPORTED", "MODEL_QUOTA_EXHAUSTED", "MODEL_AUTH_FAILED",
-                "MODEL_RATE_LIMITED", "MODEL_TIMEOUT", "MODEL_NOT_FOUND", "MODEL_UNAVAILABLE",
+                "MODEL_REGION_UNSUPPORTED",
+                "MODEL_QUOTA_EXHAUSTED",
+                "MODEL_AUTH_FAILED",
+                "MODEL_RATE_LIMITED",
+                "MODEL_TIMEOUT",
+                "MODEL_NOT_FOUND",
+                "MODEL_UNAVAILABLE",
             }:
                 raise
             details = dict(exc.details) if isinstance(exc.details, dict) else {}
@@ -1102,9 +1179,7 @@ def _source(item: RetrievedChunk) -> Source:
         retrieval_channels=list(item.channels),
         lexical_score=item.lexical_score,
         retrieval_methods=(
-            []
-            if metadata.get("evidence_source_type") == "web"
-            else item.retrieval_methods or ["vector"]
+            [] if metadata.get("evidence_source_type") == "web" else item.retrieval_methods or ["vector"]
         ),
         query_match_count=item.query_match_count,
         document_version_id=(
@@ -1115,21 +1190,13 @@ def _source(item: RetrievedChunk) -> Source:
         sheet_name=(str(metadata["sheet_name"]) if metadata.get("sheet_name") else None),
         row_start=(int(metadata["row_start"]) if metadata.get("row_start") is not None else None),
         row_end=(int(metadata["row_end"]) if metadata.get("row_end") is not None else None),
-        column_start=(
-            int(metadata["column_start"]) if metadata.get("column_start") is not None else None
-        ),
-        column_end=(
-            int(metadata["column_end"]) if metadata.get("column_end") is not None else None
-        ),
+        column_start=(int(metadata["column_start"]) if metadata.get("column_start") is not None else None),
+        column_end=(int(metadata["column_end"]) if metadata.get("column_end") is not None else None),
         source_url=(str(metadata["source_url"]) if metadata.get("source_url") else None),
         external_resource_id=(
-            str(metadata["external_resource_id"])
-            if metadata.get("external_resource_id")
-            else None
+            str(metadata["external_resource_id"]) if metadata.get("external_resource_id") else None
         ),
-        evidence_source_type=(
-            "web" if metadata.get("evidence_source_type") == "web" else "knowledge_base"
-        ),
+        evidence_source_type=("web" if metadata.get("evidence_source_type") == "web" else "knowledge_base"),
         retrieved_at=metadata.get("retrieved_at"),
     )
 
@@ -1244,9 +1311,7 @@ def _order_procedure_evidence(candidates: list[RetrievedChunk]) -> list[Retrieve
 
 def _compress_context(candidates: list[RetrievedChunk], max_chars: int = 4_000) -> list[RetrievedChunk]:
     return [
-        replace(item, text=f"{item.text[:max_chars].rstrip()}…")
-        if len(item.text) > max_chars
-        else item
+        replace(item, text=f"{item.text[:max_chars].rstrip()}…") if len(item.text) > max_chars else item
         for item in candidates
     ]
 

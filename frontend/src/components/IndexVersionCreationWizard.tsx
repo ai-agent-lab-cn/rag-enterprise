@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type {
   IndexVersionBuildResult,
   IndexVersionCandidatePreview,
@@ -106,21 +106,6 @@ export function IndexVersionCreationWizard({
   const [needsRepreview, setNeedsRepreview] = useState(false);
   const [error, setError] = useState("");
   const previewRequest = useRef(0);
-
-  useEffect(() => {
-    previewRequest.current += 1;
-    if (!open) return;
-    setStep(0);
-    setReason(initialReason(context));
-    setChunkSize(context.definition.chunking.chunk_size);
-    setChunkOverlap(context.definition.chunking.chunk_overlap);
-    setForceReason("");
-    setPreview(null);
-    setPreviewBusy(false);
-    setExcludedDocumentsAcknowledged(false);
-    setNeedsRepreview(false);
-    setError("");
-  }, [context, open]);
 
   const forced = reason === "consistency_repair" || reason === "manual_rebuild";
   const selectedReason = REASONS.find((item) => item.value === reason);

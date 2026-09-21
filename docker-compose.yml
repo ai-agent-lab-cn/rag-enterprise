@@ -51,7 +51,7 @@ services:
       dockerfile: backend/Dockerfile
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rag_enterprise}"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "41"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "42"
       SEARXNG_BASE_URL: "http://searxng:8080"
       WEB_FETCH_TIMEOUT_SECONDS: "${WEB_FETCH_TIMEOUT_SECONDS:-8}"
       WEB_FETCH_MAX_BYTES: "${WEB_FETCH_MAX_BYTES:-2097152}"
@@ -115,7 +115,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-rag_enterprise}"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "41"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "42"
       EMBEDDING_MODEL: "${EMBEDDING_MODEL:-shibing624/text2vec-base-chinese}"
       INDEX_WORKER_ID: "${INDEX_WORKER_ID:-worker-compose}"
       OMP_NUM_THREADS: "${OMP_NUM_THREADS:-1}"
@@ -147,7 +147,7 @@ services:
       # 库名固定为 rag_enterprise_evaluation：Worker 只允许自动创建这一个专用库，
       # 指到别处会拒绝启动，避免把临时语料写进开发或生产业务库。
       EVALUATION_DATABASE_URL: "postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@postgres:5432/rag_enterprise_evaluation"
-      REQUIRED_DATABASE_SCHEMA_VERSION: "41"
+      REQUIRED_DATABASE_SCHEMA_VERSION: "42"
       EMBEDDING_MODEL: "${EMBEDDING_MODEL:-shibing624/text2vec-base-chinese}"
       RERANKER_MODEL: "${RERANKER_MODEL:-cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}"
       EVALUATION_WORKER_ID: "${EVALUATION_WORKER_ID:-evaluation-worker-compose}"

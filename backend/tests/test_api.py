@@ -436,6 +436,7 @@ def test_failed_query_is_saved_in_history(client, fake_service) -> None:
     assert saved.json()["status"] == "failed"
     assert saved.json()["error_code"] == "MODEL_UNAVAILABLE"
     assert saved.json()["answer"] is None
+    assert saved.json()["policy_snapshot"] == {}
     bad_cases = client.get(
         "/api/knowledge-bases/kb_default/bad-cases?category=unclassified&error_code=MODEL_UNAVAILABLE"
     )

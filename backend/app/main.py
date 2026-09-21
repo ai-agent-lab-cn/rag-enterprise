@@ -222,8 +222,15 @@ EvaluationReportsDependency = Annotated[EvaluationReportRepository, Depends(get_
 
 @lru_cache
 def get_evaluation_governance() -> PostgresEvaluationGovernanceRepository | None:
-    database_url = get_settings().database_url
-    return PostgresEvaluationGovernanceRepository(database_url) if database_url else None
+    settings = get_settings()
+    return (
+        PostgresEvaluationGovernanceRepository(
+            settings.database_url,
+            settings.required_database_schema_version,
+        )
+        if settings.database_url
+        else None
+    )
 
 
 EvaluationGovernanceDependency = Annotated[
@@ -2611,14 +2618,27 @@ def create_app() -> FastAPI:
     async def get_pipeline_evaluation(
         governance: EvaluationGovernanceDependency,
         current: CurrentSessionDependency,
+        knowledge_bases: KnowledgeBasesDependency,
+        auth: AuthRepositoryDependency,
         knowledge_base_id: str | None = Query(default=None),
         data_source_id: str | None = Query(default=None),
     ) -> PipelineEvaluationResponse:
         if governance is None:
             raise AppError("POSTGRES_REQUIRED", "工程指标需要 PostgreSQL 运行时。", 503)
-        summary = await run_in_threadpool(governance.pipeline_summary, knowledge_base_id, data_source_id)
+        accessible_ids = await run_in_threadpool(auth.accessible_knowledge_base_ids, current.user)
+        if knowledge_base_id:
+            await _require_accessible_knowledge_base(
+                knowledge_bases, auth, current.user, knowledge_base_id
+            )
+        scoped_ids = {knowledge_base_id} if knowledge_base_id else accessible_ids
+        summary = await run_in_threadpool(
+            governance.pipeline_summary,
+            knowledge_base_id,
+            data_source_id,
+            scoped_ids,
+        )
         summary["rag_profiles"] = await run_in_threadpool(
-            governance.rag_pipeline_summary, knowledge_base_id
+            governance.rag_pipeline_summary, knowledge_base_id, scoped_ids
         )
         return PipelineEvaluationResponse(**summary)
 
@@ -2629,6 +2649,8 @@ def create_app() -> FastAPI:
     async def list_governed_bad_cases(
         governance: EvaluationGovernanceDependency,
         current: CurrentSessionDependency,
+        knowledge_bases: KnowledgeBasesDependency,
+        auth: AuthRepositoryDependency,
         knowledge_base_id: str | None = Query(default=None),
         status: str | None = Query(default=None),
         severity: str | None = Query(default=None),
@@ -2637,6 +2659,12 @@ def create_app() -> FastAPI:
     ) -> list[GovernedBadCaseResponse]:
         if governance is None:
             raise AppError("POSTGRES_REQUIRED", "Bad Case 治理需要 PostgreSQL 运行时。", 503)
+        accessible_ids = await run_in_threadpool(auth.accessible_knowledge_base_ids, current.user)
+        if knowledge_base_id:
+            await _require_accessible_knowledge_base(
+                knowledge_bases, auth, current.user, knowledge_base_id
+            )
+        scoped_ids = {knowledge_base_id} if knowledge_base_id else accessible_ids
         items = await run_in_threadpool(
             governance.list_bad_cases,
             knowledge_base_id=knowledge_base_id,
@@ -2644,6 +2672,7 @@ def create_app() -> FastAPI:
             severity=severity,
             failure_stage=failure_stage,
             limit=limit,
+            knowledge_base_ids=scoped_ids,
         )
         return [GovernedBadCaseResponse(**item) for item in items]
 
@@ -2672,6 +2701,74 @@ def create_app() -> FastAPI:
             raise AppError("BAD_CASE_NOT_FOUND", "未找到该 Bad Case。", 404)
         return GovernedBadCaseResponse(**item)
 
+    @app.post(
+        "/api/evaluation-center/bad-cases/{case_id}/regressions",
+        response_model=GovernedBadCaseResponse,
+    )
+    async def run_governed_bad_case_regression(
+        case_id: str,
+        governance: EvaluationGovernanceDependency,
+        service: ServiceDependency,
+        current: CurrentSessionDependency,
+        knowledge_bases: KnowledgeBasesDependency,
+        auth: AuthRepositoryDependency,
+        audit: AuditRepositoryDependency,
+    ) -> GovernedBadCaseResponse:
+        _require_admin(current.user)
+        if governance is None:
+            raise AppError("POSTGRES_REQUIRED", "Bad Case 回归需要 PostgreSQL 运行时。", 503)
+        case = await run_in_threadpool(governance.get_bad_case, case_id)
+        if case is None:
+            raise AppError("BAD_CASE_NOT_FOUND", "未找到该 Bad Case。", 404)
+        knowledge_base_id = str(case["knowledge_base_id"])
+        await _require_accessible_knowledge_base(
+            knowledge_bases, auth, current.user, knowledge_base_id
+        )
+        abuse_protection.check_expensive(current.user.user_id)
+        try:
+            with abuse_protection.concurrency.slot():
+                result = await run_in_threadpool(
+                    service.query,
+                    str(case["question"]),
+                    10,
+                    5,
+                    knowledge_base_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            item = await run_in_threadpool(
+                governance.run_bad_case_regression,
+                case_id,
+                created_by=current.user.user_id,
+                actual_answer_status=result.answer_status,
+                actual_answer=result.answer,
+                actual_source_ids=list(dict.fromkeys(source.document_id for source in result.sources)),
+                actual_chunk_ids=list(dict.fromkeys(source.chunk_id for source in result.sources)),
+                active_index_version_id=result.active_index_version_id,
+                models=dict(result.models),
+                prompt_version=result.prompt_version,
+                prompt_hash=result.prompt_hash,
+            )
+        except LookupError as exc:
+            raise AppError("BAD_CASE_NOT_FOUND", "未找到该 Bad Case。", 404) from exc
+        except ValueError as exc:
+            raise AppError("BAD_CASE_REGRESSION_NOT_READY", str(exc), 409) from exc
+        await _record_audit(
+            audit,
+            "bad_case.regression.run",
+            current.user,
+            "bad_case",
+            case_id,
+            metadata={
+                "evaluation_run_id": str(item.get("regression_evaluation_run_id") or ""),
+                "passed": bool(item.get("regression_passed")),
+            },
+        )
+        return GovernedBadCaseResponse(**item)
+
     @app.get(
         "/api/evaluation-center/acceptance-runs",
         response_model=list[AcceptanceRunResponse],
@@ -2698,7 +2795,6 @@ def create_app() -> FastAPI:
     async def start_acceptance_run(
         payload: AcceptanceRunCreate,
         governance: EvaluationGovernanceDependency,
-        reports: EvaluationReportsDependency,
         current: CurrentSessionDependency,
         knowledge_bases: KnowledgeBasesDependency,
         auth: AuthRepositoryDependency,
@@ -2712,24 +2808,10 @@ def create_app() -> FastAPI:
         )
         if governance is None:
             raise AppError("POSTGRES_REQUIRED", "链路验收需要 PostgreSQL 运行时。", 503)
-        overview = await run_in_threadpool(reports.center_overview)
-        retrieval_passed = bool(overview.retrieval_report and overview.retrieval_report.passed)
-        answer_passed = bool(overview.answer_report and overview.answer_report.passed)
-        retrieval_detail = (
-            await run_in_threadpool(reports.get_official, overview.retrieval_report.report_id)
-            if overview.retrieval_report
-            else None
-        )
-        acl_leak_count = int(retrieval_detail.acl_leak_count or 0) if retrieval_detail else 0
         item = await run_in_threadpool(
             governance.run_acceptance,
             payload.knowledge_base_id,
             current.user.user_id,
-            retrieval_passed,
-            answer_passed,
-            acl_leak_count,
-            overview.retrieval_report.report_id if overview.retrieval_report else None,
-            overview.answer_report.report_id if overview.answer_report else None,
         )
         return AcceptanceRunResponse(**item)
 

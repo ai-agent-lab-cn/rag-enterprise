@@ -9,6 +9,7 @@ from pathlib import Path
 from backend.app.config import get_settings
 from backend.app.postgres_history import PostgresConversationRepository, normalize_legacy_payload
 
+
 # 显式迁移旧会话 JSON 到 PostgreSQL
 def main() -> None:
     parser = argparse.ArgumentParser(description="显式迁移旧会话 JSON 到 PostgreSQL")

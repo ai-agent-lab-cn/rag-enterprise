@@ -625,6 +625,9 @@ export interface GovernedBadCase {
   fix_commit: string | null;
   status: "new" | "confirmed" | "fixing" | "resolved" | "regression_added" | "ignored";
   regression_added: boolean;
+  regression_evaluation_run_id: string | null;
+  regression_passed: boolean | null;
+  regression_run_at: string | null;
   created_at: string;
   confirmed_at: string | null;
   resolved_at: string | null;

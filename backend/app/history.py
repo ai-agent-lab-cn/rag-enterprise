@@ -152,7 +152,7 @@ class ConversationRepository:
                 "routing": routing,
                 "pipeline_profile": pipeline_profile,
                 "profile_version": profile_version,
-                "policy_snapshot": policy_snapshot,
+                "policy_snapshot": policy_snapshot or {},
                 "active_index_version_id": active_index_version_id,
                 "module_summary": module_executions or [],
                 "execution_started_at": (

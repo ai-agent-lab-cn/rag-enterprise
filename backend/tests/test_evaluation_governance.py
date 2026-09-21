@@ -68,10 +68,9 @@ def test_bad_case_transition_requires_fix_commit_before_resolved() -> None:
     assert validate_bad_case_transition("fixing", update).status == "resolved"
 
 
-def test_regression_failure_reopens_resolved_bad_case() -> None:
-    update = BadCaseUpdate(status="regression_added", regression_passed=False)
-
-    assert validate_bad_case_transition("resolved", update).status == "confirmed"
+def test_bad_case_cannot_claim_regression_success_without_a_run() -> None:
+    with pytest.raises(ValueError, match="正式回归验证"):
+        validate_bad_case_transition("resolved", BadCaseUpdate(status="regression_added"))
 
 
 def test_bad_case_transition_rejects_skipping_confirmation() -> None:

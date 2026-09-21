@@ -92,16 +92,34 @@ export function BadCasePage({ isAdmin }: { isAdmin: boolean }) {
     }
   };
 
+  const runRegression = async (item: GovernedBadCase) => {
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await api.runGovernedBadCaseRegression(item.case_id);
+      setItems(
+        (current) =>
+          current?.map((candidate) =>
+            candidate.case_id === item.case_id ? updated : candidate,
+          ) ?? null,
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "回归验证运行失败。");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section className="px-6 pt-5 pb-8" aria-label="Bad Case">
       {error ? <ErrorBanner>{error}</ErrorBanner> : null}
       {busy ? (
         <div className="py-2 text-[12.8px] text-ink-muted" aria-live="polite">
-          正在保存治理结果…
+          正在执行治理操作…
         </div>
       ) : null}
       {items ? (
-        <BadCasePanel items={items} isAdmin={isAdmin} onUpdate={updateCase} />
+        <BadCasePanel items={items} isAdmin={isAdmin} busy={busy} onUpdate={updateCase} onRunRegression={runRegression} />
       ) : (
         // 筛选条依赖已加载数据算出「失败阶段」选项，加载完成前不能先渲染一份空选项的
         // 筛选条——复用 DataTable 本身的加载态（rows=null 时它会画 SkeletonRows，且
@@ -136,14 +154,18 @@ export function BadCasePage({ isAdmin }: { isAdmin: boolean }) {
 function BadCasePanel({
   items,
   isAdmin,
+  busy,
   onUpdate,
+  onRunRegression,
 }: {
   items: GovernedBadCase[];
   isAdmin: boolean;
+  busy: boolean;
   onUpdate: (
     item: GovernedBadCase,
     update: Parameters<typeof api.updateGovernedBadCase>[1],
   ) => void;
+  onRunRegression: (item: GovernedBadCase) => void;
 }) {
   const [status, setStatus] = useState("");
   const [severity, setSeverity] = useState("");
@@ -304,7 +326,9 @@ function BadCasePanel({
             <BadCaseGovernanceDetails
               item={item}
               isAdmin={isAdmin}
+              busy={busy}
               onUpdate={onUpdate}
+              onRunRegression={onRunRegression}
             />
           ) : null
         }
@@ -316,14 +340,18 @@ function BadCasePanel({
 function BadCaseGovernanceDetails({
   item,
   isAdmin,
+  busy,
   onUpdate,
+  onRunRegression,
 }: {
   item: GovernedBadCase;
   isAdmin: boolean;
+  busy: boolean;
   onUpdate: (
     item: GovernedBadCase,
     update: Parameters<typeof api.updateGovernedBadCase>[1],
   ) => void;
+  onRunRegression: (item: GovernedBadCase) => void;
 }) {
   const [rootCause, setRootCause] = useState(item.root_cause ?? "");
   const [fixCommit, setFixCommit] = useState(item.fix_commit ?? "");
@@ -335,9 +363,7 @@ function BadCaseGovernanceDetails({
         ? "fixing"
         : item.status === "fixing"
           ? "resolved"
-          : item.status === "resolved"
-            ? "regression_added"
-            : null;
+          : null;
   const nextLabel =
     item.status === "new"
       ? "确认"
@@ -345,19 +371,27 @@ function BadCaseGovernanceDetails({
         ? "开始修复"
         : item.status === "fixing"
           ? "标记已解决"
-          : item.status === "resolved"
-            ? "加入回归集"
-            : "";
+          : "";
   return (
-    <div className="w-full">
+    <div className="w-full max-[768px]:w-[calc(100vw-5rem)]">
       <section className="my-2 grid gap-1 rounded-md bg-canvas p-2" aria-label="来源证据">
         <strong className="text-sm">来源证据</strong>
-        <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-ink-faint">
+        <div className="flex flex-wrap gap-x-2 gap-y-1 text-xs text-ink-faint min-[769px]:gap-x-5 [&_code]:break-all">
           <span>来源类型：{SOURCE_LABEL[item.source_type]}</span>
           <span>来源记录：<code>{item.source_record_id}</code></span>
           {item.dataset_version ? <span>数据集版本：<code>{item.dataset_version}</code></span> : null}
         </div>
       </section>
+      {item.regression_evaluation_run_id ? (
+        <section className="my-2 grid gap-1 rounded-md border border-line bg-surface p-2" aria-label="回归证据">
+          <strong className="text-sm">回归证据</strong>
+          <div className="flex flex-wrap gap-x-2 gap-y-1 text-xs text-ink-faint min-[769px]:gap-x-5 [&_code]:break-all">
+            <span>运行：<code>{item.regression_evaluation_run_id}</code></span>
+            <span>结论：{item.regression_passed ? "通过" : "未通过"}</span>
+            {item.regression_run_at ? <span>时间：{new Date(item.regression_run_at).toLocaleString("zh-CN")}</span> : null}
+          </div>
+        </section>
+      ) : null}
       <dl className="my-1.5">
         <div className="flex my-2">
           <dt className="text-[11.52px] text-ink-muted">期望状态：</dt>
@@ -373,7 +407,7 @@ function BadCaseGovernanceDetails({
         </div>
       </dl>
       {isAdmin ? (
-        <div className="mt-2 grid grid-cols-4 gap-8">
+        <div className="mt-2 grid grid-cols-1 gap-2 min-[769px]:grid-cols-4 min-[769px]:gap-8">
           <label className="flex items-center text-[11.52px] text-ink-muted">
             <span className="whitespace-nowrap">根因：</span>
             <Input
@@ -410,12 +444,20 @@ function BadCaseGovernanceDetails({
                     root_cause: rootCause || undefined,
                     assignee: assignee || undefined,
                     fix_commit: fixCommit || undefined,
-                    regression_passed:
-                      next === "regression_added" ? true : undefined,
                   })
                 }
               >
                 {nextLabel}
+              </Button>
+            ) : null}
+            {item.status === "resolved" ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                loading={busy}
+                onClick={() => onRunRegression(item)}
+              >
+                运行回归验证
               </Button>
             ) : null}
             {item.status !== "ignored" && item.status !== "regression_added" ? (

@@ -81,6 +81,7 @@ def test_migration_files_are_contiguous() -> None:
         "0039_index_evaluation_runs.sql",
         "0040_index_definitions.sql",
         "0041_modular_rag_runtime.sql",
+        "0042_bad_case_regression_evidence.sql",
     ]
 
 
@@ -92,7 +93,7 @@ def test_required_schema_version_matches_the_migration_files() -> None:
     加了迁移却忘改配置时，应用会在启动时才报「schema 版本不符」，而不是在这里红。
     """
 
-    assert Settings().required_database_schema_version == len(migration_files())
+    assert Settings(_env_file=None).required_database_schema_version == len(migration_files())
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="需要 PostgreSQL + pgvector")
@@ -115,7 +116,7 @@ def test_schema_nineteen_records_category_origin_without_guessing_history(tmp_pa
                (category_id, knowledge_base_id, name, normalized_name, description, sort_order)
                VALUES ('cat_history', 'kb_history', '产品资料', '产品资料', '', 100)"""
         )
-    assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
 
     with psycopg.connect(database_url) as connection:
         origin = connection.execute(
@@ -157,7 +158,7 @@ def test_schema_sixteen_allows_null_category_and_records_failures() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
 
     with psycopg.connect(database_url) as connection, connection.transaction():
         connection.execute(
@@ -299,7 +300,7 @@ def test_schema_fifteen_data_upgrades_to_sixteen(tmp_path: Path) -> None:
                 ),
             )
 
-    assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
 
     with psycopg.connect(database_url) as connection:
         remaining = [
@@ -351,7 +352,7 @@ def test_user_created_category_named_uncategorized_survives_migration(tmp_path: 
                        '业务上就叫这个名字', 100, true, false)"""
         )
 
-    assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
 
     with psycopg.connect(database_url) as connection:
         survived = connection.execute(
@@ -368,12 +369,12 @@ def test_schema_sixteen_migration_is_idempotent() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
 
     with psycopg.connect(database_url) as connection:
         before = connection.execute("SELECT count(*) FROM document_categories").fetchone()[0]
 
-    assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
 
     with psycopg.connect(database_url) as connection:
         after = connection.execute("SELECT count(*) FROM document_categories").fetchone()[0]
@@ -386,7 +387,7 @@ def test_schema_thirteen_adds_evaluation_and_bad_case_governance() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-        assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
 
     with psycopg.connect(database_url) as connection:
         tables = {
@@ -405,7 +406,7 @@ def test_schema_fourteen_adds_acceptance_runs() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
 
     with psycopg.connect(database_url) as connection:
         assert connection.execute(
@@ -419,7 +420,7 @@ def test_schema_fifteen_adds_seeded_default_category_template() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
 
     with psycopg.connect(database_url) as connection:
         template = connection.execute(
@@ -441,7 +442,7 @@ def test_new_knowledge_base_copies_active_template_as_independent_categories() -
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
 
     templates = PostgresCategoryTemplateRepository(database_url)
     disabled = templates.create_item("停用分类", "不会复制", 700)
@@ -501,7 +502,7 @@ def test_uncategorized_becomes_an_ordinary_category_name() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
 
     repository = PostgresKnowledgeBaseRepository(database_url)
     knowledge_base = repository.create("普通库", "", False)
@@ -526,7 +527,7 @@ def test_category_name_must_be_non_empty_and_unique_ignoring_case() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
 
     knowledge_base = PostgresKnowledgeBaseRepository(database_url).create("校验库", "", False)
     categories = PostgresCategoryRepository(database_url)
@@ -544,7 +545,7 @@ def test_schema_twelve_adds_sync_run_governance() -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
 
     with psycopg.connect(database_url) as connection:
         columns = {
@@ -634,8 +635,8 @@ def test_schema_two_with_existing_data_upgrades_to_schema_three(tmp_path: Path) 
             (now, now),
         )
 
-    assert apply_migrations(database_url) == 41
-    check_schema_version(database_url, 41)
+    assert apply_migrations(database_url) == 42
+    check_schema_version(database_url, 42)
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
             "SELECT status, chunking_version FROM document_versions WHERE document_version_id = 'ver_legacy'"
@@ -730,8 +731,8 @@ def test_postgres_runtime_covers_auth_indexing_and_backup(tmp_path: Path) -> Non
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 41
-    check_schema_version(database_url, 41)
+    assert apply_migrations(database_url) == 42
+    check_schema_version(database_url, 42)
 
     now = datetime.now(UTC)
     with psycopg.connect(database_url) as connection, connection.transaction():
@@ -788,7 +789,10 @@ def test_postgres_runtime_covers_auth_indexing_and_backup(tmp_path: Path) -> Non
         source_path, version_count, job_count = connection.execute(
             """SELECT dv.source_path,
                       (SELECT count(*) FROM document_versions WHERE document_id=d.document_id),
-                      (SELECT count(*) FROM index_jobs WHERE document_version_id=d.current_version_id)
+                      (SELECT count(*) FROM index_jobs j
+                         JOIN document_versions all_dv
+                           ON all_dv.document_version_id=j.document_version_id
+                        WHERE all_dv.document_id=d.document_id)
                FROM documents d JOIN document_versions dv
                  ON dv.document_version_id=d.current_version_id
                WHERE d.knowledge_base_id='kb_default' AND d.filename='guide.md'"""
@@ -978,8 +982,8 @@ def test_schema_nine_with_existing_chunks_upgrades_to_schema_ten(tmp_path: Path)
             (json.dumps({"document_id": "doc_legacy"}), now),
         )
 
-    assert apply_migrations(database_url) == 41
-    check_schema_version(database_url, 41)
+    assert apply_migrations(database_url) == 42
+    check_schema_version(database_url, 42)
 
     with psycopg.connect(database_url) as connection:
         version = connection.execute(
@@ -1017,7 +1021,7 @@ def test_schema_ten_on_empty_database_keeps_embedding_unconstrained(tmp_path: Pa
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 41
+    assert apply_migrations(database_url) == 42
     with psycopg.connect(database_url) as connection:
         assert (
             connection.execute(
@@ -1081,8 +1085,8 @@ def test_schema_eleven_allows_sync_jobs_and_local_directory_sources(tmp_path: Pa
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
-    assert apply_migrations(database_url) == 41
-    check_schema_version(database_url, 41)
+    assert apply_migrations(database_url) == 42
+    check_schema_version(database_url, 42)
 
     now = datetime.now(UTC)
     with psycopg.connect(database_url) as connection, connection.transaction():
@@ -1154,8 +1158,8 @@ def test_schema_thirty_nine_turns_evaluation_runs_into_a_queue_without_losing_hi
             (now, now),
         )
 
-    assert apply_migrations(database_url) == 41
-    check_schema_version(database_url, 41)
+    assert apply_migrations(database_url) == 42
+    check_schema_version(database_url, 42)
 
     with psycopg.connect(database_url) as connection:
         legacy = connection.execute(

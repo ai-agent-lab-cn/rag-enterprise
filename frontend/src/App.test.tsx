@@ -392,8 +392,8 @@ test("文件数据源使用更新文件创建新版本", async () => {
   // RowActions 统一了可访问名格式为「{rowLabel} 的{action.label}」（见 ui/RowActions.tsx），
   // 不再是页面自己拼的「更新 {name}」。
   await userEvent.upload(await screen.findByLabelText("profile.md 的更新文件"), new File(["updated"], "profile.md", { type: "text/markdown" }));
-  // 提示文案随之改成带文件名的形式（DocumentPanel.tsx:194）。
-  expect(await screen.findByRole("status")).toHaveTextContent("的新版本已上传");
+  // 同内容重传可能恢复缺失源文件，因此提示同时覆盖“上传新版本”和“恢复源文件”。
+  expect(await screen.findByRole("status")).toHaveTextContent("“profile.md”已上传或恢复");
   expect(fetchMock).toHaveBeenCalledWith("/api/knowledge-bases/kb_default/documents", expect.objectContaining({ method: "POST" }));
 });
 

@@ -12,6 +12,9 @@ from pathlib import Path
 
 from backend.app.config import Settings
 
+# 由 docker compose 直接消费、不进入 Backend Settings 的基础设施变量。
+INFRASTRUCTURE_ONLY_KEYS = {"SEARXNG_SECRET"}
+
 
 def _documented_keys() -> set[str]:
     text = Path(".env.example").read_text(encoding="utf-8")
@@ -23,7 +26,9 @@ def _documented_keys() -> set[str]:
 
 
 def test_every_documented_variable_is_a_real_setting() -> None:
-    unknown = sorted(_documented_keys() - {name.upper() for name in Settings.model_fields})
+    unknown = sorted(
+        _documented_keys() - {name.upper() for name in Settings.model_fields} - INFRASTRUCTURE_ONLY_KEYS
+    )
     assert unknown == [], f".env.example 里这些键不对应任何配置项，会被静默忽略：{unknown}"
 
 
@@ -36,4 +41,4 @@ def test_schema_version_in_env_example_matches_the_code() -> None:
         re.M,
     )
     assert documented is not None, ".env.example 必须写明所需的 schema 版本"
-    assert int(documented.group(1)) == Settings().required_database_schema_version
+    assert int(documented.group(1)) == Settings(_env_file=None).required_database_schema_version

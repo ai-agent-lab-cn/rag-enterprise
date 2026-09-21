@@ -44,9 +44,7 @@ def normalize_legacy_payload(payload: dict[str, Any]) -> NormalizedLegacyPayload
         if conversation_id in conversation_ids:
             raise ValueError(f"duplicate conversation id: {conversation_id}")
         if not str(item.get("owner_id") or "").strip():
-            raise ValueError(
-                f"conversation has no owner and cannot be migrated safely: {conversation_id}"
-            )
+            raise ValueError(f"conversation has no owner and cannot be migrated safely: {conversation_id}")
         conversation_ids.add(conversation_id)
     record_ids: set[str] = set()
     for item in answers:
@@ -215,12 +213,21 @@ class PostgresConversationRepository:
                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                                        to_timestamp(%s),to_timestamp(%s))""",
                             (
-                                module["module_execution_id"], execution_id, module["sequence"],
-                                module["module_key"], module["module_version"], module["status"],
-                                module.get("attempt", 1), module["input_hash"], module.get("output_hash"),
-                                Jsonb(module.get("metrics") or {}), module.get("error_code"),
-                                module.get("error_message"), module.get("fallback_reason"),
-                                float(module.get("duration_ms") or 0), module["started_at"],
+                                module["module_execution_id"],
+                                execution_id,
+                                module["sequence"],
+                                module["module_key"],
+                                module["module_version"],
+                                module["status"],
+                                module.get("attempt", 1),
+                                module["input_hash"],
+                                module.get("output_hash"),
+                                Jsonb(module.get("metrics") or {}),
+                                module.get("error_code"),
+                                module.get("error_message"),
+                                module.get("fallback_reason"),
+                                float(module.get("duration_ms") or 0),
+                                module["started_at"],
                                 module["finished_at"],
                             ),
                         )
@@ -235,14 +242,30 @@ class PostgresConversationRepository:
                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                                %s,%s,%s,%s,%s) RETURNING *""",
                     (
-                        record_id, conversation_id, knowledge_base_id, execution_id, question,
-                        status, answer, Jsonb(sources), Jsonb(latency_ms), Jsonb(models),
-                        Jsonb(model_metadata), prompt_version, prompt_hash, answer_status,
+                        record_id,
+                        conversation_id,
+                        knowledge_base_id,
+                        execution_id,
+                        question,
+                        status,
+                        answer,
+                        Jsonb(sources),
+                        Jsonb(latency_ms),
+                        Jsonb(models),
+                        Jsonb(model_metadata),
+                        prompt_version,
+                        prompt_hash,
+                        answer_status,
                         Jsonb(generation_governance) if generation_governance is not None else None,
                         Jsonb(query_metadata) if query_metadata is not None else None,
                         Jsonb(routing) if routing is not None else None,
-                        pipeline_profile, profile_version, Jsonb(modules), bad_case_category,
-                        error_code, error_message, now,
+                        pipeline_profile,
+                        profile_version,
+                        Jsonb(modules),
+                        bad_case_category,
+                        error_code,
+                        error_message,
+                        now,
                     ),
                 ).fetchone()
                 connection.execute(
@@ -350,7 +373,7 @@ class PostgresConversationRepository:
             rows = connection.execute(
                 f"""SELECT a.* FROM answer_records a
                     JOIN conversations c ON c.conversation_id=a.conversation_id
-                    WHERE {' AND '.join(clauses)} ORDER BY a.created_at DESC""",
+                    WHERE {" AND ".join(clauses)} ORDER BY a.created_at DESC""",
                 parameters,
             ).fetchall()
         return [self._answer(dict(row)) for row in rows]
@@ -394,9 +417,7 @@ class PostgresConversationRepository:
         }
 
     def import_legacy(self, payload: NormalizedLegacyPayload) -> tuple[int, int]:
-        eligible_conversation_ids = {
-            str(item["conversation_id"]) for item in payload.conversations
-        }
+        eligible_conversation_ids = {str(item["conversation_id"]) for item in payload.conversations}
         eligible_answer_ids = {
             str(item["record_id"])
             for item in payload.answers
@@ -411,9 +432,13 @@ class PostgresConversationRepository:
                             created_at,updated_at)
                            VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (conversation_id) DO NOTHING""",
                         (
-                            item["conversation_id"], item["knowledge_base_id"], item["owner_id"],
-                            item.get("title") or "历史会话", _legacy_item_hash("conversation", item),
-                            item["created_at"], item["updated_at"],
+                            item["conversation_id"],
+                            item["knowledge_base_id"],
+                            item["owner_id"],
+                            item.get("title") or "历史会话",
+                            _legacy_item_hash("conversation", item),
+                            item["created_at"],
+                            item["updated_at"],
                         ),
                     )
                 for item in payload.answers:
@@ -427,28 +452,54 @@ class PostgresConversationRepository:
                            WHERE EXISTS (SELECT 1 FROM conversations WHERE conversation_id=%s)
                            ON CONFLICT (record_id) DO NOTHING""",
                         (
-                            item["record_id"], item["conversation_id"], item["knowledge_base_id"],
-                            item.get("question") or "", item.get("status") or "failed", item.get("answer"),
-                            Jsonb(item.get("sources") or []), Jsonb(item.get("latency_ms") or {}),
-                            Jsonb(item.get("models") or {}), Jsonb(item.get("model_metadata") or {}),
-                            item.get("prompt_version"), item.get("prompt_hash"), item.get("answer_status"),
-                            Jsonb(item.get("generation_governance")) if item.get("generation_governance") is not None else None,
-                            Jsonb(item.get("query_metadata")) if item.get("query_metadata") is not None else None,
-                            item.get("bad_case_category"), item.get("error_code"), item.get("error_message"),
-                            _legacy_item_hash("answer", item), item["created_at"], item["conversation_id"],
+                            item["record_id"],
+                            item["conversation_id"],
+                            item["knowledge_base_id"],
+                            item.get("question") or "",
+                            item.get("status") or "failed",
+                            item.get("answer"),
+                            Jsonb(item.get("sources") or []),
+                            Jsonb(item.get("latency_ms") or {}),
+                            Jsonb(item.get("models") or {}),
+                            Jsonb(item.get("model_metadata") or {}),
+                            item.get("prompt_version"),
+                            item.get("prompt_hash"),
+                            item.get("answer_status"),
+                            Jsonb(item.get("generation_governance"))
+                            if item.get("generation_governance") is not None
+                            else None,
+                            Jsonb(item.get("query_metadata"))
+                            if item.get("query_metadata") is not None
+                            else None,
+                            item.get("bad_case_category"),
+                            item.get("error_code"),
+                            item.get("error_message"),
+                            _legacy_item_hash("answer", item),
+                            item["created_at"],
+                            item["conversation_id"],
                         ),
                     )
                 conversation_receipts = (
-                    dict(connection.execute(
-                        "SELECT conversation_id,legacy_content_sha256 FROM conversations WHERE conversation_id=ANY(%s)",
-                        (list(eligible_conversation_ids),),
-                    ).fetchall()) if eligible_conversation_ids else {}
+                    dict(
+                        connection.execute(
+                            """SELECT conversation_id,legacy_content_sha256
+                                 FROM conversations WHERE conversation_id=ANY(%s)""",
+                            (list(eligible_conversation_ids),),
+                        ).fetchall()
+                    )
+                    if eligible_conversation_ids
+                    else {}
                 )
                 answer_receipts = (
-                    dict(connection.execute(
-                        "SELECT record_id,legacy_content_sha256 FROM answer_records WHERE record_id=ANY(%s)",
-                        (list(eligible_answer_ids),),
-                    ).fetchall()) if eligible_answer_ids else {}
+                    dict(
+                        connection.execute(
+                            """SELECT record_id,legacy_content_sha256
+                                 FROM answer_records WHERE record_id=ANY(%s)""",
+                            (list(eligible_answer_ids),),
+                        ).fetchall()
+                    )
+                    if eligible_answer_ids
+                    else {}
                 )
                 expected_conversation_receipts = {
                     str(item["conversation_id"]): _legacy_item_hash("conversation", item)
@@ -456,13 +507,19 @@ class PostgresConversationRepository:
                 }
                 expected_answer_receipts = {
                     str(item["record_id"]): _legacy_item_hash("answer", item)
-                    for item in payload.answers if item.get("conversation_id") in eligible_conversation_ids
+                    for item in payload.answers
+                    if item.get("conversation_id") in eligible_conversation_ids
                 }
                 imported_conversations = len(conversation_receipts)
                 imported_answers = len(answer_receipts)
-                if imported_conversations != len(eligible_conversation_ids) or imported_answers != len(eligible_answer_ids):
+                if imported_conversations != len(eligible_conversation_ids) or imported_answers != len(
+                    eligible_answer_ids
+                ):
                     raise RuntimeError("旧会话导入数量核对失败，事务已回滚")
-                if conversation_receipts != expected_conversation_receipts or answer_receipts != expected_answer_receipts:
+                if (
+                    conversation_receipts != expected_conversation_receipts
+                    or answer_receipts != expected_answer_receipts
+                ):
                     raise RuntimeError("旧会话导入内容哈希核对失败，事务已回滚")
                 connection.execute(
                     """INSERT INTO conversation_migration_runs
@@ -488,25 +545,54 @@ class PostgresConversationRepository:
                     citation_index,retrieved_at)
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s,%s)""",
                 (
-                    execution_id, evidence_id, source_type,
+                    execution_id,
+                    evidence_id,
+                    source_type,
                     source.get("chunk_id") if source_type == "knowledge_base" else None,
-                    source.get("source_url"), source.get("filename") or source.get("source_url") or "来源",
-                    Jsonb({
-                        "page": source.get("page"), "paragraph": source.get("paragraph"),
-                        "heading_path": source.get("heading_path") or [],
-                    }), str(source.get("text") or "")[:20_000], source.get("content_sha256"),
-                    float(source.get("retrieval_score") or 0), float(source.get("rerank_score") or 0),
-                    index, source.get("retrieved_at"),
+                    source.get("source_url"),
+                    source.get("filename") or source.get("source_url") or "来源",
+                    Jsonb(
+                        {
+                            "page": source.get("page"),
+                            "paragraph": source.get("paragraph"),
+                            "heading_path": source.get("heading_path") or [],
+                        }
+                    ),
+                    str(source.get("text") or "")[:20_000],
+                    source.get("content_sha256"),
+                    float(source.get("retrieval_score") or 0),
+                    float(source.get("rerank_score") or 0),
+                    index,
+                    source.get("retrieved_at"),
                 ),
             )
 
     @staticmethod
     def _answer(row: dict[str, Any]) -> dict[str, Any]:
         for key in (
-            "sources", "latency_ms", "models", "model_metadata", "generation_governance",
-            "query_metadata", "routing", "module_summary",
+            "sources",
+            "latency_ms",
+            "models",
+            "model_metadata",
+            "generation_governance",
+            "query_metadata",
+            "routing",
+            "module_summary",
+            "policy_snapshot",
         ):
-            if key in row and row[key] is None and key in {"sources", "latency_ms", "models", "model_metadata", "module_summary"}:
+            if (
+                key in row
+                and row[key] is None
+                and key
+                in {
+                    "sources",
+                    "latency_ms",
+                    "models",
+                    "model_metadata",
+                    "module_summary",
+                    "policy_snapshot",
+                }
+            ):
                 row[key] = [] if key in {"sources", "module_summary"} else {}
         return row
 
@@ -621,10 +707,15 @@ class PostgresRAGPolicyRepository:
                          END,
                          updated_at=now()""",
                     (
-                        knowledge_base_id, policy.rollout_stage, policy.web_search_enabled,
-                        list(policy.allowed_domains), policy.intent_confidence_threshold,
-                        policy.minimum_evidence_count, policy.max_web_results,
-                        Jsonb(policy.profile_versions), updated_by,
+                        knowledge_base_id,
+                        policy.rollout_stage,
+                        policy.web_search_enabled,
+                        list(policy.allowed_domains),
+                        policy.intent_confidence_threshold,
+                        policy.minimum_evidence_count,
+                        policy.max_web_results,
+                        Jsonb(policy.profile_versions),
+                        updated_by,
                     ),
                 )
         return self.get(knowledge_base_id)
@@ -657,7 +748,10 @@ class PostgresRAGPolicyRepository:
                           AND a.answer_status IN ('answered','source_conflict')
                           AND (
                             COALESCE((a.generation_governance->>'citation_valid')::boolean,false)=false
-                            OR COALESCE((a.generation_governance->>'claim_citation_coverage')::boolean,false)=false
+                            OR COALESCE(
+                              (a.generation_governance->>'claim_citation_coverage')::boolean,
+                              false
+                            )=false
                           )
                       )::integer AS citation_failures
                FROM query_executions q
@@ -758,9 +852,7 @@ class PostgresRAGPolicyRepository:
             canary = intent_rates.get((intent, "canary"))
             if shadow and canary and shadow[0] >= 10 and canary[0] >= 10:
                 if canary[1] < shadow[1] - 0.02:
-                    reasons.append(
-                        f"{intent} 任务成功率较 shadow 下降超过 2 个百分点"
-                    )
+                    reasons.append(f"{intent} 任务成功率较 shadow 下降超过 2 个百分点")
         canary_kb_p95 = float(latency_row[0]) if latency_row and latency_row[0] is not None else None
         shadow_kb_p95 = float(latency_row[1]) if latency_row and latency_row[1] is not None else None
         canary_web_p95 = float(latency_row[2]) if latency_row and latency_row[2] is not None else None

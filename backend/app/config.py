@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     auth_path: Path = Path("data/auth/store.json")
     audit_path: Path = Path("data/audit/events.json")
     database_url: str | None = None
-    required_database_schema_version: int = Field(default=41, ge=1)
+    required_database_schema_version: int = Field(default=42, ge=1)
     searxng_base_url: str = ""
     web_fetch_timeout_seconds: float = Field(default=8.0, ge=1, le=30)
     web_fetch_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=10 * 1024 * 1024)

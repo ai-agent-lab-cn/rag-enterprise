@@ -79,11 +79,13 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
       });
       return;
     }
-    setHistory(null);
-    setStreamingText("");
-    setStreamingSources([]);
-    setPendingQuestion("");
-    api.getConversation(baseId, conversationId).then((value) => { setHistory(value); setResult(null); }, (reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取会话。"));
+    Promise.resolve().then(() => {
+      setHistory(null);
+      setStreamingText("");
+      setStreamingSources([]);
+      setPendingQuestion("");
+      return api.getConversation(baseId, conversationId);
+    }).then((value) => { setHistory(value); setResult(null); }, (reason: unknown) => setError(reason instanceof Error ? reason.message : "无法读取会话。"));
   }, [baseId, conversationId]);
   useEffect(() => {
     const messageList = messageListRef.current;

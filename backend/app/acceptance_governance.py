@@ -6,6 +6,10 @@ AcceptanceStatus = Literal["passed", "failed", "blocked"]
 
 
 class AcceptanceSnapshot(BaseModel):
+    runtime_ready: bool = False
+    schema_version: int = 0
+    required_schema_version: int = 0
+    commit_sha: str | None = None
     external_source_count: int = 0
     successful_sync_runs: int = 0
     incremental_change_count: int = 0
@@ -18,8 +22,10 @@ class AcceptanceSnapshot(BaseModel):
     retrieval_report_id: str | None = None
     answer_report_passed: bool = False
     answer_report_id: str | None = None
-    acl_leak_count: int = 0
-    citation_failure_count: int = 0
+    acl_leak_count: int | None = None
+    citation_failure_count: int | None = None
+    regression_case_count: int = 0
+    regression_unverified_count: int = 0
     regression_failed_count: int = 0
 
 
@@ -40,27 +46,47 @@ def evaluate_acceptance(snapshot: AcceptanceSnapshot) -> AcceptanceResult:
     external_ready = snapshot.external_source_count > 0
     sync_ready = snapshot.successful_sync_runs >= 2 and snapshot.incremental_change_count > 0
     parse_ready = snapshot.parsed_version_count > 0 and snapshot.active_index_count > 0
-    retrieval_status: AcceptanceStatus = (
-        "failed"
-        if snapshot.acl_leak_count > 0
-        else "passed"
-        if snapshot.retrieval_report_passed
-        else "blocked"
-    )
-    answer_status: AcceptanceStatus = (
-        "failed"
-        if snapshot.citation_failure_count > 0
-        else "passed"
-        if snapshot.answer_report_passed
-        else "blocked"
-    )
-    regression_status: AcceptanceStatus = "failed" if snapshot.regression_failed_count > 0 else "passed"
+    if snapshot.retrieval_report_id is None:
+        retrieval_status: AcceptanceStatus = "blocked"
+    elif not snapshot.retrieval_report_passed:
+        retrieval_status = "failed"
+    elif snapshot.acl_leak_count is None:
+        retrieval_status = "blocked"
+    elif snapshot.acl_leak_count > 0:
+        retrieval_status = "failed"
+    else:
+        retrieval_status = "passed"
+    if snapshot.answer_report_id is None:
+        answer_status: AcceptanceStatus = "blocked"
+    elif not snapshot.answer_report_passed:
+        answer_status = "failed"
+    elif snapshot.citation_failure_count is None:
+        answer_status = "blocked"
+    elif snapshot.citation_failure_count > 0:
+        answer_status = "failed"
+    else:
+        answer_status = "passed"
+    if snapshot.regression_failed_count > 0:
+        regression_status: AcceptanceStatus = "failed"
+    elif snapshot.regression_case_count == 0 or snapshot.regression_unverified_count > 0:
+        regression_status = "blocked"
+    else:
+        regression_status = "passed"
     steps = [
         AcceptanceStep(
             step_key="runtime",
             title="运行环境",
-            status="passed",
-            summary="PostgreSQL Schema 与应用运行时可用。",
+            status="passed" if snapshot.runtime_ready else "blocked",
+            summary=(
+                "Schema 与应用 Commit 均可追踪。"
+                if snapshot.runtime_ready
+                else "Schema 未达到要求或应用 Commit 不可追踪。"
+            ),
+            evidence={
+                "schema_version": snapshot.schema_version,
+                "required_schema_version": snapshot.required_schema_version,
+                **({"commit_sha": snapshot.commit_sha} if snapshot.commit_sha else {}),
+            },
         ),
         AcceptanceStep(
             step_key="external_source",
@@ -130,8 +156,18 @@ def evaluate_acceptance(snapshot: AcceptanceSnapshot) -> AcceptanceResult:
             step_key="evaluation_and_regression",
             title="评测与回归",
             status=regression_status,
-            summary="回归集没有失败案例。" if regression_status == "passed" else "回归失败已阻止放行。",
-            evidence={"regression_failed_count": snapshot.regression_failed_count},
+            summary=(
+                "回归集没有失败案例。"
+                if regression_status == "passed"
+                else "回归失败已阻止放行。"
+                if regression_status == "failed"
+                else "缺少已完成验证的回归案例。"
+            ),
+            evidence={
+                "regression_case_count": snapshot.regression_case_count,
+                "regression_unverified_count": snapshot.regression_unverified_count,
+                "regression_failed_count": snapshot.regression_failed_count,
+            },
         ),
     ]
     preliminary = _overall_status(steps)

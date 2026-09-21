@@ -36,7 +36,6 @@ class BadCaseUpdate(BaseModel):
     severity: Literal["low", "medium", "high", "critical"] | None = None
     assignee: str | None = None
     fix_commit: str | None = Field(default=None, pattern=r"^[0-9a-f]{7,40}$")
-    regression_passed: bool | None = None
 
 
 def evaluate_quality_gate(metrics: Mapping[str, Mapping[str, object]]) -> QualityGateResult:
@@ -83,19 +82,17 @@ _TRANSITIONS: dict[str, set[str]] = {
     "new": {"confirmed", "ignored"},
     "confirmed": {"fixing", "ignored"},
     "fixing": {"resolved", "ignored"},
-    "resolved": {"regression_added", "confirmed"},
+    "resolved": {"confirmed"},
     "regression_added": {"confirmed"},
     "ignored": {"confirmed"},
 }
 
 
 def validate_bad_case_transition(current: str, update: BadCaseUpdate) -> BadCaseUpdate:
-    if update.status == "regression_added" and update.regression_passed is False:
-        return update.model_copy(update={"status": "confirmed"})
+    if update.status == "regression_added":
+        raise ValueError("加入回归集必须由正式回归验证自动完成")
     if update.status not in _TRANSITIONS.get(current, set()):
         raise ValueError(f"不允许从 {current} 流转到 {update.status}，请按状态流转处理")
     if update.status == "resolved" and not update.fix_commit:
         raise ValueError("标记 resolved 前必须关联修复提交")
-    if update.status == "regression_added" and update.regression_passed is not True:
-        raise ValueError("加入回归集前必须通过回归验证")
     return update

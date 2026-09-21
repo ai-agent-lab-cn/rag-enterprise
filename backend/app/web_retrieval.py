@@ -27,6 +27,7 @@ class WebSearchResult:
     content_sha256: str
     rank: int
 
+
 # HTML 文本提取器
 class _TextExtractor(HTMLParser):
     def __init__(self):
@@ -45,6 +46,7 @@ class _TextExtractor(HTMLParser):
     def handle_data(self, data: str) -> None:
         if not self._ignored and data.strip():
             self.parts.append(data.strip())
+
 
 # 验证网页 URL 的安全性，确保其符合 HTTPS、域名白名单等要求
 def validate_web_url(url: str, allowed_domains: tuple[str, ...]) -> str:
@@ -70,6 +72,7 @@ def validate_web_url(url: str, allowed_domains: tuple[str, ...]) -> str:
     port = f":{parsed.port}" if parsed.port and parsed.port != 443 else ""
     return urlunsplit(("https", f"{hostname}{port}", parsed.path or "/", parsed.query, ""))
 
+
 # 安全的网页内容获取器
 class SafeWebContentFetcher:
     def __init__(self, timeout_seconds: float = 8, max_bytes: int = 2 * 1024 * 1024):
@@ -80,7 +83,9 @@ class SafeWebContentFetcher:
         current = validate_web_url(url, allowed_domains)
         with httpx.Client(timeout=self.timeout_seconds, follow_redirects=False) as client:
             for _redirect in range(4):
-                with client.stream("GET", current, headers={"User-Agent": "RongRAG-WebEvidence/1.0"}) as response:
+                with client.stream(
+                    "GET", current, headers={"User-Agent": "RongRAG-WebEvidence/1.0"}
+                ) as response:
                     if response.status_code in {301, 302, 303, 307, 308}:
                         location = response.headers.get("location")
                         if not location:
@@ -101,6 +106,7 @@ class SafeWebContentFetcher:
                     raw = b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
                     return current, _extract_text(raw, content_type)
         raise WebSecurityError("Web 来源重定向次数过多。")
+
 
 # 网页搜索提供器，使用 SearXNG 作为搜索引擎
 class SearXNGWebSearchProvider:
