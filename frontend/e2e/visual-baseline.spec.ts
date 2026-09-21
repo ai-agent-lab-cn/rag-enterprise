@@ -88,6 +88,7 @@ async function freeze(page: Page) {
 }
 
 test.describe("视觉基线", () => {
+  test.skip(Boolean(process.env.CI), "视觉基线绑定本地数据与快照，只用于人工对比，不进入 CI");
   test.skip(!username || !password, "需要管理员凭据；见文件头的生成命令");
 
   // 登录页此前完全不在基线覆盖内：signIn() 是每个截图点的第一步，17 张里没有一张是

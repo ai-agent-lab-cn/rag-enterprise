@@ -92,14 +92,20 @@ async function signIn(page: Page) {
 /**
  * 进入索引治理 Tab。
  *
- * **每个用例都要重新走「知识库管理 → 企业知识库」这条路径**，不能只切 Tab：
+ * **每个用例都要重新走「知识库管理 → 第一条知识库」这条路径**，不能只切 Tab：
  * KnowledgeBaseDetailPage 的 load() 挂在 useCallback([id]) 上，切 Tab 不会重新请求，
  * 于是这个用例注册的 route 拦不到任何东西，拿到的还是上一个用例的数据。
  */
 async function openGovernance(page: Page) {
   await page.getByRole("button", { name: "知识库管理", exact: true }).first().click();
   await expect(page.getByRole("heading", { name: "知识库管理" })).toBeVisible();
-  await page.getByText("企业知识库").first().click();
+  await page
+    .getByRole("table", { name: "知识库列表" })
+    .getByRole("row")
+    .nth(1)
+    .getByRole("button")
+    .first()
+    .click();
   await expect(page.getByRole("tab", { name: /资料/ })).toBeVisible();
   await page.getByRole("tab", { name: /索引治理/ }).click();
   await page.waitForLoadState("networkidle");
