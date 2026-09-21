@@ -1033,10 +1033,10 @@ test("回答评测页只读展示正式指标", async () => {
   window.history.replaceState({}, "", "/evaluation?view=reports&report=answer-official");
   render(<App />);
   const detail = await screen.findByRole("dialog", { name: "正式报告详情" });
+  expect(await within(detail).findByText("答案正确性")).toBeInTheDocument();
   expect(detail).toHaveTextContent("回答报告");
   expect(detail).toHaveTextContent("正式");
   expect(detail).toHaveTextContent("通过");
-  expect(detail).toHaveTextContent("答案正确性");
   expect(detail).toHaveTextContent("无支持声明率");
   expect(detail).toHaveTextContent("回答报告是横向质量证据，不参与索引版本放行");
 });
