@@ -2,6 +2,7 @@ import { type FormEvent, type MouseEvent, useCallback, useEffect, useRef, useSta
 import { api } from "../api";
 import type { ConversationSummary, DataSource, DocumentCategory, DocumentIndexState, DocumentInfo, DocumentVersion, EvaluationReportSummary, GovernedOperation, IndexBuild, IndexEvaluationRun, IndexEvaluationRunDetail, IndexVersion, IndexVersionCandidatePreview, IndexVersionComparison, IndexVersionCreationContext, KnowledgeBase, RAGPolicy, User, } from "../types";
 import { DocumentPanel } from "./DocumentPanel";
+import { FormalReportDetailDialog } from "./FormalReportDetailDialog";
 import { IndexVersionDetailDialog } from "./IndexVersionDetailDialog";
 import { KnowledgeBaseForm } from "./KnowledgeBaseForm";
 import { OperationDetailDialog } from "./OperationDetailDialog";
@@ -129,12 +130,17 @@ export function KnowledgeBaseDetailPage({ id, onOpen, initialVersionId }: {
   /**
    * 深链 `/knowledge-bases/{kb}/index-versions/{version}` 带来的版本 ID。
    *
-   * 有它时直接落在索引治理 Tab 并打开详情弹框；关闭弹框把地址恢复成
-   * `/knowledge-bases/{kb}`，不留一个打不开任何东西的 URL。
+   * 有它时直接落在索引治理 Tab 并打开详情弹框；跨模块进入时关闭弹框返回来源页，
+   * 直接访问深链时则回到当前知识库的索引治理 Tab，不留一个打不开任何东西的 URL。
    */
   initialVersionId?: string;
 }) {
-  const requestedTab = new URLSearchParams(window.location.search).get("tab");
+  const searchParams = new URLSearchParams(window.location.search);
+  const requestedTab = searchParams.get("tab");
+  const requestedReturnPath = searchParams.get("return_to");
+  const returnPath = requestedReturnPath?.startsWith("/") && !requestedReturnPath.startsWith("//")
+    ? requestedReturnPath
+    : null;
   const [activeTab, setActiveTab] = useState<"documents" | "data_sources" | "categories" | "versions" | "members" | "conversations">(
     initialVersionId ? "versions" : requestedTab === "data_sources" ? "data_sources" : requestedTab === "versions" ? "versions" : "documents",
   );
@@ -170,6 +176,7 @@ export function KnowledgeBaseDetailPage({ id, onOpen, initialVersionId }: {
   const [creationIdempotencyKey, setCreationIdempotencyKey] = useState("");
   const [reportId, setReportId] = useState("");
   const [evaluationReports, setEvaluationReports] = useState<EvaluationReportSummary[]>([]);
+  const [selectedFormalReportId, setSelectedFormalReportId] = useState<string | null>(null);
   const [buildDetailLoading, setBuildDetailLoading] = useState(false);
   const [categories, setCategories] = useState<DocumentCategory[]>([]);
   // 新建与编辑共用一个弹层：同一个对象的两种操作长得一样、字段一致，用户在一处
@@ -560,7 +567,7 @@ export function KnowledgeBaseDetailPage({ id, onOpen, initialVersionId }: {
   ];
   // 弹层打开时错误只显示在弹层内：Radix 给背景内容加了 aria-hidden，
   // 顶部横幅在弹层背后，既看不见也不会被屏幕阅读器读到。
-  const dialogOpen = Boolean(ragPolicyOpen || editingBase || categoryForm || deletingCategory || aclTarget || activationTarget || validationTarget || cleanupTarget || cancelBuildTarget || retireTarget || rollbackTarget || creationContext || selectedOperation || selectedVersionId || evaluationTarget);
+  const dialogOpen = Boolean(ragPolicyOpen || editingBase || categoryForm || deletingCategory || aclTarget || activationTarget || validationTarget || cleanupTarget || cancelBuildTarget || retireTarget || rollbackTarget || creationContext || selectedOperation || selectedVersionId || selectedFormalReportId || evaluationTarget);
   // 可选报告的判据是 official + 指纹一致，与质量状态列、releaseStages 同源。
   // 不再要求 passed：未达阈值的受控报告也是三层验证的合法证据，是否可发布由验证决定。
   const compatibleEvaluationReports = validationTarget
@@ -733,7 +740,7 @@ export function KnowledgeBaseDetailPage({ id, onOpen, initialVersionId }: {
           <p className="m-0 text-sm text-ink-faint">用于确认候选索引的检索质量，并作为发布验证依据。</p>
         </div>
         <DataTable label="正式质量评测" rows={releaseReports} rowKey={(item) => item.report_id} density="compact" columns={[
-          { key: "report", header: "报告", width: "26%", render: (item: EvaluationReportSummary) => <span className="grid justify-items-start gap-0.5"><Button variant="link" className="h-auto max-w-full justify-start truncate px-0 py-0 text-left" title={item.report_id} onClick={() => onOpen(`/evaluation?view=reports&report=${encodeURIComponent(item.report_id)}`)}>{item.report_id}</Button><small className="text-ink-faint">{item.dataset_id} · {item.dataset_version}</small></span> },
+          { key: "report", header: "报告", width: "26%", render: (item: EvaluationReportSummary) => <span className="grid justify-items-start gap-0.5"><Button variant="link" className="h-auto max-w-full justify-start truncate px-0 py-0 text-left" title={item.report_id} onClick={() => setSelectedFormalReportId(item.report_id)}>{item.report_id}</Button><small className="text-ink-faint">{item.dataset_id} · {item.dataset_version}</small></span> },
           { key: "config", header: "评测配置", width: "20%", render: (item: EvaluationReportSummary) => {
             if (!item.config_fingerprint) return <span className="text-ink-faint">历史报告</span>;
             const scope = reportScope(item);
@@ -789,10 +796,12 @@ export function KnowledgeBaseDetailPage({ id, onOpen, initialVersionId }: {
     onClose={() => {
       setSelectedVersionId(null);
       // 深链进来时地址停在 /index-versions/{v}，关掉弹框却不改地址的话，刷新会再次
-      // 打开它，而用户以为自己已经关掉了。
-      if (window.location.pathname.includes("/index-versions/")) onOpen(`/knowledge-bases/${id}`);
+      // 打开它。跨模块关联还必须恢复来源报告，否则用户会被留在知识库页面。
+      if (window.location.pathname.includes("/index-versions/")) {
+        onOpen(returnPath ?? `/knowledge-bases/${id}?tab=versions`);
+      }
     }}
     onActionComplete={() => void load()}
     onOpen={onOpen}
-  /> : null}{deletingCategory ? <Dialog open title="删除分类" onClose={() => { if (!busy) setDeletingCategory(null); }}>{error ? <ErrorBanner>{error}</ErrorBanner> : null}<div className="p-[20px_22px] text-[#626b7f] text-[14px] leading-[1.7]">{deletingCategory.document_count > 0 ? <>「{deletingCategory.name}」下还有 <strong className="text-[#242c40]">{deletingCategory.document_count} 份资料</strong>。<p>删除分类<strong className="text-[#242c40]">不会删除资料</strong>，它们会变成「无分类」，仍然可以被检索，之后可以重新分类。</p></> : <>确认删除分类「{deletingCategory.name}」吗？</>}</div><DialogActions><Button variant="secondary" loading={busy} onClick={() => setDeletingCategory(null)}>取消</Button><Button variant="destructive" loading={busy} onClick={() => void deleteCategory(deletingCategory)}>仍要删除</Button></DialogActions></Dialog> : null}{categoryForm ? <Dialog open title={categoryForm.mode === "create" ? "新建分类" : "编辑分类"} description={categoryForm.mode === "create" ? "分类可随时改名、停用或删除" : "修改后立即用于资料筛选"} onClose={() => { if (!busy) setCategoryForm(null); }}><form className="grid gap-3.5" onSubmit={(event) => { event.preventDefault(); void saveCategory(); }}>{error ? <ErrorBanner>{error}</ErrorBanner> : null}<label className="grid gap-[7px] text-[12px] text-ink-muted">名称<Input className="min-h-[40px]" value={categoryDraft.name} maxLength={64} autoFocus onChange={(event) => { setCategoryDraft((current) => ({ ...current, name: event.target.value })); setError(""); }}/></label><label className="grid gap-[7px] text-[12px] text-ink-muted">描述<textarea value={categoryDraft.description} maxLength={300} rows={3} onChange={(event) => setCategoryDraft((current) => ({ ...current, description: event.target.value }))}/></label><label className="grid gap-[7px] text-[12px] text-ink-muted">排序<Input className="min-h-[40px]" type="number" min={0} max={10000} value={categoryDraft.sort_order} onChange={(event) => setCategoryDraft((current) => ({ ...current, sort_order: Number(event.target.value) }))}/></label><DialogActions><Button variant="secondary" loading={busy} onClick={() => setCategoryForm(null)}>取消</Button><Button type="submit" loading={busy}>{categoryForm.mode === "create" ? "创建" : "保存"}</Button></DialogActions></form></Dialog> : null}{aclTarget ? <Dialog open size="md" title="配置 ACL" description={`${aclTarget.name} · 当前版本 ${aclTarget.version}`} onClose={() => { if (!savingAcl) setAclTarget(null); }}>{error ? <ErrorBanner>{error}</ErrorBanner> : null}<div className="grid max-h-[360px] overflow-y-auto border-t border-line">{members.length ? members.map((member) => <label className="flex min-h-14 items-center justify-between gap-4 border-b border-divider" key={member.user_id}><span className="grid gap-0.5"><strong>{member.display_name}</strong><small className="text-sm text-ink-faint">{member.username}</small></span><Select size="sm" className="w-28" aria-label={`${member.display_name} ACL`} value={aclDraft[member.user_id] || "inherit"} onChange={(event) => setAclDraft((current) => ({ ...current, [member.user_id]: event.target.value as "inherit" | "allow" | "deny" }))}><option value="inherit">继承</option><option value="allow">Allow</option><option value="deny">Deny</option></Select></label>) : <p className="text-md text-[#737c90] leading-[1.6]">知识库尚未授权成员，无需配置细粒度 ACL。</p>}</div><DialogActions><Button variant="secondary" loading={savingAcl} onClick={() => setAclTarget(null)}>取消</Button><Button loading={savingAcl} blockedReason={members.length ? undefined : "知识库尚未授权成员"} onClick={() => void saveAcl()}>保存并立即生效</Button></DialogActions></Dialog> : null}{conversationConfirmDialog}</section>;
+  /> : null}{selectedFormalReportId ? <FormalReportDetailDialog open kind="retrieval" reportId={selectedFormalReportId} onClose={() => setSelectedFormalReportId(null)} onOpenVersion={(version) => { setSelectedFormalReportId(null); setSelectedVersionId(version.index_version_id); }}/> : null}{deletingCategory ? <Dialog open title="删除分类" onClose={() => { if (!busy) setDeletingCategory(null); }}>{error ? <ErrorBanner>{error}</ErrorBanner> : null}<div className="p-[20px_22px] text-[#626b7f] text-[14px] leading-[1.7]">{deletingCategory.document_count > 0 ? <>「{deletingCategory.name}」下还有 <strong className="text-[#242c40]">{deletingCategory.document_count} 份资料</strong>。<p>删除分类<strong className="text-[#242c40]">不会删除资料</strong>，它们会变成「无分类」，仍然可以被检索，之后可以重新分类。</p></> : <>确认删除分类「{deletingCategory.name}」吗？</>}</div><DialogActions><Button variant="secondary" loading={busy} onClick={() => setDeletingCategory(null)}>取消</Button><Button variant="destructive" loading={busy} onClick={() => void deleteCategory(deletingCategory)}>仍要删除</Button></DialogActions></Dialog> : null}{categoryForm ? <Dialog open title={categoryForm.mode === "create" ? "新建分类" : "编辑分类"} description={categoryForm.mode === "create" ? "分类可随时改名、停用或删除" : "修改后立即用于资料筛选"} onClose={() => { if (!busy) setCategoryForm(null); }}><form className="grid gap-3.5" onSubmit={(event) => { event.preventDefault(); void saveCategory(); }}>{error ? <ErrorBanner>{error}</ErrorBanner> : null}<label className="grid gap-[7px] text-[12px] text-ink-muted">名称<Input className="min-h-[40px]" value={categoryDraft.name} maxLength={64} autoFocus onChange={(event) => { setCategoryDraft((current) => ({ ...current, name: event.target.value })); setError(""); }}/></label><label className="grid gap-[7px] text-[12px] text-ink-muted">描述<textarea value={categoryDraft.description} maxLength={300} rows={3} onChange={(event) => setCategoryDraft((current) => ({ ...current, description: event.target.value }))}/></label><label className="grid gap-[7px] text-[12px] text-ink-muted">排序<Input className="min-h-[40px]" type="number" min={0} max={10000} value={categoryDraft.sort_order} onChange={(event) => setCategoryDraft((current) => ({ ...current, sort_order: Number(event.target.value) }))}/></label><DialogActions><Button variant="secondary" loading={busy} onClick={() => setCategoryForm(null)}>取消</Button><Button type="submit" loading={busy}>{categoryForm.mode === "create" ? "创建" : "保存"}</Button></DialogActions></form></Dialog> : null}{aclTarget ? <Dialog open size="md" title="配置 ACL" description={`${aclTarget.name} · 当前版本 ${aclTarget.version}`} onClose={() => { if (!savingAcl) setAclTarget(null); }}>{error ? <ErrorBanner>{error}</ErrorBanner> : null}<div className="grid max-h-[360px] overflow-y-auto border-t border-line">{members.length ? members.map((member) => <label className="flex min-h-14 items-center justify-between gap-4 border-b border-divider" key={member.user_id}><span className="grid gap-0.5"><strong>{member.display_name}</strong><small className="text-sm text-ink-faint">{member.username}</small></span><Select size="sm" className="w-28" aria-label={`${member.display_name} ACL`} value={aclDraft[member.user_id] || "inherit"} onChange={(event) => setAclDraft((current) => ({ ...current, [member.user_id]: event.target.value as "inherit" | "allow" | "deny" }))}><option value="inherit">继承</option><option value="allow">Allow</option><option value="deny">Deny</option></Select></label>) : <p className="text-md text-[#737c90] leading-[1.6]">知识库尚未授权成员，无需配置细粒度 ACL。</p>}</div><DialogActions><Button variant="secondary" loading={savingAcl} onClick={() => setAclTarget(null)}>取消</Button><Button loading={savingAcl} blockedReason={members.length ? undefined : "知识库尚未授权成员"} onClick={() => void saveAcl()}>保存并立即生效</Button></DialogActions></Dialog> : null}{conversationConfirmDialog}</section>;
 }

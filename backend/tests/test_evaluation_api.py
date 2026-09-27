@@ -3,6 +3,7 @@ from pathlib import Path
 
 from backend.app.evaluation_reports import EvaluationReportRepository
 from backend.app.main import get_evaluation_reports, get_service
+from backend.evaluation.answer_quality import AnswerEvaluationReport
 
 
 def _write_report(target: Path, **changes) -> dict:
@@ -63,6 +64,8 @@ def test_evaluation_list_only_exposes_official_reports_in_latest_first_order(cli
         "official": True,
         "passed": True,
         "config_fingerprint": older.get("config_fingerprint"),
+        "sample_count": older["query_count"],
+        "failed_metrics": [],
     }
 
 
@@ -82,6 +85,57 @@ def test_evaluation_detail_returns_complete_context_metrics_and_conclusions(clie
     assert payload["vector_mrr"] == report["vector_mrr"]
     assert payload["rerank_mrr"] == report["rerank_mrr"]
     assert payload["passed"] is True
+    assert payload["dataset_evidence"] == {
+        "document_count": None,
+        "query_count": 20,
+        "integrity_status": "unknown",
+        "integrity_basis": "unavailable",
+    }
+
+
+def test_evaluation_detail_explains_current_registered_corpus_integrity(client, tmp_path) -> None:
+    report = _write_report(
+        tmp_path / "registered.json",
+        report_id="registered-corpus-report",
+        dataset_id="rag-enterprise-corpus-paraphrased",
+        dataset_version="1.1.0",
+        query_count=145,
+    )
+    _use_reports(client, tmp_path)
+
+    response = client.get("/api/evaluations/registered-corpus-report")
+
+    assert response.status_code == 200
+    assert response.json()["dataset_evidence"] == {
+        "document_count": 10,
+        "query_count": 145,
+        "integrity_status": "passed",
+        "integrity_basis": "current_registry",
+    }
+    assert response.json()["sample_count"] == report["query_count"]
+
+
+def test_evaluation_detail_prefers_report_time_dataset_evidence(client, tmp_path) -> None:
+    _write_report(
+        tmp_path / "persisted.json",
+        report_id="persisted-evidence-report",
+        dataset_evidence={
+            "document_count": 10,
+            "query_count": 20,
+            "integrity_status": "passed",
+        },
+    )
+    _use_reports(client, tmp_path)
+
+    response = client.get("/api/evaluations/persisted-evidence-report")
+
+    assert response.status_code == 200
+    assert response.json()["dataset_evidence"] == {
+        "document_count": 10,
+        "query_count": 20,
+        "integrity_status": "passed",
+        "integrity_basis": "report",
+    }
 
 
 def test_evaluation_detail_hides_non_official_and_unknown_reports(client, tmp_path) -> None:
@@ -134,6 +188,36 @@ def test_answer_evaluation_api_only_exposes_official_report(client, tmp_path) ->
     assert detail.json()["metrics"]["source_conflict_accuracy"]["value"] == 1.0
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "ANSWER_EVALUATION_REPORT_NOT_FOUND"
+
+
+def test_answer_reports_merge_database_official_runs_with_frozen_files(tmp_path, monkeypatch) -> None:
+    answers = tmp_path / "answers"
+    answers.mkdir()
+    source = Path("backend/evaluation/reports/answers/answer_v1_baseline.json")
+    frozen = json.loads(source.read_text(encoding="utf-8"))
+    (answers / "frozen.json").write_text(json.dumps(frozen), encoding="utf-8")
+    database = AnswerEvaluationReport.model_validate({
+        **frozen,
+        "report_id": "answer-database-official",
+        "run_at": "2026-09-20T00:00:00Z",
+    })
+    repository = EvaluationReportRepository(tmp_path, "postgresql://unused")
+    monkeypatch.setattr(
+        repository,
+        "_database_answer_reports",
+        lambda: [database],
+        raising=False,
+    )
+
+    listed = repository.list_official_answers()
+    detail = repository.get_official_answer("answer-database-official")
+
+    assert [item.report_id for item in listed] == [
+        "answer-database-official",
+        frozen["report_id"],
+    ]
+    assert detail.report_id == "answer-database-official"
+    assert detail.case_count == 30
 
 
 def test_evaluation_center_overview_unifies_latest_official_reports(client, tmp_path) -> None:

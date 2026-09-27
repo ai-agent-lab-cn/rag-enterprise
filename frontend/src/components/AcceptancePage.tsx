@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { AcceptanceRun } from "../types";
+import { FormalReportDetailDialog, type FormalReportKind } from "./FormalReportDetailDialog";
+import { IndexVersionDetailDialog } from "./IndexVersionDetailDialog";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
 import { Column, DataTable } from "./ui/DataTable";
@@ -49,10 +51,12 @@ const RUN_COLUMNS: Column<AcceptanceRun>[] = [
  * `blocked` 是有意的第三态：缺少真实 S3、增量删除或 ACL 证据时必须显示 blocked，
  * 不能塌缩成 passed/failed 两态——见结论条与步骤列表里各自独立的 `blocked` 分支。
  */
-export function AcceptancePage({ isAdmin, onOpen }: { isAdmin: boolean; onOpen: (path: string) => void }) {
+export function AcceptancePage({ isAdmin }: { isAdmin: boolean; onOpen: (path: string) => void }) {
   const [runs, setRuns] = useState<AcceptanceRun[] | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [selectedVersion, setSelectedVersion] = useState<{ knowledgeBaseId: string; versionId: string } | null>(null);
+  const [selectedReport, setSelectedReport] = useState<{ kind: FormalReportKind; reportId: string } | null>(null);
 
   useEffect(() => {
     api.listAcceptanceRuns("kb_default").then(setRuns, (reason: unknown) =>
@@ -69,7 +73,12 @@ export function AcceptancePage({ isAdmin, onOpen }: { isAdmin: boolean; onOpen: 
           runs={runs}
           isAdmin={isAdmin}
           busy={busy}
-          onOpen={onOpen}
+          onStarting={() => {
+            setBusy(true);
+            setError("");
+          }}
+          onOpenVersion={(knowledgeBaseId, versionId) => setSelectedVersion({ knowledgeBaseId, versionId })}
+          onOpenReport={(kind, reportId) => setSelectedReport({ kind, reportId })}
           onStarted={(run) => {
             setRuns((current) => [run, ...(current ?? [])]);
             setBusy(false);
@@ -89,6 +98,26 @@ export function AcceptancePage({ isAdmin, onOpen }: { isAdmin: boolean; onOpen: 
           <Skeleton className="h-64 rounded-lg" />
         </div>
       )}
+      {selectedVersion ? (
+        <IndexVersionDetailDialog
+          open
+          knowledgeBaseId={selectedVersion.knowledgeBaseId}
+          versionId={selectedVersion.versionId}
+          onClose={() => setSelectedVersion(null)}
+        />
+      ) : null}
+      {selectedReport ? (
+        <FormalReportDetailDialog
+          open
+          kind={selectedReport.kind}
+          reportId={selectedReport.reportId}
+          onClose={() => setSelectedReport(null)}
+          onOpenVersion={(version) => {
+            setSelectedReport(null);
+            setSelectedVersion({ knowledgeBaseId: version.knowledge_base_id, versionId: version.index_version_id });
+          }}
+        />
+      ) : null}
     </section>
   );
 }
@@ -97,19 +126,24 @@ function AcceptancePanel({
   runs,
   isAdmin,
   busy,
+  onStarting,
   onStarted,
   onError,
-  onOpen,
+  onOpenVersion,
+  onOpenReport,
 }: {
   runs: AcceptanceRun[];
   isAdmin: boolean;
   busy: boolean;
+  onStarting: () => void;
   onStarted: (run: AcceptanceRun) => void;
   onError: (message: string) => void;
-  onOpen: (path: string) => void;
+  onOpenVersion: (knowledgeBaseId: string, versionId: string) => void;
+  onOpenReport: (kind: FormalReportKind, reportId: string) => void;
 }) {
   const latest = runs[0] ?? null;
   const start = async () => {
+    onStarting();
     try {
       onStarted(await api.startAcceptanceRun("kb_default"));
     } catch (reason) {
@@ -125,7 +159,7 @@ function AcceptancePanel({
         </div>
         {isAdmin ? (
           <Button size="sm" loading={busy} onClick={() => void start()}>
-            运行默认知识库验收
+            {busy ? "验收运行中…" : "运行默认知识库验收"}
           </Button>
         ) : null}
       </header>
@@ -153,7 +187,8 @@ function AcceptancePanel({
                     <AcceptanceEvidence
                       evidence={step.evidence}
                       knowledgeBaseId={latest.knowledge_base_id}
-                      onOpen={onOpen}
+                      onOpenVersion={onOpenVersion}
+                      onOpenReport={onOpenReport}
                     />
                   ) : null}
                 </div>
@@ -180,6 +215,9 @@ function AcceptancePanel({
 }
 
 const EVIDENCE_LABEL: Record<string, string> = {
+  schema_version: "当前 Schema",
+  required_schema_version: "要求 Schema",
+  commit_sha: "应用 Commit",
   external_source_count: "外部数据源",
   successful_sync_runs: "成功同步",
   incremental_change_count: "增量变更",
@@ -189,17 +227,21 @@ const EVIDENCE_LABEL: Record<string, string> = {
   active_index_count: "活动索引",
   acl_leak_count: "ACL 泄漏",
   citation_failure_count: "Citation 失败",
+  regression_case_count: "回归案例",
+  regression_unverified_count: "待验证回归",
   regression_failed_count: "回归失败",
 };
 
 function AcceptanceEvidence({
   evidence,
   knowledgeBaseId,
-  onOpen,
+  onOpenVersion,
+  onOpenReport,
 }: {
   evidence: Record<string, unknown>;
   knowledgeBaseId: string | null;
-  onOpen: (path: string) => void;
+  onOpenVersion: (knowledgeBaseId: string, versionId: string) => void;
+  onOpenReport: (kind: FormalReportKind, reportId: string) => void;
 }) {
   return (
     <dl className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-faint">
@@ -211,7 +253,7 @@ function AcceptanceEvidence({
             <div key={key} className="flex items-center gap-1">
               <dt>索引版本</dt>
               <dd className="m-0">
-                <Button variant="link" className="h-auto px-0 py-0 font-mono text-xs" aria-label={`查看索引版本 ${id}`} onClick={() => onOpen(`/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/index-versions/${encodeURIComponent(id)}`)}>{id}</Button>
+                <Button variant="link" className="h-auto px-0 py-0 font-mono text-xs" aria-label={`查看索引版本 ${id}`} onClick={() => onOpenVersion(knowledgeBaseId, id)}>{id}</Button>
               </dd>
             </div>
           );
@@ -222,7 +264,7 @@ function AcceptanceEvidence({
             <div key={key} className="flex items-center gap-1">
               <dt>{key === "retrieval_report_id" ? "检索报告" : "回答报告"}</dt>
               <dd className="m-0">
-                <Button variant="link" className="h-auto px-0 py-0 font-mono text-xs" aria-label={`查看正式报告 ${id}`} onClick={() => onOpen(`/evaluation?view=reports&report=${encodeURIComponent(id)}`)}>{id}</Button>
+                <Button variant="link" className="h-auto px-0 py-0 font-mono text-xs" aria-label={`查看正式报告 ${id}`} onClick={() => onOpenReport(key === "retrieval_report_id" ? "retrieval" : "answer", id)}>{id}</Button>
               </dd>
             </div>
           );

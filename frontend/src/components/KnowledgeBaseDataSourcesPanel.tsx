@@ -226,7 +226,7 @@ export function KnowledgeBaseDataSourcesPanel({ knowledgeBaseId, items, categori
       label="数据源列表"
       emptyState={items.length
         ? { kind: "filtered", title: "没有符合条件的数据源", description: "调整来源类型或同步状态后重试。" }
-        : { kind: "empty", title: "暂无外部数据源", description: "接入 S3、网页或数据库等外部来源。" }}
+        : { kind: "empty", title: "暂无外部数据源（建设中）", description: "接入 S3、网页或数据库等外部来源。" }}
     />
     {formOpen ? <Dialog open size="md" title={editing ? "编辑数据源" : "新建外部数据源"} description="凭据只读取运行环境变量，不保存到数据库。" onClose={() => { if (!busyId) { setFormOpen(false); setEditing(null); } }}>
       <form className="grid gap-[9px] pt-[20px] px-[22px]" onSubmit={(event) => { event.preventDefault(); void save(); }}>

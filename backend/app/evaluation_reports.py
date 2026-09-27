@@ -8,6 +8,7 @@ from psycopg.rows import dict_row
 from pydantic import ValidationError
 
 from backend.evaluation.answer_quality import AnswerEvaluationReport
+from backend.evaluation.corpus_dataset import load_corpus_dataset
 from backend.evaluation.report import RetrievalEvaluationReport
 
 from .errors import AppError
@@ -16,9 +17,27 @@ from .schemas import (
     AnswerEvaluationReportResponse,
     AnswerEvaluationReportSummary,
     EvaluationCenterOverviewResponse,
+    EvaluationDatasetEvidenceResponse,
     EvaluationReportAssociationsResponse,
     EvaluationReportResponse,
     EvaluationReportSummary,
+)
+
+DATASETS_PATH = Path(__file__).resolve().parents[1] / "evaluation" / "datasets"
+
+RETRIEVAL_METRIC_KEYS = (
+    "recall_at_5",
+    "recall_at_10",
+    "vector_mrr",
+    "rerank_mrr",
+    "rerank_recall_at_5",
+    "hybrid_mrr",
+    "ndcg_at_5",
+    "ndcg_at_10",
+    "metadata_filter_accuracy",
+    "query_rewrite_success_rate",
+    "query_rewrite_fallback_rate",
+    "no_result_rate",
 )
 
 
@@ -95,24 +114,49 @@ class EvaluationReportRepository:
         return reports
 
     def list_official_answers(self) -> list[AnswerEvaluationReportSummary]:
-        """回答报告独立存放，只公开经过人工复核后标记 official 的正式报告。"""
-        reports = [
-            self._load_answer(path)
-            for path in sorted((self.reports_path / "answers").glob("*.json"))
-            if "human_review" not in path.name
-        ]
-        official = [report for report in reports if report.official]
-        newest_first = sorted(official, key=lambda item: item.run_at, reverse=True)
-        return [self._answer_summary(report) for report in newest_first]
+        """回答报告与检索报告使用同一证据来源规则。"""
+        return [self._answer_summary(report) for report in self._official_answer_reports()]
 
     def get_official_answer(self, report_id: str) -> AnswerEvaluationReportResponse:
+        for report in self._official_answer_reports():
+            if report.report_id == report_id:
+                return self._answer_detail(report)
+        raise AppError("ANSWER_EVALUATION_REPORT_NOT_FOUND", "未找到该正式回答评测报告。", 404)
+
+    def _official_answer_reports(self) -> list[AnswerEvaluationReport]:
+        by_id: dict[str, AnswerEvaluationReport] = {}
         for path in sorted((self.reports_path / "answers").glob("*.json")):
             if "human_review" in path.name:
                 continue
             report = self._load_answer(path)
-            if report.official and report.report_id == report_id:
-                return self._answer_detail(report)
-        raise AppError("ANSWER_EVALUATION_REPORT_NOT_FOUND", "未找到该正式回答评测报告。", 404)
+            if report.official:
+                by_id[report.report_id] = report
+        for report in self._database_answer_reports():
+            by_id[report.report_id] = report
+        return sorted(by_id.values(), key=lambda item: item.run_at, reverse=True)
+
+    def _database_answer_reports(self) -> list[AnswerEvaluationReport]:
+        if not self.database_url:
+            return []
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                """SELECT evaluation_run_id, report_payload FROM evaluation_runs
+                   WHERE evaluation_type='answer' AND status='succeeded' AND official
+                     AND report_payload IS NOT NULL
+                   ORDER BY run_at DESC"""
+            ).fetchall()
+        reports: list[AnswerEvaluationReport] = []
+        for row in rows:
+            try:
+                reports.append(AnswerEvaluationReport.model_validate(row["report_payload"]))
+            except ValidationError:
+                structured_log(
+                    "answer_evaluation_report.payload_invalid",
+                    level=30,
+                    evaluation_run_id=str(row["evaluation_run_id"]),
+                    result="error",
+                )
+        return reports
 
     def center_overview(self) -> EvaluationCenterOverviewResponse:
         retrieval = self.list_official()
@@ -255,6 +299,13 @@ class EvaluationReportRepository:
 
     @staticmethod
     def _summary(report: RetrievalEvaluationReport) -> EvaluationReportSummary:
+        failed_metrics = [
+            key
+            for key in RETRIEVAL_METRIC_KEYS
+            if (metric := getattr(report, key)) is not None and not metric.passed
+        ]
+        if report.acl_leak_count not in {None, 0}:
+            failed_metrics.append("acl_leak_count")
         return EvaluationReportSummary(
             report_id=report.report_id,
             dataset_id=report.dataset_id,
@@ -265,6 +316,8 @@ class EvaluationReportRepository:
             official=report.official,
             passed=report.passed,
             config_fingerprint=report.config_fingerprint,
+            sample_count=report.query_count,
+            failed_metrics=failed_metrics,
         )
 
     @classmethod
@@ -283,6 +336,7 @@ class EvaluationReportRepository:
             **cls._summary(report).model_dump(),
             parameters=report.parameters,
             query_count=report.query_count,
+            dataset_evidence=cls._dataset_evidence(report),
             recall_at_5=report.recall_at_5.model_dump(),
             recall_at_10=report.recall_at_10.model_dump() if report.recall_at_10 else None,
             vector_mrr=report.vector_mrr.model_dump(),
@@ -313,7 +367,46 @@ class EvaluationReportRepository:
         )
 
     @staticmethod
+    def _dataset_evidence(report: RetrievalEvaluationReport) -> EvaluationDatasetEvidenceResponse:
+        if report.dataset_evidence is not None:
+            return EvaluationDatasetEvidenceResponse(
+                **report.dataset_evidence.model_dump(),
+                integrity_basis="report",
+            )
+
+        # 历史报告没有保存运行时证据。只有当前仓库仍存在完全同 ID、同版本、同问题数的
+        # 冻结数据集，并重新通过哈希、段落数和标注引用校验时，才展示“当前校验通过”。
+        # basis 明确区分当前校验与历史运行时快照，避免把两者混成同一份证据。
+        for path in sorted(DATASETS_PATH.glob("*.json")):
+            try:
+                dataset, _ = load_corpus_dataset(path)
+            except (OSError, UnicodeError, ValueError, ValidationError):
+                continue
+            if (
+                dataset.dataset_id == report.dataset_id
+                and dataset.version == report.dataset_version
+                and len(dataset.queries) == report.query_count
+            ):
+                return EvaluationDatasetEvidenceResponse(
+                    document_count=len(dataset.documents),
+                    query_count=len(dataset.queries),
+                    integrity_status="passed",
+                    integrity_basis="current_registry",
+                )
+        return EvaluationDatasetEvidenceResponse(
+            document_count=None,
+            query_count=report.query_count,
+            integrity_status="unknown",
+            integrity_basis="unavailable",
+        )
+
+    @staticmethod
     def _answer_summary(report: AnswerEvaluationReport) -> AnswerEvaluationReportSummary:
+        failed_metrics = [
+            key
+            for key, metric in report.metrics
+            if metric is not None and not metric.passed
+        ]
         return AnswerEvaluationReportSummary(
             report_id=report.report_id,
             dataset_id=report.dataset_id,
@@ -324,6 +417,8 @@ class EvaluationReportRepository:
             models=report.models,
             official=report.official,
             passed=report.passed,
+            sample_count=report.case_count,
+            failed_metrics=failed_metrics,
         )
 
     @classmethod

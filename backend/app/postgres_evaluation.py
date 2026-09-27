@@ -439,21 +439,54 @@ class PostgresEvaluationGovernanceRepository:
                     and re.fullmatch(r"[0-9a-f]{7,40}", configured_commit_sha) is not None
                 )
                 active_index_version_id = row["active_index_version_id"] if row else None
+                active_version = None
+                if active_index_version_id:
+                    active_version = connection.execute(
+                        """SELECT evaluation_report_id, config_fingerprint
+                             FROM index_versions
+                            WHERE knowledge_base_id=%s AND index_version_id=%s""",
+                        (knowledge_base_id, active_index_version_id),
+                    ).fetchone()
                 retrieval_evidence = None
                 answer_evidence = None
                 if active_index_version_id:
-                    retrieval_evidence = connection.execute(
-                        """SELECT passed, report_payload->>'report_id' AS report_id,
-                                  report_payload->>'acl_leak_count' AS acl_leak_count
-                           FROM evaluation_runs
-                          WHERE evaluation_type='retrieval'
-                            AND knowledge_base_id=%s AND index_version_id=%s
-                            AND official AND status='succeeded'
-                            AND passed IS NOT NULL AND report_payload IS NOT NULL
-                          ORDER BY finished_at DESC NULLS LAST, created_at DESC
-                          LIMIT 1""",
-                        (knowledge_base_id, active_index_version_id),
-                    ).fetchone()
+                    bound_report_id = (
+                        str(active_version["evaluation_report_id"])
+                        if active_version and active_version["evaluation_report_id"]
+                        else None
+                    )
+                    if bound_report_id:
+                        retrieval_evidence = connection.execute(
+                            """SELECT passed, report_payload->>'report_id' AS report_id,
+                                      report_payload->>'acl_leak_count' AS acl_leak_count
+                               FROM evaluation_runs
+                              WHERE evaluation_type='retrieval'
+                                AND knowledge_base_id=%s
+                                AND report_payload->>'report_id'=%s
+                                AND config_fingerprint=%s
+                                AND official AND status='succeeded'
+                                AND passed IS NOT NULL AND report_payload IS NOT NULL
+                              ORDER BY finished_at DESC NULLS LAST, created_at DESC
+                              LIMIT 1""",
+                            (
+                                knowledge_base_id,
+                                bound_report_id,
+                                active_version["config_fingerprint"],
+                            ),
+                        ).fetchone()
+                    else:
+                        retrieval_evidence = connection.execute(
+                            """SELECT passed, report_payload->>'report_id' AS report_id,
+                                      report_payload->>'acl_leak_count' AS acl_leak_count
+                               FROM evaluation_runs
+                              WHERE evaluation_type='retrieval'
+                                AND knowledge_base_id=%s AND index_version_id=%s
+                                AND official AND status='succeeded'
+                                AND passed IS NOT NULL AND report_payload IS NOT NULL
+                              ORDER BY finished_at DESC NULLS LAST, created_at DESC
+                              LIMIT 1""",
+                            (knowledge_base_id, active_index_version_id),
+                        ).fetchone()
                     answer_evidence = connection.execute(
                         """SELECT passed, report_payload->>'report_id' AS report_id,
                                   CASE

@@ -137,3 +137,64 @@ def test_acceptance_does_not_borrow_report_from_another_knowledge_base(monkeypat
 
     assert retrieval["status"] == "blocked"
     assert "retrieval_report_id" not in retrieval["evidence"]
+
+
+@requires_database
+def test_acceptance_uses_formal_report_explicitly_bound_to_active_version(monkeypatch) -> None:
+    database_url = os.environ["TEST_DATABASE_URL"]
+    _reset(database_url)
+    knowledge_base_id, active_version_id = _seed_scope(database_url, "active")
+    previous_version_id = "iv_previous"
+    report_id = "report_bound_to_active"
+    fingerprint = "a" * 64
+    now = datetime.now(UTC)
+    with psycopg.connect(database_url) as connection:
+        connection.execute(
+            """INSERT INTO users
+               (user_id,username,username_normalized,display_name,role,password_hash,
+                created_at,updated_at)
+               VALUES ('usr_bound','bound','bound','Bound','admin','x',now(),now())"""
+        )
+        connection.execute(
+            """UPDATE index_versions
+                  SET config_fingerprint=%s, evaluation_report_id=%s
+                WHERE index_version_id=%s""",
+            (fingerprint, report_id, active_version_id),
+        )
+        connection.execute(
+            """INSERT INTO index_versions
+               (index_version_id,knowledge_base_id,status,chunking_version,parser_version,
+                embedding_model,embedding_dimension,processing_options,config_fingerprint,
+                evaluation_report_id,activated_at)
+               VALUES (%s,%s,'previous','v1-700-100','structured-v2','test/embedding',3,
+                       '{}'::jsonb,%s,%s,%s)""",
+            (previous_version_id, knowledge_base_id, fingerprint, report_id, now),
+        )
+        connection.execute(
+            """INSERT INTO evaluation_runs
+               (evaluation_run_id,evaluation_type,dataset_id,dataset_version,commit_sha,
+                knowledge_base_id,index_version_id,config_fingerprint,metrics,passed,official,
+                status,report_payload,run_at,finished_at)
+               VALUES ('eval_bound','retrieval','corpus','1.0.0','abcdef1',%s,%s,%s,
+                       '{}'::jsonb,true,true,'succeeded',%s,%s,%s)""",
+            (
+                knowledge_base_id,
+                previous_version_id,
+                fingerprint,
+                Jsonb({"report_id": report_id, "acl_leak_count": 0}),
+                now,
+                now,
+            ),
+        )
+    monkeypatch.setenv("APP_COMMIT_SHA", "abcdef1234567890")
+
+    run = PostgresEvaluationGovernanceRepository(database_url, 42).run_acceptance(
+        knowledge_base_id, "usr_bound"
+    )
+    retrieval = next(step for step in run["steps"] if step["step_key"] == "retrieval_and_acl")
+
+    assert retrieval["status"] == "passed"
+    assert retrieval["evidence"] == {
+        "acl_leak_count": 0,
+        "retrieval_report_id": report_id,
+    }

@@ -11,6 +11,8 @@
 - Markdown、TXT、PDF 多格式解析，稳定文档 ID 与完整来源 metadata
 - 本地中文 Embedding + PostgreSQL/pgvector 向量召回，按索引版本隔离
 - CrossEncoder 精排，同时展示粗召回与精排分数
+- 受控 Modular RAG：规则 + 结构化意图路由、四条固定 Profile、模块执行证据与引用门禁
+- Knowledge Base + 自托管 SearXNG 补检；仅访问知识库可信域名白名单
 - Gemini 生成带 `[来源 N]` 标签的答案，未配置 Key 时仍可完成检索
 - FastAPI 类型化接口与 React/TypeScript 交互界面
 - 知识库级数据源治理：S3 连接测试、增量同步、进度、失败重试和同步记录
@@ -25,10 +27,10 @@ MD / TXT / PDF
       ▼
 解析与重叠切片 ──► 中文 Embedding ──► pgvector 索引（按索引版本隔离）
                                              │
-用户问题 ──► 查询向量 ──► top-k 粗召回 ──► CrossEncoder 精排
+用户问题 ──► 意图路由 ──► 固定 Profile ──► KB / 受控 Web 检索 ──► 证据门禁
                                              │
                                              ▼
-                                来源标签 + Prompt ──► Gemini ──► 答案与证据
+                                来源标签 + Prompt ──► 生成与引用校验 ──► 答案与执行记录
 ```
 
 ## 技术栈
@@ -91,9 +93,10 @@ HTTPS 来源；多个来源使用英文逗号分隔。生产模式会关闭 Open
 
 ### 使用 Docker Compose
 
-本机安装 Docker 后，可构建并启动前后端容器：
+本机安装 Docker 后，先应用数据库迁移，再构建并启动服务：
 
 ```bash
+docker compose --profile tools run --rm migrate
 docker compose up --build -d
 ```
 
@@ -106,6 +109,47 @@ docker compose down
 ```
 
 上述命令默认保留命名卷。如需同时删除本地容器数据，请明确执行 `docker compose down --volumes`。
+
+### Schema V41 会话迁移与切流
+
+V41 将会话、回答、查询执行、模块执行和证据快照迁入 PostgreSQL。旧
+`data/conversations/records.json` 不会被 schema 迁移自动读取，也不会被自动删除。
+维护窗口内按以下顺序执行：
+
+```bash
+# 1. 只校验格式、ID 和源文件哈希，不写数据库
+uv run python -m scripts.migrate_conversations_to_postgres
+
+# 2. 备份旧 JSON、幂等导入，并核对会话数、回答数和逐条内容哈希
+uv run python -m scripts.migrate_conversations_to_postgres --apply
+
+# 3. 再启动 API；迁移回执不匹配时 API 会拒绝切到 PostgreSQL
+uv run uvicorn backend.app.main:app --reload
+```
+
+使用 Docker Compose 时，在应用 V41 后执行：
+
+```bash
+docker compose --profile tools run --rm migrate
+docker compose --profile tools run --rm backend \
+  python -m scripts.migrate_conversations_to_postgres --apply
+docker compose up -d
+```
+
+导入成功后 PostgreSQL 是唯一事实源；旧 JSON 与时间戳备份只读留档。重新开放写入后不再
+回退到 JSON。SearXNG 由 Compose 一并启动在本机 `127.0.0.1:8081`，其 JSON Search API
+仅供 Backend 使用；是否触发 Web 检索仍由知识库 RAG 策略和可信域名白名单共同决定。
+
+`full` 不能从 `shadow` 直接开启。进入 `canary` 后需先记录正式意图路由评测：
+
+```bash
+uv run python -m scripts.evaluate_intent_routing \
+  --commit "$(git rev-parse HEAD)" --record
+```
+
+随后还需完成知识库验收，并达到至少 3 天、100 次成功灰度执行且引用校验无失败；否则
+策略接口返回 `RAG_ROLLOUT_GATE_BLOCKED`。Canary 期间修改 Web、白名单、阈值或 Profile
+版本会重新计算灰度起点；升级 `full` 时不能同时修改这些策略。任何阶段都允许回退到较低阶段。
 
 ## API
 
@@ -134,6 +178,9 @@ docker compose down
 | `GET/POST` | `/api/knowledge-bases/{id}/documents` | 列出或上传指定知识库的文档 |
 | `DELETE` | `/api/knowledge-bases/{id}/documents/{document_id}` | 删除指定知识库的文档 |
 | `POST` | `/api/knowledge-bases/{id}/query` | 只检索指定知识库并生成答案 |
+| `GET/PUT` | `/api/knowledge-bases/{id}/rag-policy` | 管理员查看或更新受控 RAG 发布策略 |
+| `GET` | `/api/rag/pipeline-profiles` | 管理员查看系统内置的固定 Profile |
+| `GET` | `/api/query-executions/{execution_id}` | 查看有权限的模块执行时间线与策略快照 |
 | `GET` | `/api/knowledge-bases/{id}/index-versions` | 管理员查看索引版本、状态与放行报告；切换只提供 CLI 入口 |
 | `GET` | `/api/knowledge-bases/{id}/conversations` | 获取指定知识库的会话历史 |
 | `GET` | `/api/knowledge-bases/{id}/conversations/{conversation_id}` | 获取会话及回答记录 |
@@ -675,8 +722,9 @@ GitHub Release 附件为准，不在报告中复制维护。
 - 默认知识库不能删除；其他知识库包含文档时也不能删除，必须先明确删除其中的文档。
 - 每次有效查询都会保存成功或失败记录，包括来源快照、分段耗时、模型集合、Prompt
   版本/哈希及稳定错误码；只保存 Prompt 哈希，不保存完整 Prompt。
-- 会话和回答记录位于 `data/conversations/`，并严格绑定 `knowledge_base_id`；Render
-  免费演示环境仍只保证当前实例生命周期内可用，不承诺跨休眠或重新部署保留。
+- V41 起会话、回答、模块执行和证据快照位于 PostgreSQL，并严格绑定
+  `knowledge_base_id` 与 `owner_id`；`data/conversations/` 只保留迁移前 JSON 和备份，
+  不再参与运行时写入。
 - 演示资料由项目作者编写，不包含真实电话、邮箱或访问令牌。
 - 不建议把包含个人敏感信息的索引目录或 API 原始响应公开提交。
 - V4 威胁边界、已缓解风险与延期项见

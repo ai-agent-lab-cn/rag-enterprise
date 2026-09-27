@@ -1,7 +1,8 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import type {
+  EvaluationReport,
   IndexEvaluationRun,
   IndexVersion,
   LifecycleEvent,
@@ -132,6 +133,24 @@ const EVALUATION: IndexEvaluationRun = {
   updated_at: "2026-09-01T00:05:00Z",
 };
 
+const FORMAL_REPORT: EvaluationReport = {
+  report_id: "rep_official_1",
+  dataset_id: "retrieval",
+  dataset_version: "2.0.0",
+  commit: "b".repeat(40),
+  run_at: "2026-09-01T00:05:00Z",
+  models: {},
+  official: true,
+  passed: true,
+  config_fingerprint: "a".repeat(64),
+  parameters: {},
+  query_count: 10,
+  recall_at_5: { value: 0.8, threshold: 0.7, baseline: null, passed: true, regressed: false },
+  vector_mrr: { value: 0.7, threshold: 0.6, baseline: null, passed: true, regressed: false },
+  rerank_mrr: { value: 0.75, threshold: 0.65, baseline: null, passed: true, regressed: false },
+  acl_leak_count: 0,
+};
+
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
     status,
@@ -196,7 +215,7 @@ const EVIDENCE_CHAIN = {
 };
 
 function stubFetch(
-  routes: Partial<Record<"versions" | "validations" | "events" | "evaluations" | "evidence", () => Response>> = {},
+  routes: Partial<Record<"versions" | "validations" | "events" | "evaluations" | "evidence" | "report" | "associations", () => Response>> = {},
 ) {
   const list = `/api/knowledge-bases/${KB}/index-versions`;
   const detail = `${list}/${VERSION_ID}`;
@@ -207,6 +226,15 @@ function stubFetch(
     if (url === `${detail}/events`) return Promise.resolve((routes.events ?? (() => json([EVENT])))());
     if (url === `${detail}/evaluation-runs`) return Promise.resolve((routes.evaluations ?? (() => json([EVALUATION])))());
     if (url === `${detail}/evidence-chain`) return Promise.resolve((routes.evidence ?? (() => json(EVIDENCE_CHAIN)))());
+    if (url === "/api/evaluations/rep_official_1") return Promise.resolve((routes.report ?? (() => json(FORMAL_REPORT)))());
+    if (url === "/api/evaluation-center/reports/rep_official_1/associations") return Promise.resolve((routes.associations ?? (() => json({
+      report_id: "rep_official_1",
+      evaluation_type: "retrieval",
+      origin_evaluation_run_id: "er_1",
+      origin_version: null,
+      compatible_versions: [],
+      validation_usages: [],
+    })))());
     return Promise.resolve(json({ error: { message: `未 mock 的接口 ${url}` } }, 404));
   });
 }
@@ -316,14 +344,21 @@ test("发布记录中的验证报告 ID 可点击查看完整报告", async () =
   expect(reportDialog).toHaveTextContent("检索质量检查");
 });
 
-test("证据链中的正式报告可跳转到评测中心报告详情", async () => {
+test("证据链中的正式报告原地打开弹框且不改变地址", async () => {
   stubFetch();
   const onOpen = vi.fn();
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default?tab=versions");
   renderDialog({ onOpen });
 
   await userEvent.click(await screen.findByRole("button", { name: "查看正式报告 rep_official_1" }));
 
-  expect(onOpen).toHaveBeenCalledWith("/evaluation?view=reports&report=rep_official_1");
+  const reportDialog = await screen.findByRole("dialog", { name: "正式报告详情" });
+  expect(reportDialog).toHaveTextContent("rep_official_1");
+  await userEvent.click(within(reportDialog).getByRole("button", { name: "关闭弹框" }));
+  expect(await screen.findByRole("dialog", { name: "索引版本 v3" })).toBeInTheDocument();
+  expect(window.location.pathname).toBe("/knowledge-bases/kb_default");
+  expect(window.location.search).toBe("?tab=versions");
+  expect(onOpen).not.toHaveBeenCalled();
 });
 
 /**

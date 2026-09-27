@@ -1331,11 +1331,23 @@ class EvaluationReportSummary(BaseModel):
     official: bool
     passed: bool
     config_fingerprint: str | None = None
+    sample_count: int = Field(ge=1)
+    failed_metrics: list[str] = Field(default_factory=list)
+
+
+class EvaluationDatasetEvidenceResponse(BaseModel):
+    """检索报告的数据覆盖与完整性口径。"""
+
+    document_count: int | None = Field(default=None, ge=1)
+    query_count: int = Field(ge=1)
+    integrity_status: Literal["passed", "unknown"]
+    integrity_basis: Literal["report", "current_registry", "unavailable"]
 
 
 class EvaluationReportResponse(EvaluationReportSummary):
     parameters: dict[str, int | float | str | bool]
     query_count: int
+    dataset_evidence: EvaluationDatasetEvidenceResponse
     recall_at_5: EvaluationMetricResponse
     recall_at_10: EvaluationMetricResponse | None = None
     vector_mrr: EvaluationMetricResponse
@@ -1366,6 +1378,8 @@ class AnswerEvaluationReportSummary(BaseModel):
     # 与检索报告同一套语义：official 是来源可信度，passed 是阈值结论。
     official: bool
     passed: bool
+    sample_count: int = Field(ge=1)
+    failed_metrics: list[str] = Field(default_factory=list)
 
 
 class AnswerEvaluationReportResponse(AnswerEvaluationReportSummary):

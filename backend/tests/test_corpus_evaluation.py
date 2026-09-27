@@ -80,6 +80,26 @@ def test_legacy_report_without_fingerprint_still_loads() -> None:
     assert RetrievalEvaluationReport(**_minimal_report_payload()).config_fingerprint is None
 
 
+def test_legacy_report_without_dataset_evidence_still_loads_as_unknown() -> None:
+    """旧报告不能因新增解释字段失效，也不能被默认解释成完整性已通过。"""
+
+    assert RetrievalEvaluationReport(**_minimal_report_payload()).dataset_evidence is None
+
+
+def test_report_rejects_dataset_evidence_with_a_different_query_count() -> None:
+    payload = {
+        **_minimal_report_payload(),
+        "dataset_evidence": {
+            "document_count": 10,
+            "query_count": 99,
+            "integrity_status": "passed",
+        },
+    }
+
+    with pytest.raises(ValidationError, match="问题数量"):
+        RetrievalEvaluationReport(**payload)
+
+
 def _reset_postgres(database_url: str) -> None:
     with psycopg.connect(database_url, autocommit=True) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
@@ -140,6 +160,10 @@ def test_corpus_baseline_uses_postgres_pipeline_and_cleans_temporary_data(monkey
     )
 
     assert report.query_count == len(dataset.queries)
+    assert report.dataset_evidence is not None
+    assert report.dataset_evidence.document_count == len(dataset.documents)
+    assert report.dataset_evidence.query_count == len(dataset.queries)
+    assert report.dataset_evidence.integrity_status == "passed"
     assert report.parameters["chunk_count"] > 0
     assert report.metadata_filter_accuracy is not None
     assert report.metadata_filter_accuracy.value == 1.0

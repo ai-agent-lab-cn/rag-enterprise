@@ -39,7 +39,7 @@ from .corpus_dataset import (
 )
 from .dataset import EvaluationQuery
 from .metrics import evaluate_rankings
-from .report import RetrievalEvaluationReport, assess_metric
+from .report import RetrievalDatasetEvidence, RetrievalEvaluationReport, assess_metric
 from .run_baseline import resolved_model
 
 # 阈值在首次运行之前确定，低于 1.0.0 的原因是语料为真实技术文档且指标改为段落粒度，
@@ -218,6 +218,10 @@ def run_corpus_baseline(
             "chunk_count": chunk_count,
             "metric_granularity": "paragraph",
         },
+        dataset_evidence=RetrievalDatasetEvidence(
+            document_count=len(dataset.documents),
+            query_count=len(dataset.queries),
+        ),
         query_count=metrics.query_count,
         recall_at_5=assess_metric(
             metrics.recall_at_5,

@@ -92,6 +92,62 @@ const answerSummary = {
   models: { generation: "gemini-test", judge: "judge-test" },
   prompt_version: "v3-grounded-answer-1",
   passed: true,
+  official: true,
+  sample_count: 30,
+  failed_metrics: [],
+};
+const retrievalReport = {
+  report_id: "retrieval-official",
+  dataset_id: "retrieval",
+  dataset_version: "2.0.0",
+  commit: "a".repeat(40),
+  run_at: "2026-08-30T00:00:00Z",
+  models: {},
+  official: true,
+  passed: true,
+  sample_count: 20,
+  failed_metrics: [],
+  config_fingerprint: "a".repeat(64),
+  parameters: {},
+  query_count: 20,
+  dataset_evidence: {
+    document_count: 10,
+    query_count: 20,
+    integrity_status: "passed",
+    integrity_basis: "report",
+  },
+  recall_at_5: { value: 0.8, threshold: 0.7, baseline: null, passed: true, regressed: false },
+  vector_mrr: { value: 0.7, threshold: 0.6, baseline: null, passed: true, regressed: false },
+  rerank_mrr: { value: 0.75, threshold: 0.65, baseline: null, passed: true, regressed: false },
+  acl_leak_count: 0,
+};
+const activeIndexVersion = {
+  index_version_id: "iv_active",
+  status: "active",
+  chunking_version: "semantic-v1",
+  parser_version: "registry-v1",
+  embedding_model: "text2vec",
+  embedding_dimension: 768,
+  processing_options: {},
+  config_fingerprint: "a".repeat(64),
+  evaluation_report_id: "retrieval-official",
+  validation_report_id: null,
+  document_snapshot_id: "ds_1",
+  rebuild_batch_id: null,
+  version_no: 4,
+  creation_reason: "config_changed",
+  force_reason: null,
+  requested_by: "test-admin",
+  config_snapshot: {},
+  component_manifest: {},
+  release_fingerprint: null,
+  config_completeness: "complete",
+  legacy_migrated: false,
+  excluded_documents_acknowledged: false,
+  created_at: "2026-08-30T00:00:00Z",
+  activated_at: "2026-08-30T00:01:00Z",
+  retired_at: null,
+  cleaned_at: null,
 };
 const admin = {
   user_id: "usr_1234567890abcdef",
@@ -294,7 +350,7 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if (url === "/api/knowledge-bases/kb_default/documents") return Promise.resolve(json([document]));
   if (url === "/api/knowledge-bases/kb_default/categories") return Promise.resolve(json([category]));
   if (url === "/api/knowledge-bases/kb_default/document-versions?offset=0&limit=100") return Promise.resolve(json([documentVersion]));
-  if (url === "/api/knowledge-bases/kb_default/index-versions") return Promise.resolve(json([{ index_version_id: "iv_active", status: "active", chunking_version: "semantic-v1", parser_version: "registry-v1", embedding_model: "text2vec", embedding_dimension: 768, processing_options: {}, config_fingerprint: "a".repeat(64), evaluation_report_id: "retrieval-official", rebuild_batch_id: null, created_at: "2026-08-30T00:00:00Z", activated_at: "2026-08-30T00:01:00Z", retired_at: null }]));
+  if (url === "/api/knowledge-bases/kb_default/index-versions") return Promise.resolve(json([activeIndexVersion]));
   if (url === "/api/knowledge-bases/kb_default/document-versions/ver_1/parsing") return Promise.resolve(json({ ...documentVersion, tree: [{ node_id: "node_00000", node_type: "heading", text: "安全规范", level: 1, location: { heading_path: ["安全规范"], paragraph_index: 0 }, children: [] }], chunks: [{ chunk_id: "chunk_1", chunk_index: 0, content: "ACL 必须在召回前过滤。", metadata: { node_id: "node_00000", heading_path: ["安全规范"], paragraph: 0 } }] }));
   if (url === "/api/knowledge-bases/kb_default/citations/chunk_1") return Promise.resolve(json({ chunk_id: "chunk_1", knowledge_base_id: "kb_default", document_id: "doc_1", document_version_id: "ver_1", content_sha256: "a".repeat(64), filename: "profile.md", text: "系统资料全文", page: null, paragraph: 0, heading_path: ["系统设计"], sheet_name: null, row_start: null, row_end: null, source_url: null, external_resource_id: null }));
   if (url === "/api/knowledge-bases/kb_default/conversations") return Promise.resolve(json([]));
@@ -302,12 +358,28 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if (url === "/api/evaluation-center/overview") return Promise.resolve(json({
     passed: true, status: "passed", report_count: 2,
     required_scopes: ["retrieval", "answer"], available_scopes: ["retrieval", "answer"], missing_scopes: [], failed_scopes: [], generated_at: "2026-09-20T00:00:00Z",
-    retrieval_report: { report_id: "retrieval-official", dataset_id: "retrieval", dataset_version: "2.0.0", commit: "a".repeat(40), run_at: "2026-08-30T00:00:00Z", models: {}, passed: true },
+    retrieval_report: { report_id: "retrieval-official", dataset_id: "retrieval", dataset_version: "2.0.0", commit: "a".repeat(40), run_at: "2026-08-30T00:00:00Z", models: {}, official: true, passed: true, sample_count: 20, failed_metrics: [] },
     answer_report: answerSummary,
   }));
   if (url.startsWith("/api/evaluation-center/pipeline")) return Promise.resolve(json({ run_count: 2, added_count: 4, updated_count: 1, deleted_count: 1, skipped_count: 2, failed_count: 1, retry_count: 3, failure_rate: 0.5, average_duration_ms: 20000, rag_profiles: [] }));
   if (url.startsWith("/api/evaluation-center/bad-cases")) return Promise.resolve(json([{ case_id: "case_1234567890abcdef", source_type: "online", source_record_id: "ans_1", knowledge_base_id: "kb_default", dataset_version: null, question: "为什么没有召回？", expected_source_ids: [], actual_source_ids: [], expected_answer_status: "answered", actual_answer_status: "insufficient_evidence", actual_answer: "资料不足。", failure_stage: "retrieval", root_cause: null, category: "没召回", severity: "high", assignee: null, fix_commit: null, status: "new", regression_added: false, created_at: "2026-08-30T00:00:00Z", confirmed_at: null, resolved_at: null, updated_at: "2026-08-30T00:00:00Z" }]));
-  if (url.startsWith("/api/evaluation-center/acceptance-runs")) return Promise.resolve(json([{ acceptance_run_id: "acc_1", knowledge_base_id: "kb_default", status: "blocked", commit_sha: "local-working-tree", schema_version: 14, steps: [{ step_key: "external_source", title: "真实数据源", status: "blocked", summary: "缺少 S3 兼容外部数据源。", evidence: { external_source_count: 0 } }, { step_key: "parse_and_index", title: "解析与索引", status: "passed", summary: "解析版本与活动索引均可用。", evidence: { active_index_count: 1, active_index_version_id: "iv_active" } }, { step_key: "retrieval_and_acl", title: "检索与 ACL", status: "passed", summary: "检索质量门通过且 ACL 泄漏为 0。", evidence: { acl_leak_count: 0, retrieval_report_id: "retrieval-official" } }], limitations: ["缺少 S3 兼容外部数据源。"], created_by: admin.user_id, created_at: "2026-08-30T00:00:00Z" }]));
+  if (url.startsWith("/api/evaluation-center/acceptance-runs")) return Promise.resolve(json([{
+    acceptance_run_id: "acc_1",
+    knowledge_base_id: "kb_default",
+    status: "blocked",
+    commit_sha: "local-working-tree",
+    schema_version: 42,
+    steps: [
+      { step_key: "runtime", title: "运行环境", status: "blocked", summary: "应用 Commit 不可追踪；请配置有效的 APP_COMMIT_SHA。", evidence: { schema_version: 42, required_schema_version: 42 } },
+      { step_key: "external_source", title: "真实数据源", status: "blocked", summary: "缺少 S3 兼容外部数据源。", evidence: { external_source_count: 0 } },
+      { step_key: "parse_and_index", title: "解析与索引", status: "passed", summary: "解析版本与活动索引均可用。", evidence: { active_index_count: 1, active_index_version_id: "iv_active" } },
+      { step_key: "retrieval_and_acl", title: "检索与 ACL", status: "passed", summary: "检索质量门通过且 ACL 泄漏为 0。", evidence: { acl_leak_count: 0, retrieval_report_id: "retrieval-official" } },
+      { step_key: "evaluation_and_regression", title: "评测与回归", status: "blocked", summary: "当前知识库尚未建立回归案例。", evidence: { regression_case_count: 0, regression_unverified_count: 0, regression_failed_count: 0 } },
+    ],
+    limitations: ["缺少 S3 兼容外部数据源。"],
+    created_by: admin.user_id,
+    created_at: "2026-08-30T00:00:00Z",
+  }]));
   // 两条路径共用同一份 payload：/query 仍被少数直接断言用到，/query/stream 是问答工作台
   // 现在真正走的那条（api.ts:308）。流式那条把整个结果作为一个 final 事件发出——
   // 组件对 final 的处理与非流式返回等价，测试要断言的是渲染结果不是分块过程。
@@ -329,6 +401,34 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if (url === "/api/knowledge-bases/kb_default/index-builds") return Promise.resolve(json([]));
   if (url === "/api/knowledge-bases/kb_default/operations?limit=50") return Promise.resolve(json([]));
   return Promise.resolve(json({ error: { message: "未找到" } }, 404));
+}
+
+function governanceCrossLinkFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const url = String(input);
+  if (url === "/api/evaluations") return Promise.resolve(json([retrievalReport]));
+  if (url === "/api/evaluations/retrieval-official") return Promise.resolve(json(retrievalReport));
+  if (url === "/api/evaluation-center/reports/retrieval-official/associations") return Promise.resolve(json({
+    report_id: "retrieval-official",
+    evaluation_type: "retrieval",
+    origin_evaluation_run_id: "eval_1",
+    origin_version: null,
+    compatible_versions: [],
+    validation_usages: [],
+  }));
+  if (url === "/api/knowledge-bases/kb_default/index-versions/iv_active/validations") return Promise.resolve(json([]));
+  if (url === "/api/knowledge-bases/kb_default/index-versions/iv_active/events") return Promise.resolve(json([]));
+  if (url === "/api/knowledge-bases/kb_default/index-versions/iv_active/evaluation-runs") return Promise.resolve(json([]));
+  if (url === "/api/knowledge-bases/kb_default/index-versions/iv_active/evidence-chain") return Promise.resolve(json({
+    knowledge_base_id: "kb_default",
+    index_version_id: "iv_active",
+    version: { index_version_id: "iv_active", version_no: 4, status: "active", config_fingerprint: "a".repeat(64) },
+    evaluation_run: null,
+    formal_report: { report_id: "retrieval-official", official: true, passed: true, config_fingerprint: "a".repeat(64), run_at: "2026-08-30T00:00:00Z" },
+    validation_report: null,
+    activation: null,
+    governance: { traceability: "partial", configuration: "match", validation: "pending", release: "pending", reasons: [] },
+  }));
+  return commonFetch(input, init);
 }
 
 test("默认进入概览并汇总知识库、资料、会话和回答质量", async () => {
@@ -1035,10 +1135,252 @@ test("回答评测页只读展示正式指标", async () => {
   const detail = await screen.findByRole("dialog", { name: "正式报告详情" });
   expect(await within(detail).findByText("答案正确性")).toBeInTheDocument();
   expect(detail).toHaveTextContent("回答报告");
-  expect(detail).toHaveTextContent("正式");
   expect(detail).toHaveTextContent("通过");
   expect(detail).toHaveTextContent("无支持声明率");
+  expect(detail).toHaveTextContent("实际值 100.0% · 门槛 ≥ 80.0%");
+  expect(detail).toHaveTextContent("实际值 0.0% · 门槛 ≤ 5.0%");
   expect(detail).toHaveTextContent("回答报告是横向质量证据，不参与索引版本放行");
+  expect(detail).not.toHaveAttribute("aria-modal");
+});
+
+test("检索报告先解释数据完整性再解释质量失败", async () => {
+  const failedReport = {
+    ...retrievalReport,
+    report_id: "corpus-20260915T045543Z",
+    dataset_id: "rag-enterprise-corpus-paraphrased",
+    dataset_version: "1.1.0",
+    sample_count: 145,
+    query_count: 145,
+    passed: false,
+    failed_metrics: ["recall_at_5"],
+    dataset_evidence: {
+      document_count: 10,
+      query_count: 145,
+      integrity_status: "passed",
+      integrity_basis: "current_registry",
+    },
+    recall_at_5: { value: 0.429, threshold: 0.7, baseline: null, passed: false, regressed: false },
+  };
+  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const url = String(input);
+    if (url === "/api/auth/me") return Promise.resolve(json(admin));
+    if (url === "/api/evaluations") return Promise.resolve(json([failedReport]));
+    if (url === "/api/evaluations/answers/reports") return Promise.resolve(json([]));
+    if (url === "/api/evaluations/corpus-20260915T045543Z") return Promise.resolve(json(failedReport));
+    if (url === "/api/evaluation-center/reports/corpus-20260915T045543Z/associations") {
+      return Promise.resolve(json({
+        report_id: failedReport.report_id,
+        evaluation_type: "retrieval",
+        origin_evaluation_run_id: "eval_1",
+        origin_version: null,
+        compatible_versions: [],
+        validation_usages: [],
+      }));
+    }
+    return Promise.resolve(json({}, 404));
+  });
+  window.history.replaceState({}, "", "/evaluation?view=reports&report=corpus-20260915T045543Z");
+  render(<App />);
+
+  const detail = await screen.findByRole("dialog", { name: "正式报告详情" });
+  expect(detail).toHaveTextContent("正式证据");
+  expect(detail).toHaveTextContent("数据完整");
+  expect(detail).toHaveTextContent("质量未通过");
+  expect(detail).toHaveTextContent("10/10 份文档");
+  expect(detail).toHaveTextContent("145/145 条问题");
+  expect(detail).toHaveTextContent("评测数据完整，但 1 项质量指标未达到冻结阈值；失败不是由缺少数据导致。");
+  expect(detail).toHaveTextContent("当前注册数据集校验");
+});
+
+test("历史检索报告未记录完整性时不显示为数据完整", async () => {
+  const legacyReport = {
+    ...retrievalReport,
+    report_id: "legacy-report",
+    dataset_evidence: {
+      document_count: null,
+      query_count: 20,
+      integrity_status: "unknown",
+      integrity_basis: "unavailable",
+    },
+  };
+  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const url = String(input);
+    if (url === "/api/auth/me") return Promise.resolve(json(admin));
+    if (url === "/api/evaluations") return Promise.resolve(json([legacyReport]));
+    if (url === "/api/evaluations/answers/reports") return Promise.resolve(json([]));
+    if (url === "/api/evaluations/legacy-report") return Promise.resolve(json(legacyReport));
+    if (url === "/api/evaluation-center/reports/legacy-report/associations") {
+      return Promise.resolve(json({ report_id: "legacy-report", evaluation_type: "retrieval", origin_evaluation_run_id: null, origin_version: null, compatible_versions: [], validation_usages: [] }));
+    }
+    return Promise.resolve(json({}, 404));
+  });
+  window.history.replaceState({}, "", "/evaluation?view=reports&report=legacy-report");
+  render(<App />);
+
+  const detail = await screen.findByRole("dialog", { name: "正式报告详情" });
+  expect(detail).toHaveTextContent("完整性未记录");
+  expect(detail).toHaveTextContent("报告记录了 20 条问题；未保存或无法复核数据集完整性，不按“数据完整”处理。");
+  expect(within(detail).queryByText("数据完整", { exact: true })).not.toBeInTheDocument();
+});
+
+test("报告详情遮罩 Hover 时保持半透明背景", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const url = String(input);
+    if (url === "/api/auth/me") return Promise.resolve(json(admin));
+    if (url === "/api/evaluations/answers/reports") return Promise.resolve(json([answerSummary]));
+    if (url === "/api/evaluations/answers/reports/answer-official") {
+      return Promise.resolve(json({
+        ...answerSummary,
+        prompt_hash: "a".repeat(64),
+        parameters: { temperature: 0 },
+        case_count: 30,
+        metrics: {},
+      }));
+    }
+    return Promise.resolve(json({}, 404));
+  });
+  window.history.replaceState({}, "", "/evaluation?view=reports&report=answer-official");
+  render(<App />);
+
+  const backdrop = await screen.findByRole("button", { name: "关闭报告详情" });
+  expect(backdrop).toHaveClass("bg-ink/35", "hover:bg-ink/35");
+  expect(backdrop).not.toHaveClass("hover:bg-brand-subtle");
+});
+
+test("从正式报告原地打开索引版本弹框且地址保持不变", async () => {
+  const retrievalSummary = {
+    report_id: "retrieval-official",
+    dataset_id: "retrieval",
+    dataset_version: "2.0.0",
+    commit: "a".repeat(40),
+    run_at: "2026-08-30T00:00:00Z",
+    models: {},
+    official: true,
+    passed: true,
+    config_fingerprint: "a".repeat(64),
+  };
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const url = String(input);
+    if (url === "/api/evaluations") return Promise.resolve(json([retrievalSummary]));
+    if (url === "/api/evaluations/retrieval-official") {
+      const metric = { value: 1, threshold: 0.7, baseline: null, passed: true, regressed: false };
+      return Promise.resolve(json({
+        ...retrievalSummary,
+        parameters: {},
+        query_count: 10,
+        recall_at_5: metric,
+        recall_at_10: metric,
+        vector_mrr: metric,
+        rerank_mrr: metric,
+        rerank_recall_at_5: metric,
+        hybrid_mrr: null,
+        ndcg_at_5: metric,
+        ndcg_at_10: metric,
+        metadata_filter_accuracy: metric,
+        query_rewrite_success_rate: null,
+        query_rewrite_fallback_rate: null,
+        no_result_rate: null,
+        acl_leak_count: 0,
+      }));
+    }
+    if (url === "/api/evaluation-center/reports/retrieval-official/associations") {
+      return Promise.resolve(json({
+        report_id: "retrieval-official",
+        evaluation_type: "retrieval",
+        origin_evaluation_run_id: "eval_origin",
+        origin_version: {
+          knowledge_base_id: "kb_default",
+          index_version_id: "iv_active",
+          version_no: 3,
+          status: "active",
+          config_fingerprint: "a".repeat(64),
+        },
+        compatible_versions: [{
+          knowledge_base_id: "kb_default",
+          index_version_id: "iv_previous",
+          version_no: 2,
+          status: "previous",
+          config_fingerprint: "a".repeat(64),
+        }],
+        validation_usages: [{
+          validation_report_id: "vr_passed",
+          knowledge_base_id: "kb_default",
+          index_version_id: "iv_previous",
+          status: "pass",
+          created_at: "2026-08-30T00:02:00Z",
+        }],
+      }));
+    }
+    if (url === "/api/knowledge-bases/kb_default/index-versions") {
+      return Promise.resolve(json([{
+        index_version_id: "iv_active",
+        status: "active",
+        chunking_version: "semantic-v1",
+        parser_version: "registry-v1",
+        embedding_model: "text2vec",
+        embedding_dimension: 768,
+        processing_options: {},
+        config_fingerprint: "a".repeat(64),
+        evaluation_report_id: "retrieval-official",
+        validation_report_id: null,
+        document_snapshot_id: "snapshot_1",
+        rebuild_batch_id: null,
+        version_no: 3,
+        creation_reason: "config_changed",
+        force_reason: null,
+        requested_by: admin.user_id,
+        config_snapshot: {},
+        component_manifest: {},
+        release_fingerprint: "b".repeat(64),
+        config_completeness: "complete",
+        legacy_migrated: false,
+        excluded_documents_acknowledged: false,
+        created_at: "2026-08-30T00:00:00Z",
+        activated_at: "2026-08-30T00:01:00Z",
+        retired_at: null,
+        cleaned_at: null,
+      }]));
+    }
+    if (url === "/api/knowledge-bases/kb_default/index-versions/iv_active/validations") return Promise.resolve(json([]));
+    if (url === "/api/knowledge-bases/kb_default/index-versions/iv_active/events") return Promise.resolve(json([]));
+    if (url === "/api/knowledge-bases/kb_default/index-versions/iv_active/evaluation-runs") return Promise.resolve(json([]));
+    if (url === "/api/knowledge-bases/kb_default/index-versions/iv_active/evidence-chain") {
+      return Promise.resolve(json({
+        knowledge_base_id: "kb_default",
+        index_version_id: "iv_active",
+        version: { index_version_id: "iv_active", version_no: 3, status: "active", config_fingerprint: "a".repeat(64) },
+        evaluation_run: null,
+        formal_report: null,
+        validation_report: null,
+        activation: null,
+        governance: { traceability: "missing", configuration: "unknown", validation: "missing", release: "blocked", reasons: [] },
+      }));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/evaluation?view=reports&report=retrieval-official");
+  render(<App />);
+
+  const reportDetail = await screen.findByRole("dialog", { name: "正式报告详情" });
+  expect(reportDetail).toHaveTextContent("当前生效");
+  expect(reportDetail).toHaveTextContent("同配置版本 · 1");
+  expect(reportDetail).toHaveTextContent("v2 · iv_previous · 上一版本");
+  expect(reportDetail).toHaveTextContent("已通过");
+  await userEvent.click(await within(reportDetail).findByRole("button", { name: "v3 · iv_active" }));
+  expect(await screen.findByRole("dialog", { name: "索引版本 v3" })).toBeInTheDocument();
+  expect(window.location.pathname + window.location.search).toBe(
+    "/evaluation?view=reports&report=retrieval-official",
+  );
+  // Radix 会在模态框打开时把背景内容设为 aria-hidden；报告详情应仍保留在 DOM，
+  // 关闭子弹框后恢复，而不是通过页面跳转重新加载。
+  expect(globalThis.document.querySelector('[aria-label="正式报告详情"]')).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "关闭弹框" }));
+
+  expect(await screen.findByRole("dialog", { name: "正式报告详情" })).toBeInTheDocument();
+  expect(window.location.pathname + window.location.search).toBe(
+    "/evaluation?view=reports&report=retrieval-official",
+  );
 });
 
 test("评测中心用三个可深链工作区承载质量治理", async () => {
@@ -1046,17 +1388,170 @@ test("评测中心用三个可深链工作区承载质量治理", async () => {
   window.history.replaceState({}, "", "/evaluation");
   render(<App />);
 
-  expect(await screen.findByRole("heading", { name: "质量总览" })).toBeInTheDocument();
-  expect(screen.getByRole("tab", { name: "质量总览" })).toHaveAttribute("data-state", "active");
+  expect(await screen.findByRole("tab", { name: "质量总览" })).toHaveAttribute("data-state", "active");
   expect(screen.getByRole("tab", { name: "正式报告" })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "运行观测" })).toBeInTheDocument();
-  expect(screen.getByText(/证据覆盖 2\/2/)).toBeInTheDocument();
+  expect(await screen.findByText("最新正式证据状态")).toBeInTheDocument();
+  expect(screen.getByText("正式证据已覆盖 2/2 个必需质量域，当前没有质量阻塞。")).toBeInTheDocument();
+  expect(screen.getByText("20 条问题")).toBeInTheDocument();
+  expect(screen.getByText("30 个案例")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "查看检索质量正式证据" })).toBeInTheDocument();
+  expect(screen.getByText(/汇总于/)).toBeInTheDocument();
+  expect(screen.queryByText("retrieval-official")).not.toBeInTheDocument();
 
   await userEvent.click(screen.getByRole("tab", { name: "运行观测" }));
-  expect(await screen.findByRole("heading", { name: "运行观测" })).toBeInTheDocument();
-  expect(await screen.findByText("同步批次")).toBeInTheDocument();
+  expect(await screen.findByRole("tab", { name: "运行观测" })).toHaveAttribute("data-state", "active");
+  expect(await screen.findByRole("heading", { name: "Data Sync" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "RAG Runtime" })).toBeInTheDocument();
+  expect(screen.getByText("统计当前可访问知识库最近 1,000 个同步批次。")).toBeInTheDocument();
+  expect(screen.getByText("统计当前可访问知识库的全部历史在线执行记录。")).toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "Data Sync" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "RAG Runtime" })).not.toBeInTheDocument();
+  const syncResults = screen.getByLabelText("Data Sync 同步结果");
+  for (const label of ["新增", "更新", "删除", "跳过", "失败", "重试"]) {
+    expect(within(syncResults).getByText(label)).toBeInTheDocument();
+  }
   expect(screen.getAllByText("2").length).toBeGreaterThan(0);
   expect(new URLSearchParams(window.location.search).get("view")).toBe("observations");
+});
+
+test("质量总览清楚区分数据完整与质量未通过", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/evaluation-center/overview") {
+      return Promise.resolve(json({
+        passed: false,
+        status: "failed",
+        report_count: 5,
+        required_scopes: ["retrieval", "answer"],
+        available_scopes: ["retrieval", "answer"],
+        missing_scopes: [],
+        failed_scopes: ["retrieval"],
+        generated_at: "2026-09-20T00:00:00Z",
+        retrieval_report: {
+          ...retrievalReport,
+          report_id: "corpus-20260915T045543Z",
+          dataset_id: "rag-enterprise-corpus-paraphrased",
+          dataset_version: "1.1.0",
+          sample_count: 145,
+          passed: false,
+          failed_metrics: ["recall_at_5", "vector_mrr"],
+        },
+        answer_report: answerSummary,
+      }));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/evaluation");
+  render(<App />);
+
+  expect(await screen.findByText("存在 1 个质量阻塞")).toBeInTheDocument();
+  expect(screen.getByText("正式证据已覆盖 2/2 个必需质量域；缺失证据不会按“通过”处理。")).toBeInTheDocument();
+  expect(screen.getByText("未达到冻结阈值：Recall@5、Vector MRR")).toBeInTheDocument();
+  expect(screen.getByText("145 条问题")).toBeInTheDocument();
+  expect(screen.queryByText("corpus-20260915T045543Z")).not.toBeInTheDocument();
+});
+
+test("质量总览查看正式证据只打开弹框且不切换工作区", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const url = String(input);
+    if (url === "/api/evaluation-center/overview") {
+      return Promise.resolve(json({
+        passed: true,
+        status: "passed",
+        report_count: 2,
+        required_scopes: ["retrieval", "answer"],
+        available_scopes: ["retrieval", "answer"],
+        missing_scopes: [],
+        failed_scopes: [],
+        generated_at: "2026-09-20T00:00:00Z",
+        retrieval_report: retrievalReport,
+        answer_report: answerSummary,
+      }));
+    }
+    if (url === "/api/evaluations/retrieval-official") return Promise.resolve(json(retrievalReport));
+    if (url === "/api/evaluation-center/reports/retrieval-official/associations") {
+      return Promise.resolve(json({
+        report_id: "retrieval-official",
+        evaluation_type: "retrieval",
+        origin_evaluation_run_id: "eval_1",
+        origin_version: null,
+        compatible_versions: [],
+        validation_usages: [],
+      }));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/evaluation");
+  render(<App />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "查看检索质量正式证据" }));
+
+  expect(await screen.findByRole("dialog", { name: "正式报告详情" })).toHaveTextContent("retrieval-official");
+  const overviewTab = Array.from(globalThis.document.querySelectorAll<HTMLElement>('[role="tab"]')).find((element) => element.textContent?.includes("质量总览"));
+  const reportsTab = Array.from(globalThis.document.querySelectorAll<HTMLElement>('[role="tab"]')).find((element) => element.textContent?.includes("正式报告"));
+  expect(overviewTab).toHaveAttribute("data-state", "active");
+  expect(reportsTab).toHaveAttribute("data-state", "inactive");
+  expect(window.location.pathname + window.location.search).toBe("/evaluation");
+});
+
+test("运行观测没有同步批次时显示空态而不是零失败率", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input).startsWith("/api/evaluation-center/pipeline")) {
+      return Promise.resolve(json({
+        run_count: 0,
+        added_count: 0,
+        updated_count: 0,
+        deleted_count: 0,
+        skipped_count: 0,
+        failed_count: 0,
+        retry_count: 0,
+        failure_rate: 0,
+        average_duration_ms: 0,
+        rag_profiles: [],
+      }));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/evaluation?view=observations");
+  render(<App />);
+
+  expect(await screen.findByText("暂无 Data Sync 观测数据")).toBeInTheDocument();
+  expect(screen.queryByText("批次失败率")).not.toBeInTheDocument();
+});
+
+test("直接进入正式报告仍显示最新正式证据状态", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/evaluation?view=reports");
+  render(<App />);
+
+  expect(await screen.findByText("正式质量：通过")).toBeInTheDocument();
+  expect(screen.getByText("当前展示 1 份正式报告；选择报告查看指标证据及其治理关联。")).toBeInTheDocument();
+});
+
+test("浏览器历史变化会同步关闭和恢复正式报告弹框", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/evaluations/answers/reports/answer-official") {
+      return Promise.resolve(json({
+        ...answerSummary,
+        prompt_hash: "a".repeat(64),
+        parameters: { temperature: 0 },
+        case_count: 30,
+        metrics: {},
+      }));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/evaluation?view=reports&report=answer-official");
+  render(<App />);
+  expect(await screen.findByRole("dialog", { name: "正式报告详情" })).toBeInTheDocument();
+
+  window.history.pushState({}, "", "/evaluation?view=reports");
+  window.dispatchEvent(new PopStateEvent("popstate"));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "正式报告详情" })).not.toBeInTheDocument());
+
+  window.history.pushState({}, "", "/evaluation?view=reports&report=answer-official");
+  window.dispatchEvent(new PopStateEvent("popstate"));
+  expect(await screen.findByRole("dialog", { name: "正式报告详情" })).toBeInTheDocument();
 });
 
 test("Bad Case 是独立菜单与独立路由", async () => {
@@ -1079,30 +1574,119 @@ test("Bad Case 是独立菜单与独立路由", async () => {
   expect(screen.getByRole("button", { name: "Bad Case" })).toHaveAttribute("aria-current", "page");
 });
 
+test("索引治理中的正式质量报告原地打开弹框", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(governanceCrossLinkFetch);
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default?tab=versions");
+  render(<App />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "retrieval-official" }));
+
+  expect(await screen.findByRole("dialog", { name: "正式报告详情" })).toHaveTextContent("retrieval-official");
+  expect(window.location.pathname).toBe("/knowledge-bases/kb_default");
+  expect(window.location.search).toBe("?tab=versions");
+});
+
 test("链路验收是独立菜单与独立路由", async () => {
   // 链路验收承担版本放行职责，结论是 PASS / BLOCKED，与「看指标」不是一件事。
-  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  vi.spyOn(globalThis, "fetch").mockImplementation(governanceCrossLinkFetch);
   window.history.replaceState({}, "", "/evaluation/acceptance");
   render(<App />);
 
   expect(await screen.findByText("缺少 S3 兼容外部数据源。")).toBeInTheDocument();
   expect(screen.queryByText(/\{"external_source_count"/)).not.toBeInTheDocument();
+  expect(screen.getByText("当前 Schema")).toBeInTheDocument();
+  expect(screen.getByText("要求 Schema")).toBeInTheDocument();
+  expect(screen.getByText("回归案例")).toBeInTheDocument();
+  expect(screen.getByText("待验证回归")).toBeInTheDocument();
+  expect(screen.queryByText("schema_version")).not.toBeInTheDocument();
+  expect(screen.queryByText("regression_unverified_count")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "链路验收" })).toHaveAttribute("aria-current", "page");
   await userEvent.click(screen.getByRole("button", { name: "查看正式报告 retrieval-official" }));
-  expect(window.location.pathname).toBe("/evaluation");
-  expect(new URLSearchParams(window.location.search).get("report")).toBe("retrieval-official");
+  expect(await screen.findByRole("dialog", { name: "正式报告详情" })).toHaveTextContent("retrieval-official");
+  expect(window.location.pathname).toBe("/evaluation/acceptance");
+  expect(window.location.search).toBe("");
 });
 
-test("概览页的评测入口打开正式报告工作区", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+test("链路验收中的索引版本原地打开弹框", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(governanceCrossLinkFetch);
+  window.history.replaceState({}, "", "/evaluation/acceptance");
+  render(<App />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "查看索引版本 iv_active" }));
+
+  expect(await screen.findByRole("dialog", { name: "索引版本 v4" })).toHaveTextContent("iv_active");
+  expect(window.location.pathname).toBe("/evaluation/acceptance");
+  expect(window.location.search).toBe("");
+});
+
+test("运行链路验收时立即显示处理中并阻止重复提交", async () => {
+  let resolveStart: ((response: Response) => void) | undefined;
+  let startCount = 0;
+  const pendingStart = new Promise<Response>((resolve) => {
+    resolveStart = resolve;
+  });
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/evaluation-center/acceptance-runs" && init?.method === "POST") {
+      startCount += 1;
+      return pendingStart;
+    }
+    return governanceCrossLinkFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/evaluation/acceptance");
+  render(<App />);
+
+  const trigger = await screen.findByRole("button", { name: "运行默认知识库验收" });
+  await userEvent.click(trigger);
+
+  expect(trigger).toBeDisabled();
+  expect(trigger).toHaveAttribute("aria-busy", "true");
+  expect(trigger).toHaveTextContent("验收运行中…");
+  await userEvent.click(trigger);
+  expect(startCount).toBe(1);
+
+  resolveStart?.(json({
+    acceptance_run_id: "acc_new",
+    knowledge_base_id: "kb_default",
+    status: "blocked",
+    commit_sha: "local-working-tree",
+    schema_version: 42,
+    steps: [],
+    limitations: ["缺少正式证据。"],
+    created_by: admin.user_id,
+    created_at: "2026-09-24T07:30:00Z",
+  }, 201));
+
+  expect(await screen.findByText("acc_new")).toBeInTheDocument();
+  expect(trigger).toBeEnabled();
+  expect(trigger).toHaveTextContent("运行默认知识库验收");
+});
+
+test("概览页质量监控入口打开回答正式报告详情弹框", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/evaluations/answers/reports/answer-official") {
+      return Promise.resolve(json({
+        ...answerSummary,
+        prompt_hash: "a".repeat(64),
+        parameters: { temperature: 0 },
+        case_count: 30,
+        metrics: {},
+      }));
+    }
+    return commonFetch(input, init);
+  });
   window.history.replaceState({}, "", "/overview");
   render(<App />);
 
   await userEvent.click(await screen.findByRole("button", { name: /查看回答评测详情/ }));
 
-  expect(await screen.findByRole("heading", { name: "正式报告" })).toBeInTheDocument();
+  const dialog = await screen.findByRole("dialog", { name: "正式报告详情" });
+  expect(dialog).toHaveTextContent("回答报告");
+  expect(dialog).toHaveTextContent("answer-official");
   expect(window.location.pathname).toBe("/evaluation");
-  expect(new URLSearchParams(window.location.search).get("view")).toBe("reports");
+  expect(window.location.search).toBe("?report=answer-official");
+  await userEvent.click(screen.getByRole("button", { name: "关闭弹框" }));
+  expect(screen.queryByRole("dialog", { name: "正式报告详情" })).not.toBeInTheDocument();
+  expect(window.location.pathname + window.location.search).toBe("/evaluation");
 });
 
 test("保留检索评测页且可直接访问", async () => {

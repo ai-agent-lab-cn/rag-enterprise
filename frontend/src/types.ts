@@ -371,11 +371,19 @@ export interface EvaluationReportSummary {
   official: boolean;
   passed: boolean;
   config_fingerprint?: string | null;
+  sample_count?: number;
+  failed_metrics?: string[];
 }
 
 export interface EvaluationReport extends EvaluationReportSummary {
   parameters: Record<string, string | number | boolean>;
   query_count: number;
+  dataset_evidence?: {
+    document_count: number | null;
+    query_count: number;
+    integrity_status: "passed" | "unknown";
+    integrity_basis: "report" | "current_registry" | "unavailable";
+  };
   recall_at_5: EvaluationMetric;
   recall_at_10?: EvaluationMetric | null;
   vector_mrr: EvaluationMetric;

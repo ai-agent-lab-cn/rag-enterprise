@@ -8,6 +8,7 @@ import type {
   ValidationLayerResult,
   ValidationReport,
 } from "../types";
+import { FormalReportDetailDialog } from "./FormalReportDetailDialog";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
 import { DataTable, type Column } from "./ui/DataTable";
@@ -115,7 +116,6 @@ export function IndexVersionDetailDialog({
   versionId,
   onClose,
   onActionComplete,
-  onOpen,
 }: {
   open: boolean;
   knowledgeBaseId: string;
@@ -134,6 +134,7 @@ export function IndexVersionDetailDialog({
   const [error, setError] = useState("");
   /** 治理数据单独记错误：拿不到它不该让整个弹框失败，配置与指纹仍然该看得到。 */
   const [governanceError, setGovernanceError] = useState("");
+  const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -186,6 +187,7 @@ export function IndexVersionDetailDialog({
   const latestReport = reports[0] ?? null;
 
   return (
+    <>
     <Dialog open={open} size="lg" title={title} description={versionId} onClose={close}>
       {loading ? (
         <div className="grid gap-3">
@@ -300,8 +302,8 @@ export function IndexVersionDetailDialog({
               ].map((node, index) => (
                 <li key={node.label} className="grid list-none gap-1 rounded-md border border-divider p-2 text-sm">
                   <span className="text-ink-faint">{index + 1}. {node.label}</span>
-                  {node.report && node.value && onOpen ? (
-                    <Button variant="link" className="h-auto min-w-0 justify-start break-all px-0 py-0 text-left font-mono text-xs" aria-label={`查看正式报告 ${node.value}`} onClick={() => onOpen(`/evaluation?view=reports&report=${encodeURIComponent(node.value!)}`)}>{node.value}</Button>
+                  {node.report && node.value ? (
+                    <Button variant="link" className="h-auto min-w-0 justify-start break-all px-0 py-0 text-left font-mono text-xs" aria-label={`查看正式报告 ${node.value}`} onClick={() => setSelectedReportId(node.value!)}>{node.value}</Button>
                   ) : (
                     <strong className="break-all font-mono text-xs">{node.value || "未形成证据"}</strong>
                   )}
@@ -472,6 +474,15 @@ export function IndexVersionDetailDialog({
         </div>
       )}
     </Dialog>
+    {selectedReportId ? (
+      <FormalReportDetailDialog
+        open
+        kind="retrieval"
+        reportId={selectedReportId}
+        onClose={() => setSelectedReportId(null)}
+      />
+    ) : null}
+    </>
   );
 }
 

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -37,6 +38,14 @@ def assess_metric(
     )
 
 
+class RetrievalDatasetEvidence(BaseModel):
+    """报告运行时冻结的数据集完整性证据。"""
+
+    document_count: int = Field(ge=1)
+    query_count: int = Field(ge=1)
+    integrity_status: Literal["passed"] = "passed"
+
+
 class RetrievalEvaluationReport(BaseModel):
     report_id: str = Field(min_length=1)
     dataset_id: str = Field(min_length=1)
@@ -47,6 +56,7 @@ class RetrievalEvaluationReport(BaseModel):
     models: dict[str, str]
     parameters: dict[str, int | float | str | bool]
     query_count: int = Field(ge=1)
+    dataset_evidence: RetrievalDatasetEvidence | None = None
     recall_at_5: EvaluationMetric
     # 旧报告没有 @10 指标，保持可选；新生成报告必须写入，发布门禁会明确标记旧报告缺项。
     recall_at_10: EvaluationMetric | None = None
@@ -71,6 +81,8 @@ class RetrievalEvaluationReport(BaseModel):
         required = {"embedding", "reranker"}
         if not required.issubset(self.models):
             raise ValueError("报告必须记录 embedding 和 reranker 模型标识")
+        if self.dataset_evidence and self.dataset_evidence.query_count != self.query_count:
+            raise ValueError("数据集证据的问题数量必须与报告 query_count 一致")
         return self
 
     @property

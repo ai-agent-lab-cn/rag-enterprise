@@ -77,11 +77,7 @@ def evaluate_acceptance(snapshot: AcceptanceSnapshot) -> AcceptanceResult:
             step_key="runtime",
             title="运行环境",
             status="passed" if snapshot.runtime_ready else "blocked",
-            summary=(
-                "Schema 与应用 Commit 均可追踪。"
-                if snapshot.runtime_ready
-                else "Schema 未达到要求或应用 Commit 不可追踪。"
-            ),
+            summary=_runtime_summary(snapshot),
             evidence={
                 "schema_version": snapshot.schema_version,
                 "required_schema_version": snapshot.required_schema_version,
@@ -128,9 +124,7 @@ def evaluate_acceptance(snapshot: AcceptanceSnapshot) -> AcceptanceResult:
             step_key="retrieval_and_acl",
             title="检索与 ACL",
             status=retrieval_status,
-            summary="检索质量门通过且 ACL 泄漏为 0。"
-            if retrieval_status == "passed"
-            else "ACL 泄漏或检索正式报告尚未通过。",
+            summary=_retrieval_summary(snapshot),
             evidence={
                 "acl_leak_count": snapshot.acl_leak_count,
                 **(
@@ -144,9 +138,7 @@ def evaluate_acceptance(snapshot: AcceptanceSnapshot) -> AcceptanceResult:
             step_key="trusted_answer",
             title="可信回答",
             status=answer_status,
-            summary="回答与 Citation 质量门通过。"
-            if answer_status == "passed"
-            else "可信回答报告缺失或 Citation 安全门失败。",
+            summary=_answer_summary(snapshot),
             evidence={
                 "citation_failure_count": snapshot.citation_failure_count,
                 **({"answer_report_id": snapshot.answer_report_id} if snapshot.answer_report_id else {}),
@@ -156,13 +148,7 @@ def evaluate_acceptance(snapshot: AcceptanceSnapshot) -> AcceptanceResult:
             step_key="evaluation_and_regression",
             title="评测与回归",
             status=regression_status,
-            summary=(
-                "回归集没有失败案例。"
-                if regression_status == "passed"
-                else "回归失败已阻止放行。"
-                if regression_status == "failed"
-                else "缺少已完成验证的回归案例。"
-            ),
+            summary=_regression_summary(snapshot),
             evidence={
                 "regression_case_count": snapshot.regression_case_count,
                 "regression_unverified_count": snapshot.regression_unverified_count,
@@ -180,6 +166,54 @@ def evaluate_acceptance(snapshot: AcceptanceSnapshot) -> AcceptanceResult:
         )
     )
     return AcceptanceResult(status=_overall_status(steps), steps=steps)
+
+
+def _runtime_summary(snapshot: AcceptanceSnapshot) -> str:
+    if snapshot.runtime_ready:
+        return "Schema 与应用 Commit 均可追踪。"
+    schema_ready = snapshot.schema_version == snapshot.required_schema_version
+    if not schema_ready and not snapshot.commit_sha:
+        return (
+            f"Schema V{snapshot.schema_version} 未达到要求 V{snapshot.required_schema_version}，"
+            "且应用 Commit 不可追踪。"
+        )
+    if not schema_ready:
+        return f"Schema V{snapshot.schema_version} 未达到要求 V{snapshot.required_schema_version}。"
+    return "应用 Commit 不可追踪；请配置有效的 APP_COMMIT_SHA。"
+
+
+def _retrieval_summary(snapshot: AcceptanceSnapshot) -> str:
+    if snapshot.retrieval_report_id is None:
+        return "缺少绑定当前活动索引的正式检索报告。"
+    if not snapshot.retrieval_report_passed:
+        return "正式检索报告未达到冻结阈值。"
+    if snapshot.acl_leak_count is None:
+        return "正式检索报告缺少 ACL 泄漏指标。"
+    if snapshot.acl_leak_count > 0:
+        return f"检测到 {snapshot.acl_leak_count} 条 ACL 泄漏。"
+    return "检索质量门通过且 ACL 泄漏为 0。"
+
+
+def _answer_summary(snapshot: AcceptanceSnapshot) -> str:
+    if snapshot.answer_report_id is None:
+        return "缺少绑定当前知识库与活动索引的正式回答报告。"
+    if not snapshot.answer_report_passed:
+        return "正式回答报告未通过质量门。"
+    if snapshot.citation_failure_count is None:
+        return "正式回答报告缺少 Citation 失败计数。"
+    if snapshot.citation_failure_count > 0:
+        return f"检测到 {snapshot.citation_failure_count} 个 Citation 失败。"
+    return "回答与 Citation 质量门通过。"
+
+
+def _regression_summary(snapshot: AcceptanceSnapshot) -> str:
+    if snapshot.regression_failed_count > 0:
+        return f"存在 {snapshot.regression_failed_count} 个回归失败案例。"
+    if snapshot.regression_case_count == 0:
+        return "当前知识库尚未建立回归案例。"
+    if snapshot.regression_unverified_count > 0:
+        return f"还有 {snapshot.regression_unverified_count} 个回归案例未完成验证。"
+    return "回归集没有失败案例。"
 
 
 def _overall_status(steps: list[AcceptanceStep]) -> AcceptanceStatus:

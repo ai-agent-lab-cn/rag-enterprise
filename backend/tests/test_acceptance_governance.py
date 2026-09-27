@@ -126,4 +126,26 @@ def test_regression_step_requires_verified_regression_cases() -> None:
         for step in evaluate_acceptance(no_cases).steps
         if step.step_key == "evaluation_and_regression"
     )
-    assert regression.summary == "缺少已完成验证的回归案例。"
+    assert regression.summary == "当前知识库尚未建立回归案例。"
+
+
+def test_blocked_steps_explain_the_exact_missing_or_failed_evidence() -> None:
+    snapshot = complete_snapshot().model_copy(
+        update={
+            "runtime_ready": False,
+            "commit_sha": None,
+            "retrieval_report_passed": False,
+            "acl_leak_count": 0,
+            "answer_report_id": None,
+            "citation_failure_count": None,
+            "regression_case_count": 0,
+        }
+    )
+
+    steps = {step.step_key: step for step in evaluate_acceptance(snapshot).steps}
+
+    assert steps["runtime"].summary == "应用 Commit 不可追踪；请配置有效的 APP_COMMIT_SHA。"
+    assert steps["retrieval_and_acl"].status == "failed"
+    assert steps["retrieval_and_acl"].summary == "正式检索报告未达到冻结阈值。"
+    assert steps["trusted_answer"].summary == "缺少绑定当前知识库与活动索引的正式回答报告。"
+    assert steps["evaluation_and_regression"].summary == "当前知识库尚未建立回归案例。"
