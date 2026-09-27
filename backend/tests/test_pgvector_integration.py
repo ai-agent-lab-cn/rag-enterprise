@@ -51,7 +51,10 @@ class DeterministicEmbedder:
 
 
 class DeterministicReranker:
-    model_name = "deterministic-reranker-v1"
+    # 名字必须在 evidence_gate.RERANKER_THRESHOLDS 里登记过，否则 Evidence Gate 读不懂
+    # 分数语义，会把每次查询变成 RAG_PROFILE_INCOMPATIBLE。分数仍由下面这个替身产生，
+    # 只是借用已登记的分数语义（CrossEncoder logit，>= 0.0 视为相关）。
+    model_name = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 
     def score(self, question: str, chunks: list[str]) -> list[float]:
         del question
@@ -290,7 +293,7 @@ def test_retrieval_api_uses_a_real_pgvector_service(
         assert len(queried.json()["prompt_hash"]) == 64
         assert queried.json()["models"] == {
             "embedding": "deterministic-embedding-v1",
-            "reranker": "deterministic-reranker-v1",
+            "reranker": DeterministicReranker.model_name,
             "generation": "disabled-generator",
         }
 

@@ -162,14 +162,17 @@ export interface GenerationGovernance {
 }
 
 export interface RoutingMetadata {
-  intent: "fact_lookup" | "summarize" | "compare" | "procedure" | null;
+  intent: "greeting" | "fact_lookup" | "summarize" | "compare" | "procedure" | null;
   confidence: number;
   reason: string;
-  control_outcome: "route" | "clarify" | "out_of_scope";
+  control_outcome: "route" | "social" | "clarify" | "out_of_scope";
   original_question: string;
   effective_question: string;
   follow_up_rewritten: boolean;
-  requires_web: boolean;
+  requires_freshness: boolean;
+  // 过渡别名，后端（schemas.py:720）恒等于 requires_freshness，待后端删字段后一并删除。
+  // 声明成可选是为了让「读它」这件事在类型上就显得可疑——新代码请读 requires_freshness。
+  requires_web?: boolean;
   classifier_model: string | null;
   fallback_used: boolean;
   pipeline_profile?: string | null;
@@ -190,6 +193,74 @@ export interface ModuleExecution {
   fallback_reason: string | null;
 }
 
+/**
+ * `retrieval.web_policy` 的稳定决策（spec 9.2）。后端按固定优先级只产出一个值
+ * （service.py:713-724），前端不再用「最终有没有 Web 来源」反推是否联网过。
+ */
+export type WebDecision =
+  | "disabled"
+  | "not_needed"
+  | "scope_limited"
+  | "provider_unavailable"
+  | "executed"
+  | "no_result"
+  | "failed";
+
+const WEB_DECISION_LABELS: Record<WebDecision, string> = {
+  disabled: "Web 未启用",
+  not_needed: "KB 证据已满足，未触发 Web",
+  scope_limited: "当前检索范围禁止 Web",
+  provider_unavailable: "Web Provider 未配置",
+  // executed 走 describeWebExecution 里的采用数分支，这条只在 no_kb_anchor 的组合文案里兜底。
+  executed: "已检索 Web",
+  no_result: "Web 未找到合格结果",
+  failed: "Web 搜索失败",
+};
+
+/** 历史记录没有 `retrieval.web_policy` 轨迹时的固定文案：说不知道，不猜。 */
+const WEB_EXECUTION_UNKNOWN = "历史记录未保存 Web 执行状态";
+
+/**
+ * 不收 `retrieval.web_policy` 的 `reason_code`：它由 decision 完全决定
+ * （service.py:1542-1556，`not_needed` 那支回显的是初步门禁的原因码，抽屉里已单列一行），
+ * 展示它只是把同一件事再用英文说一遍。真正带新信息的是 Final Gate 的 `reason_codes`。
+ */
+export interface WebExecutionState {
+  /** 轨迹缺失（旧记录）或 decision 不在七个已知值里时为 null。 */
+  decision: WebDecision | null;
+  /** `retrieval.web_policy` 搜到的原始结果数。 */
+  resultCount: number | null;
+  /** `evidence.final_gate` 最终采用的 Web 证据数；流式途中尚未可知时为 null。 */
+  webCount: number | null;
+  /** `evidence.final_gate` 的 reason_codes，决定 executed 要不要改口径解释。 */
+  reasonCodes: string[];
+}
+
+export function asWebDecision(value: unknown): WebDecision | null {
+  return typeof value === "string" && value in WEB_DECISION_LABELS ? (value as WebDecision) : null;
+}
+
+/**
+ * Web 七态映射的唯一定义（R18）。TechnicalDrawer 读模块轨迹、ChatPage 读
+ * `web_retrieval_completed` 事件，两处共用这一份，不各写一遍。
+ *
+ * **先读 reason_code 再读 decision**：时效问题即使没有 KB anchor 也会打一次 Web
+ * （spec 5.3/7.2），此时 decision 是 `executed` 而结论必拒。只说「已检索」，用户就会
+ * 看到「已联网」却说不出为什么被拒答——CLAUDE.md 第一条要的是光标不动也能知道原因。
+ */
+export function describeWebExecution(state: WebExecutionState): string {
+  if (!state.decision) return WEB_EXECUTION_UNKNOWN;
+  if (state.reasonCodes.includes("no_kb_anchor")) {
+    return state.decision === "executed"
+      ? `已检索到 ${state.resultCount ?? 0} 条 Web 结果，但知识库缺少可锚定证据，未被采用`
+      : `${WEB_DECISION_LABELS[state.decision]}；知识库缺少可锚定证据`;
+  }
+  if (state.decision !== "executed") return WEB_DECISION_LABELS[state.decision];
+  if (state.webCount === null) return `已检索到 ${state.resultCount ?? 0} 条 Web 结果`;
+  if (state.webCount === 0) return "已检索，结果未被采用";
+  return `已采用 ${state.webCount} 条 Web 证据`;
+}
+
 export interface RAGPolicy {
   knowledge_base_id: string;
   rollout_stage: "shadow" | "canary" | "full";
@@ -200,6 +271,10 @@ export interface RAGPolicy {
   max_web_results: number;
   profile_versions: Record<string, string>;
 }
+
+// 管理员可编辑的公开字段。发布阶段、意图阈值、最少证据、Web 结果上限属于系统内部
+// 参数，不再通过页面写入——见 spec 第 10.3 节。GET 仍返回完整 RAGPolicy 以兼容旧读取。
+export type RAGPolicyUpdatePayload = Pick<RAGPolicy, "web_search_enabled" | "allowed_domains">;
 
 export interface QueryExecutionDetail {
   execution_id: string;
@@ -218,7 +293,17 @@ export interface QueryExecutionDetail {
 
 export interface QueryResult {
   answer: string;
-  answer_status: "answered" | "insufficient_evidence" | "source_conflict" | "retrieval_only" | "generation_failed";
+  // 七个值必须与后端三处 Literal 对齐（prompts.AnswerStatus、schemas.QueryResponse、
+  // schemas.AnswerRecordResponse）。这里漏一个不会静态报错，只会让类型与运行时数据不符：
+  // AnswerPanel 的三张 Record<answer_status, string> 是穷举的，加成员才会在那里报错。
+  answer_status:
+    | "answered"
+    | "answered_stale"
+    | "insufficient_evidence"
+    | "source_conflict"
+    | "retrieval_only"
+    | "generation_failed"
+    | "direct_response";
   error_code: string | null;
   error_message: string | null;
   sources: Source[];

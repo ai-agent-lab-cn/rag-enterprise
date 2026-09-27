@@ -2,6 +2,8 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { setAccessToken } from "./api";
+import { describeWebExecution } from "./types";
+import type { WebExecutionState } from "./types";
 import App from "./App";
 
 const base = {
@@ -149,6 +151,18 @@ const activeIndexVersion = {
   retired_at: null,
   cleaned_at: null,
 };
+// RAG 策略：GET 仍返回完整字段（服务端内部保留 rollout_stage 等参数用于兼容旧客户端读取），
+// 页面弹框只展示、只提交 web_search_enabled 与 allowed_domains 两项——见 spec 第 10.3 节。
+const ragPolicy = {
+  knowledge_base_id: "kb_default",
+  rollout_stage: "shadow",
+  web_search_enabled: false,
+  allowed_domains: ["docs.example.com"],
+  intent_confidence_threshold: 0.8,
+  minimum_evidence_count: 1,
+  max_web_results: 5,
+  profile_versions: { fact_lookup_v1: "v1" },
+};
 const admin = {
   user_id: "usr_1234567890abcdef",
   username: "test-admin",
@@ -238,6 +252,47 @@ const QUERY_RESULT = {
       heading_path: ["系统设计"],
     },
   ],
+};
+
+/**
+ * 一条模块轨迹。`metrics` 是后端的自由字段，技术抽屉的 Web / 门禁文案全靠它。
+ * `status` 默认 succeeded；未触发 Web 时后端会把 evidence.fuse / rerank.unified 记成
+ * `skipped` 并保留在轨迹里（service.py:819-890），时间线要照实显示这个状态。
+ */
+function moduleExecution(sequence: number, moduleKey: string, metrics: Record<string, unknown>, status = "succeeded") {
+  return {
+    module_execution_id: `mex_${sequence}`,
+    sequence,
+    module_key: moduleKey,
+    module_version: "1",
+    status,
+    attempt: 1,
+    duration_ms: 12,
+    metrics,
+    error_code: null,
+    error_message: null,
+    fallback_reason: null,
+  };
+}
+
+/** Web 证据：`filename` 是网页标题（service.py:1488），定位靠域名与抓取时间。 */
+const WEB_SOURCE = {
+  knowledge_base_id: "kb_default",
+  chunk_id: "web_abc123",
+  document_id: "web_abc123",
+  filename: "索引版本发布说明",
+  page: null,
+  paragraph: 0,
+  chunk_index: 0,
+  char_count: 40,
+  summary: "最新索引版本已发布。",
+  text: "最新索引版本已发布。",
+  retrieval_score: 0.71,
+  rerank_score: 1.12,
+  content_sha256: "b".repeat(64),
+  source_url: "https://docs.example.com/index-versions",
+  evidence_source_type: "web",
+  retrieved_at: "2026-09-20T02:00:00Z",
 };
 
 function sse(events: Array<{ event: string; data: unknown }>) {
@@ -351,6 +406,11 @@ function commonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if (url === "/api/knowledge-bases/kb_default/categories") return Promise.resolve(json([category]));
   if (url === "/api/knowledge-bases/kb_default/document-versions?offset=0&limit=100") return Promise.resolve(json([documentVersion]));
   if (url === "/api/knowledge-bases/kb_default/index-versions") return Promise.resolve(json([activeIndexVersion]));
+  if (url === "/api/knowledge-bases/kb_default/rag-policy" && init?.method === "PUT") {
+    const payload = JSON.parse(String(init.body)) as { web_search_enabled: boolean; allowed_domains: string[] };
+    return Promise.resolve(json({ ...ragPolicy, ...payload }));
+  }
+  if (url === "/api/knowledge-bases/kb_default/rag-policy") return Promise.resolve(json(ragPolicy));
   if (url === "/api/knowledge-bases/kb_default/document-versions/ver_1/parsing") return Promise.resolve(json({ ...documentVersion, tree: [{ node_id: "node_00000", node_type: "heading", text: "安全规范", level: 1, location: { heading_path: ["安全规范"], paragraph_index: 0 }, children: [] }], chunks: [{ chunk_id: "chunk_1", chunk_index: 0, content: "ACL 必须在召回前过滤。", metadata: { node_id: "node_00000", heading_path: ["安全规范"], paragraph: 0 } }] }));
   if (url === "/api/knowledge-bases/kb_default/citations/chunk_1") return Promise.resolve(json({ chunk_id: "chunk_1", knowledge_base_id: "kb_default", document_id: "doc_1", document_version_id: "ver_1", content_sha256: "a".repeat(64), filename: "profile.md", text: "系统资料全文", page: null, paragraph: 0, heading_path: ["系统设计"], sheet_name: null, row_start: null, row_end: null, source_url: null, external_resource_id: null }));
   if (url === "/api/knowledge-bases/kb_default/conversations") return Promise.resolve(json([]));
@@ -625,6 +685,74 @@ test("管理员可在知识库详情编辑基础信息并立即刷新摘要", as
   expect(screen.getByText("基础信息已更新")).toBeInTheDocument();
   expect(screen.queryByRole("dialog", { name: "编辑知识库" })).toBeNull();
   await waitFor(() => expect(editButton).toHaveFocus());
+});
+
+test("RAG 策略弹框只展示 Web 开关与可信域名两个字段", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default");
+  render(<App />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "RAG 策略" }));
+  const dialog = await screen.findByRole("dialog", { name: "RAG 策略" });
+
+  expect(dialog).toHaveTextContent("控制当前知识库是否允许受控 Web 补检，并限定可访问的可信域名。");
+  expect(dialog).toHaveTextContent("Web 只补充知识库证据，不会自动写入知识库或绕过知识库范围。");
+
+  // 四个已删控件不再出现——发布阶段、意图置信度、最少证据、Web 结果上限属系统内部
+  // 参数，spec 第 10.3 节要求页面隐藏，仅由服务端保留现值统一管理。
+  expect(screen.queryByText("发布阶段")).not.toBeInTheDocument();
+  expect(screen.queryByText("意图置信度")).not.toBeInTheDocument();
+  expect(screen.queryByText("最少证据")).not.toBeInTheDocument();
+  expect(screen.queryByText("Web 结果上限")).not.toBeInTheDocument();
+  expect(screen.getByText("启用受控 Web 检索")).toBeInTheDocument();
+  expect(screen.getByText("可信域名白名单")).toBeInTheDocument();
+
+  // D4 正向断言：用可访问角色数量锁住「弹框内只剩这两个可交互控件」这个事实，而不是
+  // 只靠上面四条否定断言——否定断言只要文案改一个字就会假绿，数不到「删干净了没有」。
+  expect(within(dialog).getAllByRole("checkbox")).toHaveLength(1);
+  expect(within(dialog).getAllByRole("textbox")).toHaveLength(1);
+  expect(within(dialog).queryAllByRole("spinbutton")).toHaveLength(0); // 原三个 number 输入（意图置信度/最少证据/Web 结果上限）
+  expect(within(dialog).queryAllByRole("combobox")).toHaveLength(0); // 原发布阶段 Select
+});
+
+test("开启 Web 但域名为空时前端阻止提交并显示可见错误，保存的 PUT body 只含两个公开字段", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(commonFetch);
+  window.history.replaceState({}, "", "/knowledge-bases/kb_default");
+  render(<App />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "RAG 策略" }));
+  const dialog = await screen.findByRole("dialog", { name: "RAG 策略" });
+  const webToggle = within(dialog).getByRole("checkbox", { name: "启用受控 Web 检索" });
+  const domainInput = within(dialog).getByLabelText(/可信域名白名单/);
+
+  // R12(b)：不做成禁用按钮——按钮全程可点，开启 Web 但域名为空时点击后报错，
+  // 与本页 saveBase / saveCategory（CategoryTemplateModal 同款）的既有交互一致。
+  await userEvent.click(webToggle);
+  await userEvent.clear(domainInput);
+  const saveButton = within(dialog).getByRole("button", { name: "保存策略" });
+  expect(saveButton).toBeEnabled();
+  await userEvent.click(saveButton);
+
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent("至少填写一个可信域名。");
+  expect(fetchMock.mock.calls.some(([url, init]) => String(url) === "/api/knowledge-bases/kb_default/rag-policy" && init?.method === "PUT")).toBe(false);
+
+  await userEvent.type(domainInput, "new.example.com");
+  await userEvent.click(within(dialog).getByRole("button", { name: "保存策略" }));
+
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "RAG 策略" })).toBeNull());
+  expect(screen.getByText("RAG 策略已更新")).toBeInTheDocument();
+
+  const putCall = fetchMock.mock.calls.find(
+    ([url, init]) => String(url) === "/api/knowledge-bases/kb_default/rag-policy" && init?.method === "PUT",
+  );
+  expect(putCall).toBeDefined();
+  // A13（锁定断言，请勿修改）：PUT body 只能有 web_search_enabled 与 allowed_domains
+  // 两个字段——旧的发布阶段/意图置信度/最少证据/Web 结果上限一律不得出现在请求体里。
+  // 后续 Task 7、Task 8 会继续往本文件追加 RAG 策略相关用例，但不应改动这条断言。
+  expect(JSON.parse(String(putCall?.[1]?.body))).toEqual({
+    web_search_enabled: true,
+    allowed_domains: ["new.example.com"],
+  });
 });
 
 test("无 edit 动作的成员看不到详情页编辑入口", async () => {
@@ -1095,6 +1223,307 @@ test("证据不足状态说明不会把降级结果伪装成答案", async () =>
 
   expect(await screen.findByText("证据不足")).toBeInTheDocument();
   expect(screen.getByText("未达到证据阈值，不生成确定性结论。")).toBeInTheDocument();
+});
+
+test("时效降级回答显示「时效未验证」并说明未取得 Web 证据", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/knowledge-bases/kb_default/query/stream") {
+      return Promise.resolve(sse([{ event: "final", data: {
+        ...QUERY_RESULT,
+        answer: "时效未验证：索引版本停留在 v1[来源 1]。",
+        answer_status: "answered_stale",
+        module_executions: [
+          moduleExecution(1, "evidence.preliminary_gate", { outcome: "needs_web", sufficient: true, kb_count: 1, evidence_count: 1, requires_freshness: true, web_available: true, reason_codes: ["freshness_required"] }),
+          moduleExecution(2, "retrieval.web_policy", { decision: "failed", result_count: 0, reason_code: "web_retrieval_failed" }),
+          moduleExecution(3, "evidence.final_gate", { outcome: "stale", sufficient: true, selected_count: 1, kb_count: 1, web_count: 0, requires_freshness: true, freshness_verified: false, reason_codes: ["freshness_required", "web_no_qualified_result", "freshness_unverified"] }),
+        ],
+      } }]));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/chat?knowledge_base_id=kb_default");
+  render(<App />);
+  await userEvent.type(await screen.findByLabelText("向知识库提问"), "截至目前最新的索引版本是什么？");
+  await userEvent.click(screen.getByRole("button", { name: /提问/ }));
+
+  const label = await screen.findByText("时效未验证");
+  expect(label).toBeInTheDocument();
+  // 橙色是这条状态唯一的非文字信号。tailwind.css 只有 --color-warning，
+  // 没有 --color-warning-text——写错令牌 Tailwind 不报错，只会让告警色消失。
+  expect(label).toHaveClass("text-warning");
+  expect(screen.getByText(/未取得可信的当前 Web 证据/)).toBeInTheDocument();
+
+  await userEvent.click(screen.getByText("查看技术细节"));
+  // 技术原因只落在抽屉里（spec 7.2），而且读的是 retrieval.web_policy 的 decision，
+  // 不是"最终有没有 Web 来源"——stale 的 Web 来源数恒为 0，反推只会说成"未采用"。
+  expect(screen.getByText("联网：Web 搜索失败")).toBeInTheDocument();
+  expect(screen.getByText(/初步门禁：需要 Web 补检 · 知识库合格 1 条/)).toBeInTheDocument();
+  expect(screen.getByText(/Final Gate 时效未验证 · 原因：问题要求时效、Web 无合格结果、时效未验证/)).toBeInTheDocument();
+});
+
+test("问候直接回复，不展示证据、查询性能与技术抽屉", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/knowledge-bases/kb_default/query/stream") {
+      return Promise.resolve(sse([
+        { event: "routing_completed", data: { intent: "greeting", confidence: 1, reason: "整句问候", control_outcome: "social", original_question: "你好，在吗", effective_question: "你好，在吗", follow_up_rewritten: false, requires_freshness: false, requires_web: false, classifier_model: null, fallback_used: false } },
+        { event: "final", data: {
+          ...QUERY_RESULT,
+          answer: "你好，我在。你可以询问当前知识库中的事实、配置或资料内容。",
+          answer_status: "direct_response",
+          sources: [],
+          // 问候不跑检索，latency_ms 只有 routing 与 total（Task 6 契约 5.4）。
+          latency_ms: { routing: 3, total: 4 },
+          query_metadata: null,
+          generation_governance: null,
+          module_executions: [moduleExecution(1, "intent.router", {})],
+        } },
+      ]));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/chat?knowledge_base_id=kb_default");
+  render(<App />);
+  await userEvent.type(await screen.findByLabelText("向知识库提问"), "你好，在吗");
+  await userEvent.click(screen.getByRole("button", { name: /提问/ }));
+
+  expect(await screen.findByText("你好，我在。你可以询问当前知识库中的事实、配置或资料内容。")).toBeInTheDocument();
+  expect(screen.getByText("对话回复")).toBeInTheDocument();
+  expect(screen.queryByLabelText("查询性能")).toBeNull();
+  expect(screen.queryByText("查看技术细节")).toBeNull();
+  // 这里**不**断言 AnswerPanel 里的「引用证据」不存在：`showSources` 在两处调用点
+  // （ChatPage 里）都硬传 false，那个分支恒不渲染，断言它为空对任何状态都成立，
+  // 改坏 direct_response 也不会红。一条永真断言比没有断言更糟——它让人以为覆盖了。
+  // 证据区该不该出现，由下面针对 evidencePanel 的断言负责。
+  // 右侧证据列保留（抽掉会让中间栏宽度跳变），但空态要说得出自己为什么空：
+  // 一个不解释自己的空白区域和一个不解释自己的灰色禁用按钮是同一类问题。
+  const evidencePanel = screen.getByLabelText("引用来源");
+  expect(within(evidencePanel).getByText("本次是对话回复")).toBeInTheDocument();
+  expect(within(evidencePanel).getByText(/问候与寒暄不触发检索，所以这里没有引用证据/)).toBeInTheDocument();
+  expect(within(evidencePanel).queryByText("回答后查看证据")).toBeNull();
+});
+
+test("引用按知识库与 Web 分区，Web 卡片给域名、抓取时间和外链", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/knowledge-bases/kb_default/query/stream") {
+      return Promise.resolve(sse([{ event: "final", data: {
+        ...QUERY_RESULT,
+        answer: "索引版本是 v3。[来源 1][来源 2]",
+        sources: [...QUERY_RESULT.sources, WEB_SOURCE],
+      } }]));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/chat?knowledge_base_id=kb_default");
+  render(<App />);
+  await userEvent.type(await screen.findByLabelText("向知识库提问"), "最新索引版本是什么？");
+  await userEvent.click(screen.getByRole("button", { name: /提问/ }));
+
+  const kbGroup = await screen.findByLabelText("知识库引用");
+  const webGroup = screen.getByLabelText("Web 引用");
+  expect(within(kbGroup).getByText("profile.md")).toBeInTheDocument();
+  // Web 卡片不能把 URL 当成知识库文件名展示：标题是网页标题，定位是域名 + 抓取时间。
+  expect(within(webGroup).getByText("索引版本发布说明 · Web")).toBeInTheDocument();
+  expect(within(webGroup).getByText(/^docs\.example\.com · 抓取于/)).toBeInTheDocument();
+  expect(within(webGroup).getByRole("button", { name: "打开 Web 原文" })).toBeInTheDocument();
+  // 分组后仍然用原始下标编号：答案里的 [来源 2] 必须指向这张卡（锚点 #source-2）。
+  expect(within(webGroup).getByText("2")).toBeInTheDocument();
+  expect(within(kbGroup).queryByText("2")).toBeNull();
+});
+
+test("Web 执行状态只认模块轨迹：七个 decision 各有文案，reason_code 优先", () => {
+  const status = (patch: Partial<WebExecutionState>) =>
+    describeWebExecution({ decision: null, resultCount: null, webCount: null, reasonCodes: [], ...patch });
+
+  // 旧记录没有 retrieval.web_policy 轨迹时说"不知道"，不拿 Web 来源数猜。
+  expect(status({})).toBe("历史记录未保存 Web 执行状态");
+  expect(status({ decision: "disabled" })).toBe("Web 未启用");
+  expect(status({ decision: "not_needed" })).toBe("KB 证据已满足，未触发 Web");
+  expect(status({ decision: "scope_limited" })).toBe("当前检索范围禁止 Web");
+  expect(status({ decision: "provider_unavailable" })).toBe("Web Provider 未配置");
+  expect(status({ decision: "failed" })).toBe("Web 搜索失败");
+  expect(status({ decision: "no_result" })).toBe("Web 未找到合格结果");
+  expect(status({ decision: "executed", resultCount: 3, webCount: 0 })).toBe("已检索，结果未被采用");
+  expect(status({ decision: "executed", resultCount: 3, webCount: 2 })).toBe("已采用 2 条 Web 证据");
+  // 流式途中 Final Gate 还没出结论，采用数未知——只说搜到几条，不谎报已采用。
+  expect(status({ decision: "executed", resultCount: 3 })).toBe("已检索到 3 条 Web 结果");
+  // 时效问题没有 KB anchor 时仍会打一次 Web（spec 5.3），decision 是 executed 而结论必拒。
+  // 只说"已检索"，用户就会看到"已联网"却说不出为什么被拒答。
+  expect(status({ decision: "executed", resultCount: 3, webCount: 0, reasonCodes: ["freshness_required", "no_kb_anchor"] }))
+    .toBe("已检索到 3 条 Web 结果，但知识库缺少可锚定证据，未被采用");
+  expect(status({ decision: "disabled", reasonCodes: ["no_kb_anchor"] })).toBe("Web 未启用；知识库缺少可锚定证据");
+});
+
+test("Web 已检索却因缺少知识库锚点被拒答时，技术抽屉说得出原因", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/knowledge-bases/kb_default/query/stream") {
+      return Promise.resolve(sse([{ event: "final", data: {
+        ...QUERY_RESULT,
+        answer: "现有知识库和受控外部来源的证据不足，无法可靠回答该问题。",
+        answer_status: "insufficient_evidence",
+        sources: [],
+        module_executions: [
+          moduleExecution(1, "evidence.preliminary_gate", { outcome: "needs_web", sufficient: false, kb_count: 0, evidence_count: 0, requires_freshness: true, web_available: true, reason_codes: ["freshness_required", "no_kb_anchor"] }),
+          moduleExecution(2, "retrieval.web_policy", { decision: "executed", result_count: 3, reason_code: null }),
+          moduleExecution(3, "evidence.final_gate", { outcome: "reject", sufficient: false, selected_count: 0, kb_count: 0, web_count: 0, requires_freshness: true, freshness_verified: false, reason_codes: ["freshness_required", "no_kb_anchor"] }),
+        ],
+      } }]));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/chat?knowledge_base_id=kb_default");
+  render(<App />);
+  await userEvent.type(await screen.findByLabelText("向知识库提问"), "截至今天的最新公告是什么？");
+  await userEvent.click(screen.getByRole("button", { name: /提问/ }));
+
+  expect(await screen.findByText("证据不足")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("查看技术细节"));
+  expect(screen.getByText("联网：已检索到 3 条 Web 结果，但知识库缺少可锚定证据，未被采用")).toBeInTheDocument();
+  expect(screen.getByText(/Final Gate 拒答/)).toBeInTheDocument();
+  // kb_count / web_count 是门禁数到的**合格**数，拒答时 selected 为空。仍叫「最终证据」
+  // 就会出现「最终证据：知识库 0 条」这种自己和自己打架的话（CLAUDE.md 第一条）。
+  expect(screen.getByText(/合格证据：知识库 0 条 \/ Web 0 条 · Final Gate 拒答/)).toBeInTheDocument();
+  expect(screen.queryByText(/最终证据/)).toBeNull();
+});
+
+test("需要澄清时抽屉说本次未进入检索管线，而不是谎称历史记录没保存", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/knowledge-bases/kb_default/query/stream") {
+      return Promise.resolve(sse([{ event: "final", data: {
+        ...QUERY_RESULT,
+        answer: "当前问题缺少明确的查询对象，请补充要查询的资料、对象或范围。",
+        answer_status: "insufficient_evidence",
+        sources: [],
+        query_metadata: null,
+        generation_governance: null,
+        latency_ms: { routing: 3, total: 4 },
+        routing: {
+          intent: null, confidence: 1, reason: "缺少明确的查询对象", control_outcome: "clarify",
+          original_question: "那个呢", effective_question: "那个呢", follow_up_rewritten: false,
+          requires_freshness: false, requires_web: false, classifier_model: null, fallback_used: false,
+        },
+        // clarify 在 service.py:398 早返回，轨迹里只有 Router 与一条 skipped 的 evidence.gate，
+        // 永远不会有 retrieval.web_policy。
+        module_executions: [
+          moduleExecution(1, "intent.router", {}),
+          moduleExecution(2, "evidence.gate", {}, "skipped"),
+        ],
+      } }]));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/chat?knowledge_base_id=kb_default");
+  render(<App />);
+  await userEvent.type(await screen.findByLabelText("向知识库提问"), "那个呢");
+  await userEvent.click(screen.getByRole("button", { name: /提问/ }));
+
+  expect(await screen.findByText("证据不足")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("查看技术细节"));
+  // 一条刚刚发生的查询不能被告知"历史记录未保存"——没有 web_policy 轨迹的原因是
+  // 这次压根没进检索管线，不是记录丢了。
+  expect(screen.getByText("联网：本次未进入检索管线，没有发起 Web 检索")).toBeInTheDocument();
+  expect(screen.queryByText(/历史记录未保存 Web 执行状态/)).toBeNull();
+  // 同一个判据管两行：没进管线就不能说「返回 0 条来源，并按融合排序结果展示」——
+  // 那次融合排序根本没发生过。
+  expect(screen.queryByText(/并按融合排序结果展示/)).toBeNull();
+});
+
+test("历史记录没有 Web 轨迹时如实说不知道，并保留时效未验证状态", async () => {
+  const conversationId = "conv_1234567890abcdef";
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === `/api/knowledge-bases/kb_default/conversations/${conversationId}`) {
+      return Promise.resolve(json({
+        conversation_id: conversationId, knowledge_base_id: "kb_default", title: "旧记录",
+        created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z",
+        records: [{
+          record_id: "ans_old", conversation_id: conversationId, knowledge_base_id: "kb_default",
+          question: "最新索引版本是什么？", status: "success", answer: "索引版本停留在 v1。",
+          sources: [], latency_ms: { total: 30 }, models: {}, model_metadata: {},
+          prompt_version: null, prompt_hash: null, answer_status: "answered_stale",
+          generation_governance: null, query_metadata: null, error_code: null, error_message: null,
+          created_at: "2026-09-01T00:00:00Z",
+          // 旧记录没有 module_summary，技术抽屉不得靠 Web 来源数猜联网状态。
+        }],
+      }));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", `/chat/${conversationId}?knowledge_base_id=kb_default`);
+  render(<App />);
+
+  // 会话刷新之后 AnswerPanel 会卸载，状态只剩历史气泡能讲——spec 10.1 要求它一直在。
+  expect(await screen.findByText("索引版本停留在 v1。")).toBeInTheDocument();
+  expect(screen.getByText("时效未验证")).toBeInTheDocument();
+  expect(screen.getByText(/未取得可信的当前 Web 证据/)).toBeInTheDocument();
+
+  await userEvent.click(screen.getByText("查看技术细节"));
+  expect(screen.getByText("联网：历史记录未保存 Web 执行状态")).toBeInTheDocument();
+  expect(screen.queryByText(/未采用 Web 证据/)).toBeNull();
+});
+
+// 设计稿 13.3 的验收场景在页面上的落点。场景 2（时效降级）、4（缺少 KB anchor）、
+// 5（问候）已由上面三条覆盖；下面两条补的是场景 1 与场景 3——它们的 Web 决策
+// （not_needed / scope_limited）此前只有 describeWebExecution 的纯函数用例，
+// 没有一条渲染用例证明这两句话真的会出现在抽屉里。
+test("验收场景 1：KB 证据足够时抽屉说明未触发 Web，跳过的模块仍留在时间线上", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/knowledge-bases/kb_default/query/stream") {
+      return Promise.resolve(sse([{ event: "final", data: {
+        ...QUERY_RESULT,
+        answer: "索引版本是 v1。[来源 1]",
+        module_executions: [
+          moduleExecution(1, "evidence.preliminary_gate", { outcome: "pass", sufficient: true, kb_count: 1, evidence_count: 1, requires_freshness: false, web_available: true, reason_codes: ["kb_evidence_sufficient"] }),
+          moduleExecution(2, "retrieval.web_policy", { decision: "not_needed", result_count: 0, reason_code: "kb_evidence_sufficient" }, "skipped"),
+          moduleExecution(3, "evidence.fuse", { kb_count: 1, web_count: 0, merged_count: 1, reason_code: "web_not_executed" }, "skipped"),
+          moduleExecution(4, "rerank.unified", { candidate_count: 1, selected_count: 1, reason_code: "web_not_executed" }, "skipped"),
+          moduleExecution(5, "evidence.final_gate", { outcome: "pass", sufficient: true, selected_count: 1, kb_count: 1, web_count: 0, requires_freshness: false, freshness_verified: false, reason_codes: ["kb_evidence_sufficient"] }),
+        ],
+      } }]));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/chat?knowledge_base_id=kb_default");
+  render(<App />);
+  await userEvent.type(await screen.findByLabelText("向知识库提问"), "索引版本是什么？");
+  await userEvent.click(screen.getByRole("button", { name: /提问/ }));
+
+  expect(await screen.findByText("已基于证据回答")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("查看技术细节"));
+  // 「没联网」要说清是"不需要"而不是"不能"——后者会让管理员去查 Web 配置。
+  expect(screen.getByText("联网：KB 证据已满足，未触发 Web")).toBeInTheDocument();
+  expect(screen.getByText(/初步门禁：通过 · 知识库合格 1 条 · 原因：知识库证据充足/)).toBeInTheDocument();
+  expect(screen.getByText(/最终证据：知识库 1 条 \/ Web 0 条 · Final Gate 通过/)).toBeInTheDocument();
+  // 被跳过的模块不能从时间线上消失：轨迹是抽屉判断联网状态的唯一依据。
+  const timeline = screen.getByLabelText("模块执行时间线");
+  expect(within(timeline).getByText("3. evidence.fuse")).toBeInTheDocument();
+  expect(within(timeline).getByText("4. rerank.unified")).toBeInTheDocument();
+});
+
+test("验收场景 3：检索范围限定在知识库内时抽屉说明 Web 被范围禁止", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/knowledge-bases/kb_default/query/stream") {
+      return Promise.resolve(sse([{ event: "final", data: {
+        ...QUERY_RESULT,
+        answer: "该文档记录的切片参数是 700/100。[来源 1]",
+        module_executions: [
+          moduleExecution(1, "evidence.preliminary_gate", { outcome: "pass", sufficient: true, kb_count: 1, evidence_count: 1, requires_freshness: false, web_available: false, reason_codes: ["kb_evidence_sufficient"] }),
+          moduleExecution(2, "retrieval.web_policy", { decision: "scope_limited", result_count: 0, reason_code: "knowledge_base_scope_locked" }, "skipped"),
+          moduleExecution(3, "evidence.final_gate", { outcome: "pass", sufficient: true, selected_count: 1, kb_count: 1, web_count: 0, requires_freshness: false, freshness_verified: false, reason_codes: ["kb_evidence_sufficient"] }),
+        ],
+      } }]));
+    }
+    return commonFetch(input, init);
+  });
+  window.history.replaceState({}, "", "/chat?knowledge_base_id=kb_default");
+  render(<App />);
+  await userEvent.type(await screen.findByLabelText("向知识库提问"), "查找指定文档中的索引配置");
+  await userEvent.click(screen.getByRole("button", { name: /提问/ }));
+
+  expect(await screen.findByText("已基于证据回答")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("查看技术细节"));
+  expect(screen.getByText("联网：当前检索范围禁止 Web")).toBeInTheDocument();
+  // 范围锁住时不会有 Web 引用分区——分区只在该类来源非空时渲染。
+  expect(screen.getByLabelText("知识库引用")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Web 引用")).toBeNull();
 });
 
 test("回答评测页只读展示正式指标", async () => {
@@ -1682,11 +2111,11 @@ test("概览页质量监控入口打开回答正式报告详情弹框", async ()
   const dialog = await screen.findByRole("dialog", { name: "正式报告详情" });
   expect(dialog).toHaveTextContent("回答报告");
   expect(dialog).toHaveTextContent("answer-official");
-  expect(window.location.pathname).toBe("/evaluation");
-  expect(window.location.search).toBe("?report=answer-official");
+  expect(window.location.pathname).toBe("/overview");
+  expect(window.location.search).toBe("");
   await userEvent.click(screen.getByRole("button", { name: "关闭弹框" }));
   expect(screen.queryByRole("dialog", { name: "正式报告详情" })).not.toBeInTheDocument();
-  expect(window.location.pathname + window.location.search).toBe("/evaluation");
+  expect(window.location.pathname + window.location.search).toBe("/overview");
 });
 
 test("保留检索评测页且可直接访问", async () => {
@@ -1844,6 +2273,73 @@ test("表单 pattern 在现代浏览器的 v flag 下必须合法", () => {
     }
   }
   expect(offenders).toEqual([]);
+});
+
+/**
+ * 语义色 utility 的前缀。**故意不含 `shadow`**：`--shadow-*` 是另一套命名空间，
+ * `shadow-focus` 用的是 `--shadow-focus` 而不是 `--color-focus`，放进来会误报。
+ * `text` 与 `--text-*`（字阶）同前缀但不冲突：字阶名（xs/sm/base/md/lg/xl）
+ * 和颜色名没有交集，下面的正则只认从 tailwind.css 里现读出来的颜色词根。
+ */
+const COLOR_UTILITY_PREFIXES = ["text", "bg", "border", "ring", "outline", "fill", "stroke", "divide", "from", "via", "to", "accent", "caret", "placeholder", "decoration"];
+
+/**
+ * `node:fs` 的 specifier 写成 `string` 变量而不是字面量：`@types/node` 不在依赖里
+ * （`tsconfig.app.json` 的 `types` 只列了 vitest/globals 与 jest-dom），
+ * 写成字面量 `npm run typecheck` 会报 TS2591 而不是解析成功。
+ */
+const NODE_FS: string = "node:fs";
+type NodeFs = { readFileSync(path: string, encoding: "utf8"): string };
+
+test("语义色 utility 只能引用 tailwind.css 里真实定义的令牌", async () => {
+  // 不存在的令牌会被 Tailwind **静默丢弃**：不报错、typecheck 不报错、构建不报错，
+  // 那行文字直接继承父级颜色，告警色整个消失（CLAUDE.md 第七条，仓库踩过一次）。
+  // 这条守卫两边都从真正的源现读——tailwind.css 定义了什么、组件引用了什么——
+  // 测试里不留任何一份令牌副本，否则它自己就成了第三个需要同步的地方。
+  //
+  // **覆盖边界（别把它当全量校验）**：下面的正则是用 `defined` 里的词根现拼的，
+  // 所以它只抓得到「已定义词根的复合扩展」——`--color-warning` 存在而写了
+  // `text-warning-text`，正是仓库踩过的那种。反过来，引用了**全新未定义词根**的
+  // utility（比如 `text-highlight` 而 `highlight` 从未在任何地方定义过）
+  // 词根不在 `defined` 里，正则根本不会匹配，`referenced` 与 `missing` 都不会记录它。
+  // 要覆盖那一类得换一套扫描思路（枚举所有 `前缀-*` 再反查），成本高得多。
+  // 把这条守卫当成「全量令牌校验」而放松警惕，比没有守卫更危险。
+  //
+  // **样式表从磁盘现读，不能用 `import.meta.glob(..., { query: "?raw" })`**：vitest 默认
+  // `css: false`，它的 `vitest:css-empty-post`（enforce: post）对所有 CSS id 一律返回
+  // `export default ""`，判定正则 `\.css(?:$|\?)` 把 `?raw` 也算进 CSS——glob 确实匹配到了
+  // 文件（key 是 `./tailwind.css`），读回来的却是空串，这条守卫先前就红在下面那句
+  // `defined.size > 0` 上。`.tsx` 的 `?raw` 不经过这条链路，上面 pattern 那条守卫仍用 glob。
+  const fs = (await import(/* @vite-ignore */ NODE_FS)) as NodeFs;
+  const stylesheet = fs.readFileSync(`${(import.meta as ImportMeta & { dirname: string }).dirname}/tailwind.css`, "utf8");
+  const defined = new Set([...stylesheet.matchAll(/--color-([a-z0-9-]+)\s*:/g)].map((match) => match[1]));
+  // 解析不出来就当场红，不能让空集合把后面的断言全变成假绿。
+  expect(defined.size).toBeGreaterThan(0);
+  // 本轮 answered_stale 的橙色全部依赖这一个令牌：text-warning / bg-warning\/10 /
+  // border-warning\/30。它被删或改名，这里立刻红。
+  expect(defined.has("warning")).toBe(true);
+
+  const roots = [...new Set([...defined].map((token) => token.split("-")[0]))];
+  const utility = new RegExp(`\\b(?:${COLOR_UTILITY_PREFIXES.join("|")})-((?:${roots.join("|")})(?:-[a-z0-9]+)*)`, "g");
+  const sources = import.meta.glob("./components/**/*.tsx", { eager: true, query: "?raw", import: "default" });
+  const referenced = new Map<string, string[]>();
+  for (const [file, content] of Object.entries(sources)) {
+    if (file.includes(".test.")) continue;
+    for (const match of String(content).matchAll(utility)) {
+      referenced.set(match[1], [...(referenced.get(match[1]) ?? []), file]);
+    }
+  }
+  // 扫描确实看见了本轮那三处写法；少了这条，正则写错时整份守卫会静悄悄地一个都不扫，
+  // 然后以「没有缺失令牌」的姿态假绿——这正是写这条守卫时先踩到的那个坑。
+  const warningComponents = new Set((referenced.get("warning") ?? []).map((file) => file.split("/").pop()));
+  expect([...warningComponents]).toEqual(expect.arrayContaining(["AnswerPanel.tsx", "ChatPage.tsx", "TechnicalDrawer.tsx"]));
+
+  // 已知缺陷，**不在本 Task 范围内**：KnowledgeBaseDataSourcesPanel.tsx:261 的同步记录行
+  // 悬停底色引用了一个从未定义过的 --color-surface-muted，实际没有悬停效果。
+  // 这条断言是精确相等的：修好那一处之后它会变红，提示把这里的豁免一起删掉——
+  // 豁免不许悄悄留下来变成第二个腐烂点。
+  const missing = [...referenced.keys()].filter((token) => !defined.has(token)).sort();
+  expect(missing).toEqual(["surface-muted"]);
 });
 
 test("知识库删除走确认弹层，不能删的原因在弹层里讲清楚", async () => {

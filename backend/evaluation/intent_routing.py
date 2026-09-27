@@ -34,7 +34,10 @@ def evaluate_intent_router(
     router: QueryIntentRouter,
     samples: list[dict[str, Any]],
 ) -> IntentEvaluationResult:
-    labels = ("fact_lookup", "summarize", "compare", "procedure")
+    # greeting 单独成类，不并进 fact_lookup：把问候算成事实查找会让「旁路是否生效」在
+    # 指标上完全看不出来。actual 取 `intent or control_outcome`，问候的 intent 非空，
+    # 所以数据集里的 expected 要写 "greeting" 而不是 "social"。
+    labels = ("greeting", "fact_lookup", "summarize", "compare", "procedure")
     truth: list[str] = []
     predicted: list[str] = []
     failures: list[dict[str, str]] = []

@@ -609,7 +609,9 @@ class QueryMetadataFilter(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    question: str = Field(min_length=2, max_length=2000)
+    # 下限是 1 而不是 2：单字问候「嗨」必须能进到 Router，由问候旁路接住。
+    # 两道闸都要放开——只改这里，下面 normalize_question 的 `len(normalized) < 2` 仍会 422。
+    question: str = Field(min_length=1, max_length=2000)
     retrieve_k: int = Field(default=10, ge=1, le=50)
     rerank_k: int = Field(default=5, ge=1, le=20)
     conversation_id: str | None = Field(default=None, pattern=r"^conv_[a-f0-9]{16}$")
@@ -619,7 +621,7 @@ class QueryRequest(BaseModel):
     @classmethod
     def normalize_question(cls, value: str) -> str:
         normalized = value.strip()
-        if len(normalized) < 2:
+        if not normalized:
             raise ValueError("问题不能为空")
         if any(
             unicodedata.category(character) == "Cc" and character not in {"\n", "\t"}
@@ -702,13 +704,19 @@ class QueryExecutionMetadata(BaseModel):
 
 
 class RoutingMetadata(BaseModel):
-    intent: Literal["fact_lookup", "summarize", "compare", "procedure"] | None = None
+    intent: (
+        Literal["greeting", "fact_lookup", "summarize", "compare", "procedure"] | None
+    ) = None
     confidence: float = Field(ge=0, le=1)
     reason: str
-    control_outcome: Literal["route", "clarify", "out_of_scope"]
+    control_outcome: Literal["route", "social", "clarify", "out_of_scope"]
     original_question: str
     effective_question: str
     follow_up_rewritten: bool = False
+    # 必须有默认值：历史 answer_records.routing 与 get_execution 的标量列回退路径都不带
+    # 这个键，声明成必填会让所有执行详情与历史回答接口直接 ValidationError。
+    requires_freshness: bool = False
+    # 过渡别名，值恒等于 requires_freshness，待前端切换后删除。
     requires_web: bool = False
     classifier_model: str | None = None
     fallback_used: bool = False
@@ -734,13 +742,16 @@ class ModuleExecutionResponse(BaseModel):
     fallback_reason: str | None = None
 
 
-class RAGPolicyUpdate(BaseModel):
-    rollout_stage: Literal["shadow", "canary", "full"] = "shadow"
-    web_search_enabled: bool = False
+class RAGPolicyBase(BaseModel):
+    """读写两侧共享的公开字段。
+
+    `RAGPolicyResponse` 曾经直接继承 `RAGPolicyUpdate`，于是写契约一收窄，读契约就跟着
+    变宽：内部四字段一改成可空，GET 响应在 OpenAPI 里也成了可空。两个模型现在各自继承
+    这个基类，写侧收窄不再外溢到读侧。
+    """
+
+    web_search_enabled: bool
     allowed_domains: list[str] = Field(default_factory=list, max_length=50)
-    intent_confidence_threshold: float = Field(default=0.8, ge=0.5, le=1)
-    minimum_evidence_count: int = Field(default=1, ge=1, le=10)
-    max_web_results: int = Field(default=5, ge=1, le=5)
 
     @field_validator("allowed_domains")
     @classmethod
@@ -767,6 +778,20 @@ class RAGPolicyUpdate(BaseModel):
                 normalized.append(domain)
         return normalized
 
+
+class RAGPolicyUpdate(RAGPolicyBase):
+    """PUT 只接受「Web 开关 + 可信域名」两个公开字段。
+
+    内部四字段保留下来只为兼容旧客户端「GET 回来原样 PUT 回去」：传 `None` 或与当前值
+    相同才被接受，真要改由 `rag_policy.merge_public_rag_policy_update` 拒绝。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    rollout_stage: Literal["shadow", "canary", "full"] | None = None
+    intent_confidence_threshold: float | None = Field(default=None, ge=0.5, le=1)
+    minimum_evidence_count: int | None = Field(default=None, ge=1, le=10)
+    max_web_results: int | None = Field(default=None, ge=1, le=5)
+
     @model_validator(mode="after")
     def require_allowlist_for_web(self) -> "RAGPolicyUpdate":
         if self.web_search_enabled and not self.allowed_domains:
@@ -774,8 +799,18 @@ class RAGPolicyUpdate(BaseModel):
         return self
 
 
-class RAGPolicyResponse(RAGPolicyUpdate):
+class RAGPolicyResponse(RAGPolicyBase):
+    """GET 保留完整旧结构，内部四字段非空。
+
+    这里刻意不带 `require_allowlist_for_web`：那是写侧的准入条件，挂在读侧会让历史上
+    「已开 Web 但域名为空」的旧记录一读就 500。
+    """
+
     knowledge_base_id: str
+    rollout_stage: Literal["shadow", "canary", "full"] = "shadow"
+    intent_confidence_threshold: float = Field(default=0.8, ge=0.5, le=1)
+    minimum_evidence_count: int = Field(default=1, ge=1, le=10)
+    max_web_results: int = Field(default=5, ge=1, le=5)
     profile_versions: dict[str, str] = Field(default_factory=dict)
 
 
@@ -819,10 +854,15 @@ class QueryResponse(BaseModel):
     answer: str
     answer_status: Literal[
         "answered",
+        # Final Gate 说 stale：有 KB 历史证据但没拿到合格 Web 证据，答案照常返回，
+        # 但时效未经验证。它不是失败，也不能并入普通 answered。
+        "answered_stale",
         "insufficient_evidence",
         "source_conflict",
         "retrieval_only",
         "generation_failed",
+        # 问候旁路的终态：没有检索也没有生成，只有固定引导语。
+        "direct_response",
     ] = "answered"
     error_code: str | None = None
     error_message: str | None = None
@@ -862,10 +902,12 @@ class AnswerRecordResponse(BaseModel):
     answer_status: (
         Literal[
             "answered",
+            "answered_stale",
             "insufficient_evidence",
             "source_conflict",
             "retrieval_only",
             "generation_failed",
+            "direct_response",
         ]
         | None
     ) = None
@@ -903,9 +945,13 @@ class RAGPipelineMetricResponse(BaseModel):
     execution_count: int = Field(ge=0)
     successful_count: int = Field(ge=0)
     insufficient_evidence_count: int = Field(ge=0)
+    # 时效未验证的回答单独成一格：它有答案，但不能计进 successful_count 装成普通
+    # answered，也不是证据不足。不声明这个字段，SQL 里那一列会被 pydantic 静默丢掉。
+    stale_answer_count: int = Field(default=0, ge=0)
     fallback_count: int = Field(ge=0)
     task_success_rate: float = Field(ge=0, le=1)
     insufficient_evidence_rate: float = Field(ge=0, le=1)
+    stale_answer_rate: float = Field(default=0, ge=0, le=1)
     fallback_rate: float = Field(ge=0, le=1)
     p95_latency_ms: float = Field(ge=0)
 

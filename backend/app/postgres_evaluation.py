@@ -55,7 +55,13 @@ class PostgresEvaluationGovernanceRepository:
     ) -> list[dict[str, object]]:
         if knowledge_base_ids == set():
             return []
-        conditions: list[str] = []
+        # direct_response 是问候旁路的终态：没有检索、没有门禁、没有生成。它留在
+        # count(*) 里就成了 RAG 质量的分母，问候越多三个比率越低，而那与管线质量无关。
+        # 排除必须落在 WHERE 上：三个比率的分母是 execution_count，改 FILTER 没用。
+        # IS DISTINCT FROM 而不是 <>：没有 answer_record 的执行 answer_status 为 NULL，
+        # 用 <> 会把它们一起筛掉。
+        # 这一条不带占位符，所以放在最前面不影响下面两个过滤的参数顺序。
+        conditions: list[str] = ["a.answer_status IS DISTINCT FROM 'direct_response'"]
         parameters: list[object] = []
         if knowledge_base_ids is not None:
             conditions.append("q.knowledge_base_id = ANY(%s)")
@@ -63,7 +69,8 @@ class PostgresEvaluationGovernanceRepository:
         if knowledge_base_id:
             conditions.append("q.knowledge_base_id = %s")
             parameters.append(knowledge_base_id)
-        condition = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        # conditions 恒非空（至少有上面那条），不需要再判空。
+        condition = f"WHERE {' AND '.join(conditions)}"
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             rows = connection.execute(
                 f"""SELECT q.intent, q.pipeline_profile, q.profile_version,
@@ -74,6 +81,9 @@ class PostgresEvaluationGovernanceRepository:
                            count(*) FILTER (
                              WHERE a.answer_status = 'insufficient_evidence'
                            )::integer AS insufficient_evidence_count,
+                           count(*) FILTER (
+                             WHERE a.answer_status = 'answered_stale'
+                           )::integer AS stale_answer_count,
                            count(*) FILTER (
                              WHERE q.fallback_used OR EXISTS (
                                SELECT 1 FROM module_executions m
@@ -99,6 +109,9 @@ class PostgresEvaluationGovernanceRepository:
                     "task_success_rate": int(row["successful_count"]) / total if total else 0,
                     "insufficient_evidence_rate": (
                         int(row["insufficient_evidence_count"]) / total if total else 0
+                    ),
+                    "stale_answer_rate": (
+                        int(row["stale_answer_count"]) / total if total else 0
                     ),
                     "fallback_rate": int(row["fallback_count"]) / total if total else 0,
                 }

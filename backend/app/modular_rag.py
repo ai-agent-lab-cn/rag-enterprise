@@ -9,15 +9,19 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Protocol
 from uuid import uuid4
 
-QueryIntent = Literal["fact_lookup", "summarize", "compare", "procedure"]
-ControlOutcome = Literal["route", "clarify", "out_of_scope"]
+QueryIntent = Literal["greeting", "fact_lookup", "summarize", "compare", "procedure"]
+ControlOutcome = Literal["route", "social", "clarify", "out_of_scope"]
 ModuleStatus = Literal["succeeded", "failed", "skipped", "degraded"]
+# greeting 不在表内：它没有 Pipeline Profile，也不该出现在每个知识库的策略快照里。
 DEFAULT_PROFILE_VERSIONS = {
     "fact_lookup": "1",
     "summarize": "1",
     "compare": "1",
     "procedure": "1",
 }
+# 问候旁路的固定回复。Router 只产出 greeting + social 决策，这条文案由 service 层在
+# social 分支直接返回，不经过 Embedding、检索、门禁或生成模型。
+SOCIAL_DIRECT_REPLY = "你好，我在。你可以询问当前知识库中的事实、配置或资料内容。"
 
 
 class StructuredClassifier(Protocol):
@@ -104,12 +108,17 @@ class RoutingDecision:
     original_question: str
     effective_question: str
     follow_up_rewritten: bool = False
-    requires_web: bool = False
+    # 用户需求（问题是否要求时效信息），不是执行策略。是否真的访问 Web 由门禁另行决定。
+    requires_freshness: bool = False
     classifier_model: str | None = None
     fallback_used: bool = False
 
     def as_dict(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        # 过渡别名：前端类型、answer_records.routing 的历史数据与
+        # query_executions.requires_web 列都还读旧名，两个键必须同时出现。
+        payload["requires_web"] = self.requires_freshness
+        return payload
 
 
 @dataclass
@@ -220,15 +229,22 @@ class ModuleRegistry:
 DEFAULT_PIPELINE_PROFILES: dict[str, PipelineProfile] = {
     "fact_lookup_v1": PipelineProfile(
         "fact_lookup_v1",
+        # 版本号必须保持 "1"。RAG Policy 的 PUT 改成合并写之后，profile_versions 不再随
+        # DEFAULT_PIPELINE_PROFILES 重算，而 service.py 在 canary/full 阶段比对两者不一致
+        # 就抛 RAG_PROFILE_INCOMPATIBLE——bump 它等于让所有已晋级的知识库当场全部查询失败，
+        # 且管理员没有任何接口能把库里的旧版本号刷新过来。
         "1",
         "fact_lookup",
         (
             "query.normalize",
             "query.expand",
             "retrieval.knowledge_base",
+            "rerank.knowledge_base",
+            "evidence.preliminary_gate",
             "retrieval.web_policy",
             "evidence.fuse",
-            "evidence.gate",
+            "rerank.unified",
+            "evidence.final_gate",
             "generation.fact",
             "generation.verify",
         ),
@@ -297,12 +313,18 @@ def build_default_registry() -> ModuleRegistry:
         "retrieval.coverage": "hybrid_retrieval",
         "retrieval.heading_weighted": "hybrid_retrieval",
         "retrieval.web_policy": "web_retrieval",
+        "rerank.knowledge_base": "reranking",
+        "rerank.unified": "reranking",
         "evidence.fuse": "evidence_selection",
         "evidence.diversify": "evidence_selection",
         "evidence.balance": "evidence_selection",
         "evidence.conflict": "verification",
         "evidence.order": "evidence_selection",
         "context.compress": "context_compression",
+        "evidence.preliminary_gate": "verification",
+        "evidence.final_gate": "verification",
+        # evidence.gate 仍被 summarize_v1 / compare_v1 / procedure_v1 使用，不能随
+        # fact_lookup_v1 改链一起删：注册表是增量的。
         "evidence.gate": "verification",
         "generation.fact": "generation",
         "generation.summary": "generation",
@@ -326,6 +348,30 @@ class QueryIntentRouter:
     )
     _FRESHNESS = re.compile(r"最新|今天|实时|外部|互联网|官网|截至(?:今天|目前)")
     _FOLLOW_UP = re.compile(r"^(这个|那个|它|他们|上述|前面|刚才|继续|那).{0,30}$")
+    # 设计稿 3.2 的问候全表。
+    _GREETING_WORDS: tuple[str, ...] = (
+        "你好",
+        "您好",
+        "嗨",
+        "哈喽",
+        "hello",
+        "hi",
+        "早上好",
+        "下午好",
+        "晚上好",
+        "在吗",
+        "有人吗",
+        "能听到吗",
+        "方便吗",
+    )
+    _GREETING_PADDING = r"[\s~～!！?？.。,，、]*"
+    # 整句 fullmatch 而不是 search：「你好，索引版本是什么？」里的「你好」只是前缀，
+    # 业务问题必须优先。表里没有任何词是 _RULES 或 _FRESHNESS 的子串，所以把问候判定
+    # 排在业务规则之前不会截走业务问题。
+    _GREETING = re.compile(
+        rf"{_GREETING_PADDING}(?:(?:{'|'.join(_GREETING_WORDS)}){_GREETING_PADDING})+",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -342,6 +388,10 @@ class QueryIntentRouter:
     ) -> RoutingDecision:
         original = question.strip()
         effective, rewritten = self._rewrite_follow_up(original, history or [])
+        # 问候判定必须排在长度闸之前：「嗨」「你好」「Hi」「在吗」「方便吗」全部短于 4，
+        # 放到下面就会先被判成 clarify，整条旁路不生效。
+        if self._GREETING.fullmatch(effective):
+            return self._social(original, effective)
         if len(effective) < 4:
             return self._control(original, effective, "问题信息不足，请补充要查询的对象。")
         if self._FOLLOW_UP.search(original) and not rewritten:
@@ -355,7 +405,7 @@ class QueryIntentRouter:
                     original,
                     effective,
                     rewritten,
-                    requires_web=bool(self._FRESHNESS.search(effective)),
+                    requires_freshness=bool(self._FRESHNESS.search(effective)),
                 )
         if self.classifier is None:
             return self._decision(
@@ -365,7 +415,7 @@ class QueryIntentRouter:
                 original,
                 effective,
                 rewritten,
-                requires_web=bool(self._FRESHNESS.search(effective)),
+                requires_freshness=bool(self._FRESHNESS.search(effective)),
                 fallback_used=True,
             )
         try:
@@ -376,22 +426,24 @@ class QueryIntentRouter:
             if not math.isfinite(confidence) or not 0 <= confidence <= 1:
                 raise ValueError("confidence is invalid")
             reason = str(payload.get("reason") or "结构化分类")
+            # 分类器的 JSON 契约保持 requires_web 不变：改名会让已有提示词与样例失效。
+            # 只在映射到 RoutingDecision 时换成 requires_freshness。
             if not isinstance(payload.get("requires_web"), bool):
                 raise ValueError("requires_web is invalid")
-            requires_web = payload["requires_web"]
+            requires_freshness = payload["requires_web"]
             if intent == "out_of_scope":
                 return RoutingDecision(
-                    None,
-                    confidence,
-                    reason,
-                    "out_of_scope",
-                    None,
-                    None,
-                    original,
-                    effective,
-                    rewritten,
-                    requires_web,
-                    self.classifier.model_name,
+                    intent=None,
+                    confidence=confidence,
+                    reason=reason,
+                    control_outcome="out_of_scope",
+                    pipeline_profile=None,
+                    profile_version=None,
+                    original_question=original,
+                    effective_question=effective,
+                    follow_up_rewritten=rewritten,
+                    requires_freshness=requires_freshness,
+                    classifier_model=self.classifier.model_name,
                 )
             if intent not in {"fact_lookup", "summarize", "compare", "procedure"}:
                 raise ValueError("intent is invalid")
@@ -411,7 +463,7 @@ class QueryIntentRouter:
                 original,
                 effective,
                 rewritten,
-                requires_web=requires_web or bool(self._FRESHNESS.search(effective)),
+                requires_freshness=requires_freshness or bool(self._FRESHNESS.search(effective)),
                 classifier_model=self.classifier.model_name,
             )
         except Exception:
@@ -422,7 +474,7 @@ class QueryIntentRouter:
                 original,
                 effective,
                 rewritten,
-                requires_web=bool(self._FRESHNESS.search(effective)),
+                requires_freshness=bool(self._FRESHNESS.search(effective)),
                 classifier_model=self.classifier.model_name,
                 fallback_used=True,
             )
@@ -460,24 +512,39 @@ class QueryIntentRouter:
         effective: str,
         rewritten: bool,
         *,
-        requires_web: bool,
+        requires_freshness: bool,
         classifier_model: str | None = None,
         fallback_used: bool = False,
     ) -> RoutingDecision:
+        # greeting 没有同名 Profile，走到这里就是 KeyError —— 它必须在 route() 里被
+        # _social() 提前截走，不要给它加一条 greeting_v1。
         profile = DEFAULT_PIPELINE_PROFILES[f"{intent}_v1"]
         return RoutingDecision(
-            intent,
-            min(max(confidence, 0), 1),
-            reason,
-            "route",
-            profile.profile_id,
-            profile.version,
-            original,
-            effective,
-            rewritten,
-            requires_web,
-            classifier_model,
-            fallback_used,
+            intent=intent,
+            confidence=min(max(confidence, 0), 1),
+            reason=reason,
+            control_outcome="route",
+            pipeline_profile=profile.profile_id,
+            profile_version=profile.version,
+            original_question=original,
+            effective_question=effective,
+            follow_up_rewritten=rewritten,
+            requires_freshness=requires_freshness,
+            classifier_model=classifier_model,
+            fallback_used=fallback_used,
+        )
+
+    @staticmethod
+    def _social(original: str, effective: str) -> RoutingDecision:
+        return RoutingDecision(
+            intent="greeting",
+            confidence=1.0,
+            reason="整句纯问候，直接回应引导语，不检索也不生成。",
+            control_outcome="social",
+            pipeline_profile=None,
+            profile_version=None,
+            original_question=original,
+            effective_question=effective,
         )
 
     @staticmethod
@@ -491,17 +558,17 @@ class QueryIntentRouter:
         rewritten: bool = False,
     ) -> RoutingDecision:
         return RoutingDecision(
-            None,
-            confidence,
-            reason,
-            "clarify",
-            None,
-            None,
-            original,
-            effective,
-            rewritten,
-            False,
-            classifier_model,
+            intent=None,
+            confidence=confidence,
+            reason=reason,
+            control_outcome="clarify",
+            pipeline_profile=None,
+            profile_version=None,
+            original_question=original,
+            effective_question=effective,
+            follow_up_rewritten=rewritten,
+            requires_freshness=False,
+            classifier_model=classifier_model,
         )
 
 

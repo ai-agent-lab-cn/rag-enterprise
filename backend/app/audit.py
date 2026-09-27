@@ -15,8 +15,12 @@ from .security import write_private_file
 _ACTION_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{2,79}$")
 _RESULTS = {"success", "denied", "failed"}
 _GENESIS_HASH = "0" * 64
+# 白名单之外的键在 record() 里被静默丢掉，写入端不会有任何报错。往 metadata 加新键时
+# 必须同时加到这里，否则审计记录里那一项永远是空的。
 _SAFE_METADATA_KEYS = {
     "active",
+    "allowed_domain_count",
+    "allowed_domains_changed",
     "answer_status",
     "error_code",
     "model",
@@ -24,6 +28,8 @@ _SAFE_METADATA_KEYS = {
     "provider",
     "role",
     "target_actor_hash",
+    "web_search_enabled",
+    "web_search_enabled_changed",
 }
 
 

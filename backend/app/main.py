@@ -63,7 +63,7 @@ from .knowledge_bases import (
     KnowledgeBaseScope,
 )
 from .models import SwitchableGenerator, get_embedding_model, get_generator, get_reranker
-from .modular_rag import DEFAULT_PIPELINE_PROFILES, RAGPolicy
+from .modular_rag import DEFAULT_PIPELINE_PROFILES
 from .observability import MetricsRegistry, ObservabilityMiddleware, bind_actor, hash_identifier
 from .pipeline_governance import (
     cancel_sync_run,
@@ -87,6 +87,11 @@ from .postgres_repositories import (
     PostgresCategoryTemplateRepository,
     PostgresDataSourceRepository,
     PostgresKnowledgeBaseRepository,
+)
+from .rag_policy import (
+    RAGPolicyFieldReadOnly,
+    WebSearchProviderNotConfigured,
+    merge_public_rag_policy_update,
 )
 from .retrieval_access import RetrievalAccessContext
 from .schemas import (
@@ -3020,6 +3025,9 @@ def create_app() -> FastAPI:
         current: CurrentSessionDependency,
     ) -> list[PipelineProfileResponse]:
         _require_admin(current.user)
+        # 首期只公开 fact_lookup_v1。另外三个 Profile 仍在 Router 与 Registry 里照常执行，
+        # 「不公开」不等于「不执行」——删掉它们会让 summarize/compare/procedure 直接失效。
+        item = DEFAULT_PIPELINE_PROFILES["fact_lookup_v1"]
         return [
             PipelineProfileResponse(
                 profile_id=item.profile_id,
@@ -3029,7 +3037,6 @@ def create_app() -> FastAPI:
                 required_capabilities=list(item.required_capabilities),
                 parameters=item.parameters,
             )
-            for item in DEFAULT_PIPELINE_PROFILES.values()
         ]
 
     @app.get(
@@ -3067,17 +3074,15 @@ def create_app() -> FastAPI:
         await _require_accessible_knowledge_base(knowledge_bases, auth, current.user, knowledge_base_id)
         if policies is None:
             raise AppError("POSTGRES_REQUIRED", "RAG 策略依赖 PostgreSQL 运行时。", 503)
-        policy = RAGPolicy(
-            rollout_stage=payload.rollout_stage,
-            web_search_enabled=payload.web_search_enabled,
-            allowed_domains=tuple(payload.allowed_domains),
-            intent_confidence_threshold=payload.intent_confidence_threshold,
-            minimum_evidence_count=payload.minimum_evidence_count,
-            max_web_results=payload.max_web_results,
-            profile_versions={
-                item.intent: item.version for item in DEFAULT_PIPELINE_PROFILES.values()
-            },
-        )
+        previous = await run_in_threadpool(policies.get, knowledge_base_id)
+        # 合并单独一个 try：两个新异常都继承 ValueError，混进下面那条兜底会被改写成
+        # RAG_ROLLOUT_GATE_BLOCKED，用户拿到的错误码就是错的。
+        try:
+            policy = merge_public_rag_policy_update(previous, payload, settings.searxng_base_url)
+        except RAGPolicyFieldReadOnly as exc:
+            raise AppError("RAG_POLICY_FIELD_READ_ONLY", str(exc), 409) from exc
+        except WebSearchProviderNotConfigured as exc:
+            raise AppError("WEB_SEARCH_PROVIDER_NOT_CONFIGURED", str(exc), 409) from exc
         try:
             updated = await run_in_threadpool(
                 policies.update, knowledge_base_id, policy, current.user.user_id
@@ -3090,10 +3095,15 @@ def create_app() -> FastAPI:
             current.user,
             "knowledge_base",
             knowledge_base_id,
+            # 这几个键必须同时在 audit._SAFE_METADATA_KEYS 里，否则审计写入静默丢弃，
+            # 记录里看不到任何策略变更详情。不再记 rollout_stage：它已不由用户发布。
             metadata={
-                "rollout_stage": updated.rollout_stage,
                 "web_search_enabled": updated.web_search_enabled,
                 "allowed_domain_count": len(updated.allowed_domains),
+                "web_search_enabled_changed": (
+                    updated.web_search_enabled != previous.web_search_enabled
+                ),
+                "allowed_domains_changed": updated.allowed_domains != previous.allowed_domains,
             },
         )
         return RAGPolicyResponse(knowledge_base_id=knowledge_base_id, **updated.snapshot())
@@ -3644,6 +3654,23 @@ async def _delete_document(
     await _record_audit(audit, "document.delete", user, "document", document_id)
 
 
+# 判成 success 的回答状态。这一个集合同时决定四件事：answer_records.status、
+# query_executions.status、bad_case_category，以及是否自动抓一条在线 Bad Case。
+# 判据是"系统按设计给出了受控结果"，不是"用户拿到了满意答案"——证据不足的拒答同样是
+# 受控结果。只有 retrieval_only / generation_failed 这类降级才是失败。
+# answered_stale（答了但时效未验证）与 direct_response（问候固定回复）都属于受控结果，
+# 漏掉任一个，每一次时效降级或问候都会被记成失败并自动建一条 Bad Case。
+_SUCCESSFUL_ANSWER_STATUSES = frozenset(
+    {
+        "answered",
+        "answered_stale",
+        "insufficient_evidence",
+        "source_conflict",
+        "direct_response",
+    }
+)
+
+
 async def _execute_recorded_query(
     payload: QueryRequest,
     service: RAGServiceProtocol,
@@ -3752,9 +3779,7 @@ async def _execute_recorded_query(
         raise AppError(exc.code, exc.message, exc.status_code, details) from exc
 
     record_status = (
-        "success"
-        if result.answer_status in {"answered", "insufficient_evidence", "source_conflict"}
-        else "failed"
+        "success" if result.answer_status in _SUCCESSFUL_ANSWER_STATUSES else "failed"
     )
     metrics.record_rag(
         result.latency_ms,

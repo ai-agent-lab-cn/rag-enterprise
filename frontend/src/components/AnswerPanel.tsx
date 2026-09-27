@@ -19,20 +19,26 @@ const METRICS = [
 
 const SOURCE_REFERENCE = /(\[来源\s*(\d+)\])/g;
 
-const ANSWER_STATUS_LABELS: Record<QueryResult["answer_status"], string> = {
+export const ANSWER_STATUS_LABELS: Record<QueryResult["answer_status"], string> = {
   answered: "已基于证据回答",
+  answered_stale: "时效未验证",
   insufficient_evidence: "证据不足",
   source_conflict: "来源存在冲突",
   retrieval_only: "仅展示检索结果",
   generation_failed: "答案生成已降级",
+  direct_response: "对话回复",
 };
 
-const ANSWER_STATUS_DESCRIPTIONS: Record<QueryResult["answer_status"], string> = {
+export const ANSWER_STATUS_DESCRIPTIONS: Record<QueryResult["answer_status"], string> = {
   answered: "证据与引用校验通过。",
+  // spec 7.2 要求的是「固定说明」：为什么降级说到这里为止，具体是 Web 未启用还是搜索
+  // 失败属于技术原因，落在技术抽屉的「联网」一行，不在这里吓普通用户。
+  answered_stale: "未取得可信的当前 Web 证据，以下结论只基于知识库中的历史资料。",
   insufficient_evidence: "未达到证据阈值，不生成确定性结论。",
   source_conflict: "来源之间存在冲突，请核对引用原文。",
   retrieval_only: "生成模型不可用，当前仅保留可核对的检索证据。",
   generation_failed: "答案生成失败，当前仍保留可用引用证据。",
+  direct_response: "问候与寒暄不触发检索，本次没有引用证据。",
 };
 
 /**
@@ -45,10 +51,17 @@ const ANSWER_STATUS_DESCRIPTIONS: Record<QueryResult["answer_status"], string> =
  */
 const ANSWER_STATUS_COLOR: Record<QueryResult["answer_status"], string> = {
   answered: "text-success",
+  // 令牌核对过：tailwind.css:59 只有 --color-warning，没有 --color-warning-text /
+  // --color-warning-subtle。橙色底与描边只能写成 bg-warning/10、border-warning/30
+  // （透明度修饰符对 theme color 有效）——凭 danger 那套类推一个不存在的令牌，
+  // Tailwind 会静默丢弃，告警色直接消失（CLAUDE.md 第七条）。
+  answered_stale: "text-warning",
   insufficient_evidence: "text-warning",
   source_conflict: "text-warning",
   retrieval_only: "text-danger-text",
   generation_failed: "text-danger-text",
+  // 问候不是「通过/需注意/失败」里的任何一种，用普通正文灰，不占表意色。
+  direct_response: "text-ink-faint",
 };
 
 function answerWithSourceLinks(answer: string, sourceCount: number) {
@@ -88,18 +101,25 @@ export function AnswerPanel({ result, loading, showSources = true, streamingText
     );
   }
 
+  // 问候旁路没有检索、没有证据、没有模块轨迹（Task 6 契约 5.4：latency_ms 只有
+  // routing 与 total，module_executions 只有一条 intent.router）。按 spec 10.1
+  // 不展示证据区与性能阶段——把空的格子画出来只会让人以为检索失败了。
+  const directResponse = result.answer_status === "direct_response";
+  const stale = result.answer_status === "answered_stale";
   return (
     <section className="mx-auto mt-0 mb-5 max-w-[760px] min-h-0 rounded-[10px] border border-line bg-surface px-[22px] py-5 shadow-[0_6px_20px_rgba(31,38,63,0.04)]" aria-live="polite">
-      <div className={`text-[10px] font-semibold ${ANSWER_STATUS_COLOR[result.answer_status]}`}>
-        {ANSWER_STATUS_LABELS[result.answer_status]}
+      <div className={stale ? "mb-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2.5" : undefined}>
+        <div className={`text-[10px] font-semibold ${ANSWER_STATUS_COLOR[result.answer_status]}`}>
+          {ANSWER_STATUS_LABELS[result.answer_status]}
+        </div>
+        {/* text-ink 是如实迁移：原 CSS `color: var(--text-muted)` 里 --text-muted 从未定义过，
+            实测该文字渲染的是继承的正文墨色，不是灰色说明文字。 */}
+        <p className={`mt-1.5 text-[0.82rem] ${stale ? "mb-0 text-warning" : "mb-3 text-ink"}`}>{ANSWER_STATUS_DESCRIPTIONS[result.answer_status]}</p>
       </div>
-      {/* text-ink 是如实迁移：原 CSS `color: var(--text-muted)` 里 --text-muted 从未定义过，
-          实测该文字渲染的是继承的正文墨色，不是灰色说明文字。 */}
-      <p className="mt-1.5 mb-3 text-[0.82rem] text-ink">{ANSWER_STATUS_DESCRIPTIONS[result.answer_status]}</p>
       {/* mt/mb 是如实迁移：原 CSS 从未给 `.answer-text` 设过 margin，实测它吃的是 <p> 的
           UA 默认纵向 margin（1em，15px 字号下结算为 15px）。 */}
       <p className="mt-[15px] mb-[15px] text-[15px] leading-[1.9] whitespace-pre-wrap text-[#31394d]">{answerWithSourceLinks(result.answer, result.sources.length)}</p>
-      <div className="my-5 grid grid-cols-5 overflow-hidden rounded-md border border-line max-[768px]:grid-cols-2" aria-label="查询性能">
+      {directResponse ? null : <div className="my-5 grid grid-cols-5 overflow-hidden rounded-md border border-line max-[768px]:grid-cols-2" aria-label="查询性能">
         {METRICS.map(([key, label]) => {
           const value = result.latency_ms[key];
           return value === undefined ? null : (
@@ -110,10 +130,11 @@ export function AnswerPanel({ result, loading, showSources = true, streamingText
           );
         })}
         <div className="flex min-w-0 flex-col gap-[3px] p-[11px]"><span className="text-[9px] text-ink-faint">模型</span><strong className="overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[#31394c]" title={result.model}>{result.model}</strong></div>
-      </div>
+      </div>}
       {/* showSources 恒为 false（ChatPage 是唯一调用方），下面这段目前是不可达代码；
-          仍按原样迁移，皮肤直接采用与 evidence-list 一致的观感，未来若复用需重新评估。 */}
-      {showSources ? <><div className="mt-[22px] flex items-center justify-between">
+          仍按原样迁移，皮肤直接采用与 evidence-list 一致的观感，未来若复用需重新评估。
+          KB / Web 分区做在真实渲染点 ChatPage 的 EvidencePanel 里，不在这条死路上复制一份。 */}
+      {showSources && !directResponse ? <><div className="mt-[22px] flex items-center justify-between">
         <h3 className="m-0 text-[14px]">引用证据</h3>
         <span className="text-[10px] text-[#8c93a5]">{result.sources.length} 条</span>
       </div>
@@ -123,7 +144,7 @@ export function AnswerPanel({ result, loading, showSources = true, streamingText
         ))}
       </div>
       </> : null}
-      <TechnicalDrawer result={result} />
+      {directResponse ? null : <TechnicalDrawer result={result} />}
     </section>
   );
 }

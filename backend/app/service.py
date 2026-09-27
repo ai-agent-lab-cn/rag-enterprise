@@ -8,14 +8,22 @@ from typing import Any, Protocol
 
 from .config import Settings
 from .errors import AppError
+from .evidence_gate import (
+    EvidenceGateResult,
+    UnsupportedRerankerScoreSemantics,
+    evaluate_final_evidence,
+    evaluate_preliminary_evidence,
+)
 from .knowledge_bases import DEFAULT_KNOWLEDGE_BASE_ID
 from .lexical import LexicalIndexCache
 from .models import AnswerGenerator, EmbeddingModel, Reranker
 from .modular_rag import (
     DEFAULT_MODULE_REGISTRY,
     DEFAULT_PIPELINE_PROFILES,
+    SOCIAL_DIRECT_REPLY,
     ExecutionTrace,
     ModuleRegistry,
+    PipelineProfile,
     QueryIntentRouter,
     RAGPolicy,
     capability_manifest,
@@ -23,6 +31,7 @@ from .modular_rag import (
 from .prompts import (
     GENERATION_FAILED_ANSWER,
     RETRIEVAL_ONLY_ANSWER,
+    AnswerStatus,
     ParsedAnswer,
     build_prompt,
     parse_answer,
@@ -37,6 +46,21 @@ from .web_retrieval import SearXNGWebSearchProvider, WebSearchResult
 QueryEventCallback = Callable[[str, dict[str, object]], None]
 
 # 完整 RAG 编排：入库、召回、精排、Prompt、生成
+
+# 这些 evidence.* 模块各自有专门的 trace（位置、状态与 metrics 都不同），不能再被
+# 通用循环记第二条：重复轨迹会让技术抽屉出现两个结论不一致的同名模块。
+_DEDICATED_EVIDENCE_MODULES = frozenset(
+    {"evidence.gate", "evidence.fuse", "evidence.preliminary_gate", "evidence.final_gate"}
+)
+
+# Web 未执行时的稳定原因码，与 retrieval.web_policy 的 decision 一一对应。
+_WEB_SKIP_REASON_CODES = {
+    "disabled": "web_search_disabled",
+    "provider_unavailable": "web_provider_not_configured",
+    "scope_limited": "knowledge_base_scope_locked",
+    "no_result": "web_no_search_result",
+    "failed": "web_retrieval_failed",
+}
 
 
 def count_uncategorized(candidates: list[RetrievedChunk]) -> int:
@@ -401,22 +425,32 @@ class RAGService:
             active_index_version_id = self.store.resolve_active_version(knowledge_base_id)
 
         if routing.control_outcome != "route" or routing.intent is None:
-            answer = (
-                "当前问题缺少明确的查询对象，请补充要查询的资料、对象或范围。"
-                if routing.control_outcome == "clarify"
-                else "该问题超出当前知识库及受控外部来源的回答范围。"
+            # 问候旁路：固定引导语，没有 Embedding、检索、门禁与生成，也不发任何
+            # retrieval / rerank / generation 阶段事件。它是成功终态，不是拒答。
+            direct_reply = routing.control_outcome == "social"
+            answer_status: AnswerStatus = (
+                "direct_response" if direct_reply else "insufficient_evidence"
             )
-            trace.record(
-                "evidence.gate",
-                "1",
-                time.perf_counter(),
-                {"control_outcome": routing.control_outcome},
-                {"answer_status": "insufficient_evidence"},
-                status="skipped",
-            )
+            if direct_reply:
+                answer = SOCIAL_DIRECT_REPLY
+            elif routing.control_outcome == "clarify":
+                answer = "当前问题缺少明确的查询对象，请补充要查询的资料、对象或范围。"
+            else:
+                answer = "该问题超出当前知识库及受控外部来源的回答范围。"
+            if not direct_reply:
+                # 问候不记这一条：门禁从未执行，一条 skipped 轨迹只会让技术抽屉显示一次
+                # 没发生过的判定。设计稿 3.2 要求问候只留 Router 轨迹。
+                trace.record(
+                    "evidence.gate",
+                    "1",
+                    time.perf_counter(),
+                    {"control_outcome": routing.control_outcome},
+                    {"answer_status": answer_status},
+                    status="skipped",
+                )
             return QueryResponse(
                 answer=answer,
-                answer_status="insufficient_evidence",
+                answer_status=answer_status,
                 sources=[],
                 model=self.generator.model_name,
                 models={
@@ -553,9 +587,16 @@ class RAGService:
                 {"module_key": retrieval_module, "status": "degraded" if fallback_used else "succeeded"},
             )
 
+        # 只有 fact_lookup_v1 声明了两段门禁的闭环链；其余三个 Profile 本轮保持现有兼容
+        # 轨迹（设计稿 2.2 把它们的差异化执行排除在外），门禁逻辑共用、轨迹键沿用旧名。
+        closed_loop = "evidence.final_gate" in effective_profile.modules
+
         # 门禁前最多执行一次受控补检；只扩大查询，不循环、不绕过 ACL 或 active version。
+        # 闭环链**不走这里**：它的全局约束是单次请求最多一轮 KB 检索和一轮 Web 检索，
+        # 查询扩展已经在同一轮里合并完。未改造的三个 Profile 继续路由到现有兼容行为
+        # （设计稿第 51 行），补检能力必须原样保留。
         supplemental_candidate_count = 0
-        if len(candidates) < policy.minimum_evidence_count:
+        if not closed_loop and len(candidates) < policy.minimum_evidence_count:
             supplemental_started = time.perf_counter()
             supplemental_query = _supplemental_query(routing.effective_question, effective_profile.intent)
             if event_callback:
@@ -603,10 +644,78 @@ class RAGService:
                     {"module_key": retrieval_module, "status": "succeeded" if candidates else "degraded"},
                 )
 
-        web_results: list[WebSearchResult] = []
-        web_status = "skipped"
-        web_error_message: str | None = None
-        web_started = time.perf_counter()
+        retrieval_ms = _elapsed(retrieval_started)
+        # 两条链共用的零候选描述；只有真要抛错时才被读，但计数必须在补检之后定稿。
+        no_candidate_metadata: dict[str, object] = {
+            "strategy": _query_strategy(query_plan.original, query_plan.normalized, query_values),
+            "query_count": len(query_rankings),
+            "expansion_count": max(0, len(query_values) - 1),
+            "fallback_used": fallback_used,
+            "applied_filters": filters.model_dump(mode="json") if filters else None,
+            "retrieved_candidate_count": (
+                sum(len(items) for items in query_rankings) + supplemental_candidate_count
+            ),
+            "fused_candidate_count": 0,
+            "returned_source_count": 0,
+            "filter_match_count": 0 if filters else None,
+            "uncategorized_candidate_count": 0,
+        }
+        if closed_loop and not candidates:
+            # 闭环链：Web 只能补充 KB、不能独立支撑答案，所以一条 KB 候选都没有时联网也救
+            # 不回来，直接走既有的零候选错误分类，而不是先发起一次注定无用的外部搜索。
+            # 未改造的三个 Profile 的判空仍在 Web 之后（见下），改造前"KB 空但 Web 有结果
+            # 就用 Web 候选作答"那条路径必须留着。
+            self._raise_no_candidates(
+                knowledge_base_id,
+                filters,
+                access,
+                no_candidate_metadata,
+                trace,
+                routing.as_dict(),
+                policy,
+                active_index_version_id,
+                pipeline_profile=effective_profile.profile_id,
+                profile_version=effective_profile.version,
+            )
+
+        # KB 精排必须早于 Web 决策：门禁读的是这里写回候选的原始 Reranker 分数
+        # （rank_candidates 只把归一化值用于排序，不写回），而不是查询内 Min-Max 结果。
+        rerank_started = time.perf_counter()
+        if event_callback:
+            event_callback("stage", {"stage": "rerank", "message": "正在进行相关性排序"})
+            if closed_loop:
+                event_callback("module_started", {"module_key": "rerank.knowledge_base"})
+        kb_ranked: list[RetrievedChunk] = []
+        if candidates:
+            # 未改造的三个 Profile 完全不消费这里的结果：它们的统一精排用的是
+            # `[*candidates, *web_candidates]`（见下方 unified_pool），`ranked` 全部来自那
+            # 第二次精排，`kb_ranked` 只在没有 Web 候选时被原样沿用。也就是说这条链上这次
+            # 精排的排序结论一定被丢弃，只剩"把原始 rerank_score 写回候选"这个副作用。
+            # 这是 R33 为保住与改造前逐字等价**有意付**的代价，不要为省它加条件。
+            kb_scores = self.reranker.score(
+                routing.effective_question, _rerank_texts(candidates, effective_profile.intent)
+            )
+            # 在线查询与正式评测共用融合排序，避免两个入口产生不同的质量结论。
+            selection_limit = min(max(rerank_k, policy.minimum_evidence_count), len(candidates))
+            kb_ranked = rank_candidates(candidates, kb_scores, selection_limit)
+        # 空池只可能出现在非闭环链（闭环链上面已经抛错）：改造前那条路径压根不会走到精排，
+        # 而 rank_candidates 要求 limit >= 1，照直调用会变成 ValueError。
+        rerank_ms = _elapsed(rerank_started)
+        if closed_loop:
+            trace.record(
+                "rerank.knowledge_base",
+                "1",
+                rerank_started,
+                [item.chunk_id for item in candidates],
+                [item.chunk_id for item in kb_ranked],
+                metrics={"candidate_count": len(candidates), "selected_count": len(kb_ranked)},
+            )
+            if event_callback:
+                event_callback(
+                    "module_completed",
+                    {"module_key": "rerank.knowledge_base", "status": "succeeded"},
+                )
+
         web_filter_allows = bool(
             filters is None
             or (
@@ -618,122 +727,295 @@ class RAGService:
                 and (not filters.source_types or "web" in filters.source_types)
             )
         )
-        should_use_web = bool(
-            differential_enabled
-            and policy.web_search_enabled
-            and policy.allowed_domains
-            and self.web_provider is not None
-            and web_filter_allows
-            and (routing.requires_web or len(candidates) < policy.minimum_evidence_count)
+        # 只判断对象是否存在不够：注入的假 Provider 与 base_url 为空的真 Provider 都会
+        # 让 search() 静默返回 []，技术抽屉就会把"根本没配"显示成"搜了但没结果"。
+        web_provider_ready = bool(
+            self.web_provider is not None
+            and str(getattr(self.web_provider, "base_url", "") or "").strip()
         )
+        web_available = bool(
+            policy.web_search_enabled
+            and policy.allowed_domains
+            and web_provider_ready
+            and web_filter_allows
+        )
+
+        # Preliminary Gate：只看 KB 证据，决定要不要补一次 Web。它的结论永远不是终局，
+        # 无论返回什么都必须继续走到 Final Gate（详见 evidence_gate.GateOutcome）。
+        #
+        # 只有闭环 Profile 执行门禁。另外三个 Profile 本轮"继续路由到现有兼容行为"
+        # （设计稿第 51 行），沿用下面 web_needed 与 evidence.gate 那套数量判据——
+        # 把它们顺手升级成相关性 + 引用完整性判定不在本轮范围内，而且零测试覆盖。
+        preliminary_gate: EvidenceGateResult | None = None
+        if closed_loop:
+            preliminary_started = time.perf_counter()
+            if event_callback:
+                event_callback("module_started", {"module_key": "evidence.preliminary_gate"})
+            try:
+                preliminary_gate = evaluate_preliminary_evidence(
+                    kb_ranked,
+                    reranker_model=self.reranker.model_name,
+                    minimum_evidence_count=policy.minimum_evidence_count,
+                    requires_freshness=routing.requires_freshness,
+                    web_available=web_available,
+                )
+            except UnsupportedRerankerScoreSemantics as exc:
+                raise self._reranker_semantics_error(
+                    exc, trace, routing.as_dict(), policy, active_index_version_id, effective_profile
+                ) from exc
+            trace.record(
+                "evidence.preliminary_gate",
+                "1",
+                preliminary_started,
+                {
+                    "count": len(kb_ranked),
+                    "minimum": policy.minimum_evidence_count,
+                    "requires_freshness": routing.requires_freshness,
+                    "web_available": web_available,
+                },
+                {"outcome": preliminary_gate.outcome, "sufficient": preliminary_gate.sufficient},
+                metrics={
+                    "outcome": preliminary_gate.outcome,
+                    "sufficient": preliminary_gate.sufficient,
+                    "kb_count": preliminary_gate.kb_count,
+                    "evidence_count": preliminary_gate.evidence_count,
+                    "requires_freshness": routing.requires_freshness,
+                    "web_available": web_available,
+                    "reason_codes": list(preliminary_gate.reason_codes),
+                },
+                status="failed" if preliminary_gate.outcome == "reject" else "succeeded",
+                error_code="INSUFFICIENT_EVIDENCE" if preliminary_gate.outcome == "reject" else None,
+            )
+            if event_callback:
+                event_callback(
+                    "preliminary_gate_completed",
+                    {
+                        "outcome": preliminary_gate.outcome,
+                        "sufficient": preliminary_gate.sufficient,
+                        "evidence_count": preliminary_gate.evidence_count,
+                        "kb_count": preliminary_gate.kb_count,
+                        "requires_freshness": routing.requires_freshness,
+                        "web_available": web_available,
+                        "reason_codes": list(preliminary_gate.reason_codes),
+                    },
+                )
+                event_callback(
+                    "module_completed",
+                    {
+                        "module_key": "evidence.preliminary_gate",
+                        "status": "failed" if preliminary_gate.outcome == "reject" else "succeeded",
+                    },
+                )
+
+        # Web 决策：开关、Provider、检索范围与门禁结论按固定优先级产生唯一 decision，
+        # 轨迹里不再出现一个解释不了自己的 skipped。rollout_stage 不参与判定。
+        web_results: list[WebSearchResult] = []
+        web_candidates: list[RetrievedChunk] = []
+        web_error_message: str | None = None
+        web_started = time.perf_counter()
+        if preliminary_gate is not None:
+            # 走到 not_needed 时 web_available 必为真，而 web_available 为真时初步门禁只会
+            # 给出 pass 或 needs_web——另外两个取值 stale / reject 只在 Web 不可用时产生，
+            # 已经被下面三个分支按真实原因认领了，不会掉进 not_needed 这个兜底说法。
+            web_needed = preliminary_gate.outcome == "needs_web"
+        else:
+            # 未改造的三个 Profile 沿用原判据：时效需求，或候选数没达到最低证据数。
+            # 这里不再看 differential_enabled——非闭环链只可能出现在 canary/full
+            # （shadow 下 effective_profile 恒为 fact_lookup_v1），那个条件在此恒真。
+            web_needed = bool(
+                routing.requires_freshness or len(candidates) < policy.minimum_evidence_count
+            )
+        if not (policy.web_search_enabled and policy.allowed_domains):
+            web_decision = "disabled"
+        elif not web_provider_ready:
+            web_decision = "provider_unavailable"
+        elif not web_filter_allows:
+            web_decision = "scope_limited"
+        elif not web_needed:
+            web_decision = "not_needed"
+        else:
+            web_decision = "executed"
         if event_callback:
             event_callback("module_started", {"module_key": "retrieval.web_policy"})
-        if should_use_web:
+        if web_decision == "executed":
             try:
-                web_results = self.web_provider.search(
-                    routing.effective_question,
-                    policy.allowed_domains,
-                    policy.max_web_results,
+                web_results = list(
+                    self.web_provider.search(
+                        routing.effective_question,
+                        policy.allowed_domains,
+                        policy.max_web_results,
+                    )
                 )
-                candidates.extend(_web_chunk(item, knowledge_base_id) for item in web_results)
-                trace.record(
-                    "retrieval.web_policy",
-                    "1",
-                    web_started,
-                    {"query": routing.effective_question, "domains": policy.allowed_domains},
-                    [item.url for item in web_results],
-                    metrics={"result_count": len(web_results)},
-                )
-                web_status = "succeeded"
+                web_candidates = [_web_chunk(item, knowledge_base_id) for item in web_results]
+                if not web_results:
+                    web_decision = "no_result"
             except Exception as exc:
                 web_error_message = str(exc)
-                web_status = "degraded" if candidates else "failed"
-                trace.record(
-                    "retrieval.web_policy",
-                    "1",
-                    web_started,
-                    {"query": routing.effective_question, "domains": policy.allowed_domains},
-                    None,
-                    status="degraded" if candidates else "failed",
-                    error_code="WEB_RETRIEVAL_FAILED",
-                    error_message=str(exc),
-                    fallback_reason="继续使用知识库证据" if candidates else None,
-                )
-        else:
-            trace.record(
-                "retrieval.web_policy",
-                "1",
-                web_started,
-                {
-                    "enabled": policy.web_search_enabled,
-                    "requires_web": routing.requires_web,
-                    "filter_allows_web": web_filter_allows,
-                },
-                [],
-                status="skipped",
-            )
+                web_decision = "failed"
+        web_attempted = web_decision in {"executed", "no_result", "failed"}
+        web_reason_code = _web_reason_code(web_decision, preliminary_gate)
+        web_status = (
+            "degraded"
+            if web_decision == "failed"
+            else "succeeded" if web_attempted else "skipped"
+        )
+        trace.record(
+            "retrieval.web_policy",
+            "1",
+            web_started,
+            {
+                "decision": web_decision,
+                "enabled": policy.web_search_enabled,
+                "allowed_domain_count": len(policy.allowed_domains),
+                "provider_ready": web_provider_ready,
+                "filter_allows_web": web_filter_allows,
+                "requires_freshness": routing.requires_freshness,
+                "query": routing.effective_question if web_attempted else None,
+            },
+            [item.url for item in web_results],
+            metrics={
+                "decision": web_decision,
+                "result_count": len(web_results),
+                "reason_code": web_reason_code,
+            },
+            status=web_status,
+            error_code="WEB_RETRIEVAL_FAILED" if web_decision == "failed" else None,
+            error_message=web_error_message,
+            fallback_reason="继续使用知识库证据" if web_decision == "failed" else None,
+        )
+        # Web 耗时归入检索阶段，避免为一个阶段新增 latency_ms 键。
+        retrieval_ms += _elapsed(web_started)
         if event_callback:
+            if web_attempted:
+                event_callback(
+                    "web_retrieval_completed",
+                    {
+                        "decision": web_decision,
+                        "result_count": len(web_results),
+                        "reason_code": web_reason_code,
+                    },
+                )
             event_callback(
                 "module_completed",
-                {
-                    "module_key": "retrieval.web_policy",
-                    "status": web_status,
-                },
+                {"module_key": "retrieval.web_policy", "status": web_status},
             )
-        retrieval_ms = _elapsed(retrieval_started)
-        if not candidates:
-            query_metadata = {
-                "strategy": _query_strategy(query_plan.original, query_plan.normalized, query_values),
-                "query_count": len(query_rankings),
-                "expansion_count": max(0, len(query_values) - 1),
-                "fallback_used": fallback_used,
-                "applied_filters": filters.model_dump(mode="json") if filters else None,
-                "retrieved_candidate_count": (
-                    sum(len(items) for items in query_rankings) + supplemental_candidate_count
-                ),
-                "fused_candidate_count": 0,
-                "returned_source_count": 0,
-                "filter_match_count": 0 if filters else None,
-                "uncategorized_candidate_count": 0,
-            }
+
+        if not closed_loop and not candidates and not web_candidates:
+            # 未改造的三个 Profile 的判空位置：改造前 Web 结果先 extend 进 candidates 再判空，
+            # 所以"KB 零候选 + Web 有结果"要继续作答，只有两边都空才抛错。
             self._raise_no_candidates(
                 knowledge_base_id,
                 filters,
                 access,
-                query_metadata,
+                no_candidate_metadata,
                 trace,
                 routing.as_dict(),
                 policy,
                 active_index_version_id,
                 pipeline_profile=effective_profile.profile_id,
                 profile_version=effective_profile.version,
-                web_error_message=web_error_message if web_status == "failed" else None,
+                web_error_message=web_error_message if web_decision == "failed" else None,
             )
 
-        rerank_started = time.perf_counter()
-        if event_callback:
-            event_callback("stage", {"stage": "rerank", "message": "正在进行相关性排序"})
-        rerank_texts = [
-            (
-                f"{' / '.join(candidate.metadata.get('heading_path') or [])}\n{candidate.text}"
-                if effective_profile.intent == "procedure" and candidate.metadata.get("heading_path")
-                else candidate.text
+        # 没有 Web 候选时融合与统一精排都是空操作，但模块必须留在轨迹里并说明原因，
+        # 否则前端只能靠"最终有没有 Web 来源"反推联网状态。
+        if web_candidates:
+            merged = [*kb_ranked, *web_candidates]
+            fuse_reason_code: str | None = None
+        else:
+            merged = kb_ranked
+            fuse_reason_code = web_reason_code if web_attempted else "web_not_executed"
+        # 改造前的 selection_limit 是「完整 KB 候选池 + Web」一起算出来的，这里逐字复刻：
+        # 上面那个 selection_limit 只覆盖纯 KB 池，拿它给含 Web 的集合截断会把补进来的条数
+        # 直接抹掉。非闭环链的统一精排与 diversify 共用这一个上限，闭环链不用它。
+        compat_selection_limit = min(
+            max(rerank_k, policy.minimum_evidence_count), len(candidates) + len(web_candidates)
+        )
+        if closed_loop:
+            fuse_started = time.perf_counter()
+            if event_callback:
+                event_callback("module_started", {"module_key": "evidence.fuse"})
+            trace.record(
+                "evidence.fuse",
+                "1",
+                fuse_started,
+                {"kb_count": len(kb_ranked), "web_count": len(web_candidates)},
+                [item.chunk_id for item in merged],
+                metrics={
+                    "kb_count": len(kb_ranked),
+                    "web_count": len(web_candidates),
+                    "merged_count": len(merged),
+                    "reason_code": fuse_reason_code,
+                },
+                status="skipped" if fuse_reason_code else "succeeded",
             )
-            for candidate in candidates
-        ]
-        scores = self.reranker.score(routing.effective_question, rerank_texts)
-        # 在线查询与正式评测共用融合排序，避免两个入口产生不同的质量结论。
-        selection_limit = min(max(rerank_k, policy.minimum_evidence_count), len(candidates))
-        ranked = rank_candidates(candidates, scores, selection_limit)
+            if event_callback:
+                event_callback(
+                    "module_completed",
+                    {
+                        "module_key": "evidence.fuse",
+                        "status": "skipped" if fuse_reason_code else "succeeded",
+                    },
+                )
+
+        unified_started = time.perf_counter()
+        if web_candidates:
+            # 两条链的输入池不同，不能共用。
+            #
+            # 闭环链：Web 并到 **KB 精排结果** 上。KB 名额已按 rerank_k 收敛过，随后
+            # 不再截断（`len(unified_pool)`）——再截一次可能把唯一一条 KB anchor 挤出去，
+            # 让 Final Gate 因为"没有 KB 证据"拒掉本该能答的问题；取舍交给门禁的相关性
+            # 与引用完整性判据。
+            #
+            # 未改造的三个 Profile：Web 并到 **未截断的完整 KB 候选池** 上，逐字复刻改造前
+            # `candidates.extend(web)` 之后精排一次的口径。不能拿 `merged` 凑合——被 KB 精排
+            # 截掉的候选回不来，而且 rank_candidates 的两次 Min-Max（ranking.py:129-130）
+            # 区间随池子成分变化，存留候选之间的次序也会变：同一个问题返回的来源就和
+            # 改造前不一样了。代价是这条路径上那次 KB 精排的结果被丢弃，白跑一次 Reranker。
+            unified_pool = merged if closed_loop else [*candidates, *web_candidates]
+            if closed_loop and event_callback:
+                event_callback("module_started", {"module_key": "rerank.unified"})
+            unified_scores = self.reranker.score(
+                routing.effective_question, _rerank_texts(unified_pool, effective_profile.intent)
+            )
+            unified_limit = len(unified_pool) if closed_loop else compat_selection_limit
+            ranked = rank_candidates(unified_pool, unified_scores, unified_limit)
+        else:
+            ranked = kb_ranked
+        rerank_ms += _elapsed(unified_started)
+        if closed_loop:
+            trace.record(
+                "rerank.unified",
+                "1",
+                unified_started,
+                [item.chunk_id for item in merged],
+                [item.chunk_id for item in ranked],
+                metrics={
+                    "candidate_count": len(merged),
+                    "selected_count": len(ranked),
+                    "reason_code": fuse_reason_code,
+                },
+                status="skipped" if fuse_reason_code else "succeeded",
+            )
+            if event_callback:
+                event_callback(
+                    "module_completed",
+                    {
+                        "module_key": "rerank.unified",
+                        "status": "skipped" if fuse_reason_code else "succeeded",
+                    },
+                )
         if differential_enabled and effective_profile.intent in {"summarize", "compare"}:
-            ranked = _diversify_by_document(ranked, selection_limit)
+            # 上限同样用含 Web 的那个：改造前这里传的就是"含 Web 的 selection_limit"，
+            # 传纯 KB 池那个会把 Web 补进来的名额在 diversify 阶段又截掉一次。
+            # 这两个 intent 只可能走非闭环链（closed_loop 恒为 fact_lookup_v1）。
+            ranked = _diversify_by_document(ranked, compat_selection_limit)
         if differential_enabled and effective_profile.intent == "procedure":
             ranked = _order_procedure_evidence(ranked)
-        rerank_ms = _elapsed(rerank_started)
         evidence_modules = [
             item
             for item in effective_profile.modules
-            if item.startswith("evidence.") and item != "evidence.gate"
+            if item.startswith("evidence.") and item not in _DEDICATED_EVIDENCE_MODULES
         ]
         for evidence_module in evidence_modules:
             evidence_started = time.perf_counter()
@@ -756,55 +1038,150 @@ class RAGService:
             if event_callback:
                 event_callback("module_completed", {"module_key": evidence_module, "status": "succeeded"})
 
-        prompt_chunks = ranked
-        if "context.compress" in effective_profile.modules:
-            compress_started = time.perf_counter()
+        # 下面两条分支都会给 evidence / evidence_sufficient / evidence_count / prompt_chunks /
+        # source_items 赋值。final_gate 只在闭环链上存在，非闭环链留 None——它是
+        # answered_stale 降级的判据入口，在这里声明是为了让分支后的读取有确定语义。
+        final_gate: EvidenceGateResult | None = None
+        if closed_loop:
+            # Final Gate 是闭环链唯一的终局判定：证据够不够不再按候选数量推断，而是逐条核
+            # 相关性、引用完整性、KB anchor 与时效。它选中的 selected 是唯一能进 Prompt
+            # 和 Sources 的集合，所以 sources 事件必须等它出结论之后才发。
+            gate_started = time.perf_counter()
             if event_callback:
-                event_callback("module_started", {"module_key": "context.compress"})
-            prompt_chunks = _compress_context(ranked)
+                event_callback("module_started", {"module_key": "evidence.final_gate"})
+            try:
+                final_gate = evaluate_final_evidence(
+                    ranked,
+                    reranker_model=self.reranker.model_name,
+                    minimum_evidence_count=policy.minimum_evidence_count,
+                    requires_freshness=routing.requires_freshness,
+                    web_executed=web_attempted,
+                )
+            except UnsupportedRerankerScoreSemantics as exc:
+                raise self._reranker_semantics_error(
+                    exc, trace, routing.as_dict(), policy, active_index_version_id, effective_profile
+                ) from exc
+            evidence = list(final_gate.selected)
+            evidence_sufficient = final_gate.sufficient
+            evidence_count = final_gate.evidence_count
             trace.record(
-                "context.compress",
+                "evidence.final_gate",
                 "1",
-                compress_started,
-                {"characters": sum(len(item.text) for item in ranked)},
-                {"characters": sum(len(item.text) for item in prompt_chunks)},
+                gate_started,
+                {
+                    "count": len(ranked),
+                    "minimum": policy.minimum_evidence_count,
+                    "requires_freshness": routing.requires_freshness,
+                    "web_executed": web_attempted,
+                },
+                {"outcome": final_gate.outcome, "sufficient": final_gate.sufficient},
+                metrics={
+                    "outcome": final_gate.outcome,
+                    "sufficient": final_gate.sufficient,
+                    "selected_count": len(evidence),
+                    "kb_count": final_gate.kb_count,
+                    "web_count": final_gate.web_count,
+                    "requires_freshness": routing.requires_freshness,
+                    "freshness_verified": final_gate.freshness_verified,
+                    "reason_codes": list(final_gate.reason_codes),
+                },
+                status="succeeded" if final_gate.sufficient else "failed",
+                error_code=None if final_gate.sufficient else "INSUFFICIENT_EVIDENCE",
             )
             if event_callback:
-                event_callback("module_completed", {"module_key": "context.compress", "status": "succeeded"})
+                event_callback(
+                    "evidence_gate_completed",
+                    {
+                        "outcome": final_gate.outcome,
+                        "sufficient": final_gate.sufficient,
+                        "evidence_count": len(final_gate.selected),
+                        "kb_count": final_gate.kb_count,
+                        "web_count": final_gate.web_count,
+                        "requires_freshness": routing.requires_freshness,
+                        "freshness_verified": final_gate.freshness_verified,
+                        "reason_codes": list(final_gate.reason_codes),
+                    },
+                )
+                event_callback(
+                    "module_completed",
+                    {
+                        "module_key": "evidence.final_gate",
+                        "status": "succeeded" if final_gate.sufficient else "failed",
+                    },
+                )
+            prompt_chunks = evidence
+            source_items = [_source(item) for item in evidence]
+            if event_callback:
+                event_callback(
+                    "sources", {"items": [item.model_dump(mode="json") for item in source_items]}
+                )
+        else:
+            # 未改造的三个 Profile：数量判据 + evidence.gate 轨迹，模块顺序也保持原样
+            # （context.compress 在门禁之前，消费的是 diversify/order 之后的 ranked）。
+            prompt_chunks = ranked
+            if "context.compress" in effective_profile.modules:
+                compress_started = time.perf_counter()
+                if event_callback:
+                    event_callback("module_started", {"module_key": "context.compress"})
+                prompt_chunks = _compress_context(ranked)
+                trace.record(
+                    "context.compress",
+                    "1",
+                    compress_started,
+                    {"characters": sum(len(item.text) for item in ranked)},
+                    {"characters": sum(len(item.text) for item in prompt_chunks)},
+                )
+                if event_callback:
+                    event_callback(
+                        "module_completed",
+                        {"module_key": "context.compress", "status": "succeeded"},
+                    )
 
-        source_items = [_source(item) for item in ranked]
-        if event_callback:
-            event_callback("sources", {"items": [item.model_dump(mode="json") for item in source_items]})
+            source_items = [_source(item) for item in ranked]
+            if event_callback:
+                event_callback(
+                    "sources", {"items": [item.model_dump(mode="json") for item in source_items]}
+                )
 
-        gate_started = time.perf_counter()
-        if event_callback:
-            event_callback("module_started", {"module_key": "evidence.gate"})
-        web_requirement_satisfied = bool(not differential_enabled or not routing.requires_web or web_results)
-        evidence_sufficient = len(ranked) >= policy.minimum_evidence_count and web_requirement_satisfied
-        trace.record(
-            "evidence.gate",
-            "1",
-            gate_started,
-            {"count": len(ranked), "minimum": policy.minimum_evidence_count},
-            {"sufficient": evidence_sufficient},
-            status="succeeded" if evidence_sufficient else "failed",
-            error_code=(
-                None
-                if evidence_sufficient
-                else "WEB_EVIDENCE_REQUIRED"
-                if not web_requirement_satisfied
-                else "INSUFFICIENT_EVIDENCE"
-            ),
-        )
-        if event_callback:
-            event_callback(
-                "evidence_gate_completed",
-                {"sufficient": evidence_sufficient, "evidence_count": len(ranked)},
+            gate_started = time.perf_counter()
+            if event_callback:
+                event_callback("module_started", {"module_key": "evidence.gate"})
+            # 原判据，只把 Task 3 改名的 requires_web 换成 requires_freshness。
+            # differential_enabled 那一项去掉了：这条路径只在 canary/full 出现，它恒真。
+            web_requirement_satisfied = bool(not routing.requires_freshness or web_results)
+            evidence_sufficient = (
+                len(ranked) >= policy.minimum_evidence_count and web_requirement_satisfied
             )
-            event_callback(
-                "module_completed",
-                {"module_key": "evidence.gate", "status": "succeeded" if evidence_sufficient else "failed"},
+            evidence = ranked
+            evidence_count = len(ranked)
+            trace.record(
+                "evidence.gate",
+                "1",
+                gate_started,
+                {"count": len(ranked), "minimum": policy.minimum_evidence_count},
+                {"sufficient": evidence_sufficient},
+                status="succeeded" if evidence_sufficient else "failed",
+                error_code=(
+                    None
+                    if evidence_sufficient
+                    else "WEB_EVIDENCE_REQUIRED"
+                    if not web_requirement_satisfied
+                    else "INSUFFICIENT_EVIDENCE"
+                ),
             )
+            if event_callback:
+                event_callback(
+                    "evidence_gate_completed",
+                    {"sufficient": evidence_sufficient, "evidence_count": len(ranked)},
+                )
+                event_callback(
+                    "module_completed",
+                    {
+                        "module_key": "evidence.gate",
+                        "status": "succeeded" if evidence_sufficient else "failed",
+                    },
+                )
+
         if not evidence_sufficient:
             return QueryResponse(
                 answer="现有知识库和受控外部来源的证据不足，无法可靠回答该问题。",
@@ -831,7 +1208,9 @@ class RAGService:
                 module_executions=trace.as_list(),
                 generation_governance={
                     "minimum_evidence_count": policy.minimum_evidence_count,
-                    "evidence_count": len(ranked),
+                    # 闭环链拒答时 selected 为空，但"查到了多少条合格证据仍然不够"要说得
+                    # 出来，所以这里用门禁数到的合格数而不是 len(evidence)。
+                    "evidence_count": evidence_count,
                     "acl_revalidated": True,
                     "current_version_revalidated": True,
                     "retrieval_status_revalidated": True,
@@ -842,7 +1221,15 @@ class RAGService:
                 },
             )
 
-        prompt = build_prompt(routing.effective_question, prompt_chunks, effective_profile.intent)
+        # 判据只有 Final Gate，不从 len(sources) / web_decision / requires_freshness 另算一遍。
+        # 非闭环链的 final_gate 恒为 None，那三个未改造 Profile 拿到的仍是原提示词。
+        freshness_unverified = final_gate is not None and final_gate.outcome == "stale"
+        prompt = build_prompt(
+            routing.effective_question,
+            prompt_chunks,
+            effective_profile.intent,
+            freshness_unverified=freshness_unverified,
+        )
         generation_module = next(
             item
             for item in effective_profile.modules
@@ -853,11 +1240,19 @@ class RAGService:
             event_callback("stage", {"stage": "generation", "message": "正在生成答案"})
             event_callback("module_started", {"module_key": generation_module})
             parsed_answer, generation_metadata = self._generate_answer_stream(
-                prompt.text, len(ranked), event_callback
+                prompt.text, len(evidence), event_callback, freshness_unverified
             )
         else:
-            parsed_answer, generation_metadata = self._generate_answer(prompt.text, len(ranked))
+            parsed_answer, generation_metadata = self._generate_answer(
+                prompt.text, len(evidence), freshness_unverified
+            )
         generation_ms = _elapsed(generation_started)
+        # 时效降级由门禁决定，模型不参与：只有通过引用校验的 answered 才改写成
+        # answered_stale。generation_failed / retrieval_only / source_conflict 保持原状——
+        # 它们各自已经说明了问题，盖成"有答案但时效未验证"就是伪装成功。
+        answer_status: AnswerStatus = parsed_answer.status
+        if freshness_unverified and parsed_answer.status == "answered":
+            answer_status = "answered_stale"
         used_generation_model = generation_metadata.get("configured_model")
         if not isinstance(used_generation_model, str):
             used_generation_model = self.generator.model_name
@@ -866,7 +1261,7 @@ class RAGService:
             generation_module,
             "1",
             generation_started,
-            {"prompt_hash": prompt.sha256, "evidence_count": len(ranked)},
+            {"prompt_hash": prompt.sha256, "evidence_count": len(evidence)},
             {"answer_status": parsed_answer.status},
             status="failed" if parsed_answer.status == "generation_failed" else "succeeded",
             error_code=parsed_answer.error_code,
@@ -910,7 +1305,7 @@ class RAGService:
             )
         return QueryResponse(
             answer=parsed_answer.answer,
-            answer_status=parsed_answer.status,
+            answer_status=answer_status,
             error_code=parsed_answer.error_code,
             error_message=parsed_answer.error_message,
             sources=source_items,
@@ -929,25 +1324,31 @@ class RAGService:
                 "expansion_count": max(0, len(query_values) - 1),
                 "fallback_used": fallback_used,
                 "applied_filters": filters,
+                # 闭环链不做第二轮补检，那一项恒为 0；未改造的三个 Profile 仍按
+                # "首轮 + 补检"计数，与改造前一致。
                 "retrieved_candidate_count": (
                     sum(len(items) for items in query_rankings) + supplemental_candidate_count
                 ),
+                # 下面三个统计口径都只覆盖 KB 候选：Web 候选不再混进 candidates 列表，
+                # uncategorized_candidate_count 也不会再把 Web 结果算成"无分类资料"。
                 "fused_candidate_count": len(candidates),
-                "returned_source_count": len(ranked),
+                "returned_source_count": len(evidence),
                 "filter_match_count": len(candidates) if filters else None,
                 "uncategorized_candidate_count": count_uncategorized(candidates),
             },
             generation_governance={
                 "minimum_evidence_count": policy.minimum_evidence_count,
-                "evidence_count": len(ranked),
-                # 候选进入 ranked 前已经通过统一 ACL、当前版本、有效期和检索状态过滤。
+                "evidence_count": evidence_count,
+                # 候选进入门禁前已经通过统一 ACL、当前版本、有效期和检索状态过滤。
                 "acl_revalidated": True,
                 "current_version_revalidated": True,
                 "retrieval_status_revalidated": True,
                 "citation_indices": list(parsed_answer.citation_indices),
                 "citation_valid": parsed_answer.citation_valid,
                 "claim_citation_coverage": parsed_answer.claim_citation_coverage,
-                "outcome_reason": parsed_answer.error_code or parsed_answer.status,
+                # 用降级后的状态：正常路径两者相等，stale 时这里写 answered_stale，
+                # 执行详情不会出现"状态是 answered_stale、原因写着 answered"。
+                "outcome_reason": parsed_answer.error_code or answer_status,
             },
             latency_ms={
                 "routing": _elapsed(routing_started),
@@ -980,6 +1381,14 @@ class RAGService:
         profile_version: str,
         web_error_message: str | None = None,
     ) -> None:
+        """零候选的稳定错误分类。
+
+        两条链的调用点不同，``web_error_message`` 也只对其中一条有意义：
+        闭环链在 KB 检索之后、Web 之前就判空（Web 补充不了一条 KB 证据都没有的问题），
+        永远传 ``None``；未改造的三个 Profile 沿用改造前的位置，在 Web 之后判空，
+        KB 空且 Web 又抛异常时用下面这条 503 解释，而不是笼统说知识库没资料。
+        """
+
         details: dict[str, object] = {
             "query_metadata": query_metadata,
             "execution_id": trace.execution_id,
@@ -1044,10 +1453,43 @@ class RAGService:
             {**details, "bad_case_category": "knowledge_base_empty"},
         )
 
+    def _reranker_semantics_error(
+        self,
+        exc: UnsupportedRerankerScoreSemantics,
+        trace: ExecutionTrace,
+        routing: dict[str, object],
+        policy: RAGPolicy,
+        active_index_version_id: str | None,
+        profile: PipelineProfile,
+    ) -> AppError:
+        """读不懂 Reranker 分数语义时的稳定配置错误。
+
+        门禁不能因为看不懂分数就跳过相关性检查（设计稿第 163 行），所以这里把它变成与
+        canary/full 阶段 Profile 校验同一个错误码，details 也凑齐同一批字段——
+        ``main.py`` 的失败记录路径按这些字段落库，少一个就少一段执行上下文。
+        """
+
+        return AppError(
+            "RAG_PROFILE_INCOMPATIBLE",
+            "当前生效索引不满足所选 RAG 管线的能力要求。",
+            409,
+            {
+                "profile_errors": [f"未登记 Reranker 分数语义：{exc.reranker_model}"],
+                "execution_id": trace.execution_id,
+                "routing": routing,
+                "pipeline_profile": profile.profile_id,
+                "profile_version": profile.version,
+                "policy_snapshot": policy.snapshot(),
+                "active_index_version_id": active_index_version_id,
+                "module_executions": trace.as_list(),
+            },
+        )
+
     def _generate_answer(
         self,
         prompt: str,
         source_count: int,
+        freshness_unverified: bool = False,
     ) -> tuple[ParsedAnswer, dict[str, object]]:
         if not getattr(self.generator, "ready", True):
             return ParsedAnswer("retrieval_only", RETRIEVAL_ONLY_ANSWER), {}
@@ -1074,13 +1516,14 @@ class RAGService:
                 ),
                 dict(exc.details) if isinstance(exc.details, dict) else {},
             )
-        return parse_answer(raw_answer, source_count), metadata
+        return parse_answer(raw_answer, source_count, freshness_unverified), metadata
 
     def _generate_answer_stream(
         self,
         prompt: str,
         source_count: int,
         event_callback: QueryEventCallback,
+        freshness_unverified: bool = False,
     ) -> tuple[ParsedAnswer, dict[str, object]]:
         if not getattr(self.generator, "ready", True):
             return ParsedAnswer("retrieval_only", RETRIEVAL_ONLY_ANSWER), {}
@@ -1105,7 +1548,7 @@ class RAGService:
             return ParsedAnswer("generation_failed", GENERATION_FAILED_ANSWER, exc.code, exc.message), details
 
         event_callback("stage", {"stage": "governance", "message": "正在校验引用"})
-        parsed = parse_answer(raw_answer, source_count)
+        parsed = parse_answer(raw_answer, source_count, freshness_unverified)
         provider_status = "unknown"
         for status in ("ANSWERED", "INSUFFICIENT_EVIDENCE", "SOURCE_CONFLICT"):
             if raw_answer.lstrip().startswith(f"[STATUS: {status}]"):
@@ -1248,6 +1691,37 @@ def _diversify_by_document(candidates: list[RetrievedChunk], limit: int) -> list
         if not added:
             break
     return selected
+
+
+def _rerank_texts(candidates: list[RetrievedChunk], intent: str) -> list[str]:
+    """精排输入文本。KB 精排与 Web 之后的统一精排必须用同一套拼法，否则两轮分数不可比。"""
+
+    return [
+        (
+            f"{' / '.join(candidate.metadata.get('heading_path') or [])}\n{candidate.text}"
+            if intent == "procedure" and candidate.metadata.get("heading_path")
+            else candidate.text
+        )
+        for candidate in candidates
+    ]
+
+
+def _web_reason_code(decision: str, preliminary: EvidenceGateResult | None) -> str | None:
+    """``retrieval.web_policy`` 每个 decision 对应的稳定原因码。
+
+    ``preliminary`` 为 ``None`` 表示这条链没有初步门禁（三个未改造的 Profile）。此时
+    ``not_needed`` 只有"候选数够且不要求时效"这一种含义，decision 本身已经说完，
+    不为它另造一个门禁没产出过的原因码。
+    """
+
+    if decision == "executed":
+        return None
+    if decision == "not_needed":
+        # 不需要联网的判断来自门禁，原因就用门禁自己的词汇，不在这里另起一套说法。
+        if preliminary is None or not preliminary.reason_codes:
+            return None
+        return preliminary.reason_codes[0]
+    return _WEB_SKIP_REASON_CODES[decision]
 
 
 def _profile_queries(queries: tuple[str, ...], intent: str) -> list[str]:

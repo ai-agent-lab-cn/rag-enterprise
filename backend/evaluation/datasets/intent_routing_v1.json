@@ -1,6 +1,6 @@
 {
   "dataset_id": "intent_routing_v1",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "samples": [
     {"sample_id": "intent_001", "question": "RRF 的平滑常数是多少？", "expected": "fact_lookup"},
     {"sample_id": "intent_002", "question": "当前生效的索引版本是哪一个？", "expected": "fact_lookup"},
@@ -21,6 +21,12 @@
     {"sample_id": "intent_017", "question": "这个呢", "expected": "clarify"},
     {"sample_id": "intent_018", "question": "它怎么样", "expected": "clarify"},
     {"sample_id": "intent_019", "question": "帮我预测下一期彩票号码", "expected": "out_of_scope"},
-    {"sample_id": "intent_020", "question": "写一首与知识库无关的情诗", "expected": "out_of_scope"}
+    {"sample_id": "intent_020", "question": "写一首与知识库无关的情诗", "expected": "out_of_scope"},
+    {"sample_id": "intent_021", "question": "嗨", "expected": "greeting"},
+    {"sample_id": "intent_022", "question": "你好", "expected": "greeting"},
+    {"sample_id": "intent_023", "question": "Hello", "expected": "greeting"},
+    {"sample_id": "intent_024", "question": "在吗", "expected": "greeting"},
+    {"sample_id": "intent_025", "question": "早上好！", "expected": "greeting"},
+    {"sample_id": "intent_026", "question": "你好，当前生效的索引版本是哪一个？", "expected": "fact_lookup"}
   ]
 }

@@ -70,6 +70,98 @@ def test_module_imports_standalone(path: Path) -> None:
     importlib.import_module(f"backend.app.{path.stem}")
 
 
+def _guarded_calls(function: ast.FunctionDef, dotted_name: str) -> list[tuple[int, list[str]]]:
+    """``function`` 里每个 ``dotted_name`` 调用点，连同它外层所有 ``if`` 判据。"""
+
+    def dotted(node: ast.AST) -> str | None:
+        parts: list[str] = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if isinstance(node, ast.Name):
+            parts.append(node.id)
+            return ".".join(reversed(parts))
+        return None
+
+    found: list[tuple[int, list[str]]] = []
+
+    def visit(node: ast.AST, guards: list[str]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.If):
+                test = ast.unparse(child.test)
+                for item in child.body:
+                    visit(item, [*guards, test])
+                for item in child.orelse:
+                    visit(item, [*guards, f"not ({test})"])
+                continue
+            if isinstance(child, ast.Call) and dotted(child.func) == dotted_name:
+                found.append((child.lineno, guards))
+            visit(child, guards)
+
+    visit(function, [])
+    return sorted(found)
+
+
+def _service_query() -> ast.FunctionDef:
+    tree = ast.parse((APP / "service.py").read_text(encoding="utf-8"))
+    service = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "RAGService"
+    )
+    return next(
+        node
+        for node in service.body
+        if isinstance(node, ast.FunctionDef) and node.name == "query"
+    )
+
+
+def test_second_round_kb_supplement_stays_off_the_closed_loop() -> None:
+    """闭环链只跑一轮 KB 检索，另三个 Profile 保留第二轮补检——一个 if，两条约束。
+
+    这两条一起被破坏过：摘掉 fact_lookup 的补检调用点时整块删除，
+    summarize / compare / procedure 的补检能力跟着消失，而设计稿第 51 行要求它们
+    「继续路由到现有兼容行为」。全仓没有一条测试以 canary/full 跑过这三个 Profile，
+    删掉不会有任何东西变红——所以这里只能从结构上守。
+    """
+
+    calls = _guarded_calls(_service_query(), "self.retrieve_candidates")
+    guarded = [item for item in calls if any("not closed_loop" in g for g in item[1])]
+    unguarded = [item for item in calls if item not in guarded]
+
+    assert len(guarded) == 1, (
+        "第二轮 KB 补检必须恰好有一个调用点，且被 `not closed_loop` 挡在闭环链之外"
+        f"（当前带该判据的调用点在 {[line for line, _ in guarded]} 行）"
+    )
+    assert len(unguarded) == 2, (
+        "闭环链的全局约束是单次请求最多一轮 KB 检索：原查询 + 扩展查询共两个调用点，"
+        f"多出来的一个就是第二轮（当前无判据的调用点在 {[line for line, _ in unguarded]} 行）"
+    )
+
+
+def test_zero_candidate_rejection_waits_for_web_on_the_compatible_profiles() -> None:
+    """判空位置两条链不同，两个调用点都必须显式说明自己属于哪一条。
+
+    改造前 Web 结果先 extend 进 candidates 再判空，所以「KB 零候选 + Web 有结果」
+    仍然作答。闭环链把判空提到了 Web 之前（Web 补充不了一条 KB 证据都没有的问题），
+    那是闭环链**独有**的收敛；把它套到另三个 Profile 上会悄悄删掉一条可用路径。
+    """
+
+    calls = _guarded_calls(_service_query(), "self._raise_no_candidates")
+    assert len(calls) == 2, f"判空只应有两个调用点，当前 {[line for line, _ in calls]}"
+    closed_loop_first, compatible_after_web = calls
+    assert any(
+        "closed_loop and" in guard for guard in closed_loop_first[1]
+    ), f"靠前的判空属于闭环链，判据里必须点名 closed_loop：{closed_loop_first}"
+    assert any(
+        "not closed_loop" in guard and "web_candidates" in guard
+        for guard in compatible_after_web[1]
+    ), (
+        "靠后的判空属于未改造的三个 Profile，必须同时看 KB 与 Web 候选，"
+        f"否则 Web 救回来的那条路径又没了：{compatible_after_web}"
+    )
+
+
 def test_frontend_pipeline_stages_cover_what_the_backend_writes() -> None:
     """前端流水线格子必须覆盖后端真实写入的每一个 stage。
 

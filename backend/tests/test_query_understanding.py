@@ -15,6 +15,10 @@ def _candidate(chunk_id: str, score: float = 0.8) -> RetrievedChunk:
         metadata={
             "knowledge_base_id": "kb_default",
             "document_id": f"doc_{chunk_id}",
+            # document_version_id 与 content_sha256 是 Evidence Gate 的引用完整性判据：
+            # 缺任一项候选都进不了最终证据集，response.sources 会直接变空。
+            "document_version_id": f"dv_{chunk_id}",
+            "content_sha256": f"{chunk_id:_<64}"[:64],
             "filename": f"{chunk_id}.md",
             "paragraph": 0,
             "chunk_index": 0,
@@ -56,7 +60,9 @@ class _Embedder:
 
 
 class _Reranker:
-    model_name = "test/reranker"
+    # 模型名必须在 evidence_gate.RERANKER_THRESHOLDS 里登记过，否则门禁读不懂分数语义，
+    # 每次 query() 都会抛 RAG_PROFILE_INCOMPATIBLE。不要为了让测试变绿去放宽门禁。
+    model_name = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 
     def score(self, question: str, chunks: list[str]) -> list[float]:
         return [float(index) for index, _ in enumerate(chunks, start=1)]

@@ -6,14 +6,22 @@ import { Dialog } from "./ui/Dialog";
 
 interface SourceCardProps { source: Source; index: number; defaultOpen?: boolean }
 
+/** Web 引用的可读身份是域名，不是 URL 全文。URL 非法时返回 null，由调用方退回通用文案。 */
+function webHostname(url: string | null | undefined) {
+  if (!url) return null;
+  try { return new URL(url).hostname; } catch { return null; }
+}
+
 export function SourceCard({ source, index, defaultOpen = false }: SourceCardProps) {
   const [citation, setCitation] = useState<Citation | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const isWeb = source.evidence_source_type === "web";
+  // Web 来源的 filename 是网页标题（service.py:1488 `"filename": item.title`），
+  // 定位信息是「域名 + 抓取时间」，不是页码段落；片段序号对它恒为 0，不展示。
   const location = isWeb
-    ? `Web 来源${source.retrieved_at ? ` · ${new Date(source.retrieved_at).toLocaleString("zh-CN")}` : ""}`
-    : source.page ? `第 ${source.page} 页` : `第 ${source.paragraph + 1} 段`;
+    ? [webHostname(source.source_url) ?? "Web 来源", source.retrieved_at ? `抓取于 ${new Date(source.retrieved_at).toLocaleString("zh-CN")}` : ""].filter(Boolean).join(" · ")
+    : `${source.page ? `第 ${source.page} 页` : `第 ${source.paragraph + 1} 段`} · 片段 ${source.chunk_index}`;
   const channels = source.retrieval_channels ?? [];
   const openOriginal = async () => {
     if (isWeb) {
@@ -39,7 +47,7 @@ export function SourceCard({ source, index, defaultOpen = false }: SourceCardPro
         <span className="grid h-6 w-6 flex-none place-items-center rounded-sm border border-[#d9d5fa] text-[9px] text-[#574ad0]">{index + 1}</span>
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <strong className="overflow-hidden text-ellipsis whitespace-nowrap text-[13px]">{source.filename}{isWeb ? " · Web" : ""}</strong>
-          <small className="text-[11px] text-ink-faint">{location} · 片段 {source.chunk_index}</small>
+          <small className="text-[11px] text-ink-faint">{location}</small>
           <span className="mt-[7px] line-clamp-2 text-[10px] font-normal leading-[1.55] text-[#6f778a]">{source.summary}</span>
         </span>
         <span className="flex flex-none flex-col gap-1 max-[561px]:hidden">

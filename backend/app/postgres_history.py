@@ -18,6 +18,21 @@ from .modular_rag import DEFAULT_PROFILE_VERSIONS, RAGPolicy
 
 _CONVERSATION_ID_PATTERN = re.compile(r"^conv_[a-f0-9]{16}$")
 _ANSWER_RECORD_ID_PATTERN = re.compile(r"^answer_[a-f0-9]{16}$")
+# 迁移 0041 给 query_executions.intent 和 control_outcome 各挂了一条 CHECK，只认下面两组
+# 取值，而本轮不新增迁移。问候旁路产出的 greeting / social 因此在这两个受约束的标量列上
+# 降级写入：intent 落 NULL（CHECK 对 NULL 判定为 UNKNOWN，视为通过），control_outcome 落
+# 占位值 'route'。真实决策完整保存在 answer_records.routing（JSONB，无约束），
+# get_execution() 读回时本就优先用它，执行详情看到的仍是 greeting / social。
+_EXECUTION_INTENTS = frozenset({"fact_lookup", "summarize", "compare", "procedure"})
+_EXECUTION_CONTROL_OUTCOMES = frozenset({"route", "clarify", "out_of_scope"})
+
+
+def _column_intent(value: object) -> str | None:
+    return str(value) if value in _EXECUTION_INTENTS else None
+
+
+def _column_control_outcome(value: object) -> str:
+    return str(value) if value in _EXECUTION_CONTROL_OUTCOMES else "route"
 
 
 @dataclass(frozen=True)
@@ -181,15 +196,16 @@ class PostgresConversationRepository:
                             conversation_id,
                             knowledge_base_id,
                             owner["owner_id"],
-                            route.get("intent"),
+                            _column_intent(route.get("intent")),
                             float(route.get("confidence") or 0),
                             route.get("reason"),
                             route.get("original_question") or question,
                             route.get("effective_question") or question,
                             bool(route.get("follow_up_rewritten")),
-                            bool(route.get("requires_web")),
+                            # 列名仍是旧的 requires_web，值优先取新字段。
+                            bool(route.get("requires_freshness", route.get("requires_web"))),
                             route.get("classifier_model"),
-                            route.get("control_outcome") or "route",
+                            _column_control_outcome(route.get("control_outcome")),
                             pipeline_profile,
                             profile_version,
                             Jsonb(policy_snapshot or {}),
@@ -406,10 +422,17 @@ class PostgresConversationRepository:
             "original_question": execution["original_question"],
             "effective_question": execution["effective_question"],
             "follow_up_rewritten": execution["follow_up_rewritten"],
+            # 只有一个列，两个键都要填：RoutingMetadata 同时声明了新名与过渡别名，
+            # 漏填一个不会报错，只会让执行详情少一个字段。
+            "requires_freshness": execution["requires_web"],
             "requires_web": execution["requires_web"],
             "classifier_model": execution["classifier_model"],
             "fallback_used": execution["fallback_used"],
         }
+        # 本轮之前落库的 answer_records.routing 里只有 requires_web。RoutingMetadata 给
+        # requires_freshness 留了默认值 False，缺键不会报错，只会让真实为时效的旧查询在
+        # 执行详情里显示成"不要求时效"——同一列的两个名字必须给出同一个答案。
+        route.setdefault("requires_freshness", route.get("requires_web", False))
         return {
             **dict(execution),
             "routing": route,
@@ -629,6 +652,14 @@ class PostgresRAGPolicyRepository:
         )
 
     def update(self, knowledge_base_id: str, policy: RAGPolicy, updated_by: str) -> RAGPolicy:
+        """保存整份策略。灰度门禁按 `policy.rollout_stage` 与库里现值的差异判定。
+
+        公开 PUT 现在走 `rag_policy.merge_public_rag_policy_update`，它总是回传当前
+        `rollout_stage`，于是下面两道守卫（canary→full 不得同时改策略、阶段跳跃校验）
+        对那条路径恒不触发。它们不是死代码：灰度推进要另开入口时仍要靠它们，而且这里是
+        唯一读 answer_status 做灰度统计的地方，不要当作无人调用顺手删掉。
+        """
+
         validate_knowledge_base_id(knowledge_base_id)
         with psycopg.connect(self.database_url) as connection:
             with connection.transaction():
@@ -734,6 +765,11 @@ class PostgresRAGPolicyRepository:
             raise ValueError("RAG 发布阶段必须先从 shadow 进入 canary")
         if current_stage != "canary" or requested_stage != "full":
             return
+        # 下面四处 IN ('answered','source_conflict') 都**有意**不含 answered_stale：
+        # 这是决定要不要扩大发布的门禁，一条时效未经验证的回答不该成为"可以晋级"的证据。
+        # 同理 direct_response（问候固定回复）也不在里面——它连检索都没跑过。
+        # 这不是漏改：它们与 postgres_evaluation.rag_pipeline_summary 的口径一致，
+        # answered_stale 在那边单独计一格，不并入 successful_count。
         row = connection.execute(
             """SELECT count(*) FILTER (
                         WHERE q.status='succeeded'

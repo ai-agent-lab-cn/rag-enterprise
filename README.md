@@ -33,6 +33,38 @@ MD / TXT / PDF
                                 来源标签 + Prompt ──► 生成与引用校验 ──► 答案与执行记录
 ```
 
+## Modular RAG 与 RAG Policy
+
+首个完整 Modular RAG Profile 为 `fact_lookup_v1`（事实查找）。它是一条固定执行链，没有
+自主规划、没有循环补检：
+
+```text
+query.normalize → query.expand → retrieval.knowledge_base → rerank.knowledge_base
+  → evidence.preliminary_gate → retrieval.web_policy（条件执行，最多一次）
+  → evidence.fuse → rerank.unified → evidence.final_gate
+  → generation.fact → generation.verify
+```
+
+约束与当前能力边界：
+
+- 单次请求最多一轮知识库检索和一次 Web 补检；查询扩展属于同一轮知识库检索。
+- Web 只能补充知识库，最终回答至少需要一条通过门禁的知识库证据；缺少知识库锚点时即使
+  Web 搜到答案也拒答。
+- 显式分类、标签、来源类型或时间范围过滤时，Web 不得突破该范围。
+- 纯问候走固定引导语旁路，不执行检索、精排、Web 与生成模型。
+- 回答状态共七种：`answered`、`answered_stale`（时效未验证）、`insufficient_evidence`、
+  `source_conflict`、`retrieval_only`、`generation_failed`、`direct_response`。
+- RAG Policy 当前只允许配置受控 Web 补检开关和可信域名。其余字段（发布阶段、意图置信度
+  阈值、最少证据数、Web 结果上限）是系统内部参数，页面不展示、写接口不接受，服务端保留
+  现值兼容既有数据。
+- summarize、compare、procedure 尚未作为完整 Profile 对外发布：它们仍会被路由并沿用既有
+  兼容行为，但本轮不宣称其形成 Modular RAG 闭环，`/api/rag/pipeline-profiles` 也只返回
+  `fact_lookup_v1`。
+
+两段 Evidence Gate 的结论、Web 决策（未启用 / 未触发 / 范围受限 / Provider 未配置 / 失败 /
+无结果 / 已采用）与原因码都记录在执行轨迹里，页面的技术抽屉直接读取轨迹展示，不从"最终
+有没有 Web 来源"反推。
+
 ## 技术栈
 
 | 层级 | 技术 |
@@ -182,6 +214,9 @@ uv run python -m scripts.evaluate_intent_routing \
 | `GET` | `/api/rag/pipeline-profiles` | 管理员查看系统内置的固定 Profile |
 | `GET` | `/api/query-executions/{execution_id}` | 查看有权限的模块执行时间线与策略快照 |
 | `GET` | `/api/knowledge-bases/{id}/index-versions` | 管理员查看索引版本、状态与放行报告；切换只提供 CLI 入口 |
+| `GET/PUT` | `/api/knowledge-bases/{id}/rag-policy` | 管理员查看策略；PUT 只接受 `web_search_enabled` 与 `allowed_domains` |
+| `GET` | `/api/rag/pipeline-profiles` | 管理员查看对外发布的 Profile，当前只有 `fact_lookup_v1` |
+| `GET` | `/api/query-executions/{execution_id}` | 查看单次查询的路由、模块轨迹与门禁原因码 |
 | `GET` | `/api/knowledge-bases/{id}/conversations` | 获取指定知识库的会话历史 |
 | `GET` | `/api/knowledge-bases/{id}/conversations/{conversation_id}` | 获取会话及回答记录 |
 | `DELETE` | `/api/knowledge-bases/{id}/conversations/{conversation_id}` | 删除会话及其回答记录 |
@@ -730,10 +765,3 @@ GitHub Release 附件为准，不在报告中复制维护。
 - V4 威胁边界、已缓解风险与延期项见
   [`docs/security/v4-threat-model.md`](docs/security/v4-threat-model.md)。
 
-## 独立实现与致谢
-
-本项目是为个人作品集从零设计和实现的工程项目，不宣称原创 RAG 算法。学习过程中参考了[马克的技术工作坊：使用 Python 构建 RAG 系统](https://github.com/MarkTechStation/VideoCode/tree/main/%E4%BD%BF%E7%94%A8Python%E6%9E%84%E5%BB%BARAG%E7%B3%BB%E7%BB%9F/rag)所介绍的通用流程。原仓库未提供开源许可证，因此本项目未复制其代码、README 文案或示例文档，仅在此注明概念学习来源。
-
-## License
-
-本仓库暂未添加开源许可证，默认保留所有权利。如需授权复用，请先联系仓库作者。

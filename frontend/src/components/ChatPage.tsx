@@ -1,8 +1,9 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, Download, FileText, MessageSquarePlus, Paperclip, Send, Square, Trash2 } from "lucide-react";
 import { api } from "../api";
+import { describeWebExecution } from "../types";
 import type { AnswerRecord, ConversationDetail, ConversationSummary, DocumentCategory, DocumentInfo, KnowledgeBase, QueryResult, Source } from "../types";
-import { AnswerPanel } from "./AnswerPanel";
+import { ANSWER_STATUS_DESCRIPTIONS, ANSWER_STATUS_LABELS, AnswerPanel } from "./AnswerPanel";
 import { SourceCard } from "./SourceCard";
 import { TechnicalDrawer } from "./TechnicalDrawer";
 import { Button } from "./ui/Button";
@@ -14,6 +15,14 @@ import { Select } from "./ui/Select";
 
 const EXAMPLES = ["这个项目解决了什么问题？", "系统采用了哪些技术？", "如何评估回答质量？"];
 
+/** 初步门禁四个 outcome 的流式文案。少一个就会停在上一句，用户以为卡住了。 */
+const PRELIMINARY_GATE_STAGES: Record<string, string> = {
+  needs_web: "正在补充 Web 证据",
+  pass: "知识库证据已满足，不需要 Web 补检",
+  stale: "无法取得当前 Web 证据，将基于知识库历史资料回答",
+  reject: "知识库证据不足",
+};
+
 interface EvidencePanelProps {
   sources: Source[];
   documents: DocumentInfo[];
@@ -24,6 +33,18 @@ interface EvidencePanelProps {
 
 function EvidencePanel({ sources, documents, activeRecord, conversation, result }: EvidencePanelProps) {
   const model = result?.model ?? activeRecord?.models.generation ?? "尚未生成回答";
+  // 分组必须带着**原始下标**走：卡片锚点 id 是 `source-${index + 1}`（SourceCard.tsx:45），
+  // 而答案正文里的 `[来源 N]` 按 result.sources 的下标生成（AnswerPanel.tsx:71）。
+  // 重排后另起一套编号，两边就对不上了。
+  const numbered = sources.map((source, index) => ({ source, index }));
+  const groups = [
+    { key: "knowledge_base", title: "知识库引用", items: numbered.filter((item) => item.source.evidence_source_type !== "web") },
+    { key: "web", title: "Web 引用", items: numbered.filter((item) => item.source.evidence_source_type === "web") },
+  ].filter((group) => group.items.length > 0);
+  // 问候旁路不跑检索，这一列必然是空的。布局列保留（按状态抽掉会让中间栏宽度在一次问答里
+  // 跳变），但空态必须说得出自己为什么空——一个不解释自己的空白区域，和一个不解释自己的
+  // 灰色禁用按钮是同一类问题（CLAUDE.md 第一条）。
+  const directResponse = (result?.answer_status ?? activeRecord?.answer_status) === "direct_response";
   return (
     <aside className="min-h-0 min-w-0 overflow-y-auto bg-[#f8f9fc] py-5 px-3.5 min-[1025px]:py-3.5 min-[1025px]:px-[11px] max-[901px]:border-t max-[901px]:border-line" aria-label="引用来源">
       <section className="overflow-hidden rounded-[10px] border border-line bg-surface">
@@ -31,7 +52,7 @@ function EvidencePanel({ sources, documents, activeRecord, conversation, result 
           <ListItemButton className="relative block px-4 text-left text-[14px] font-bold text-[#222a3e]" role="tab" aria-selected="true">引用来源 <span className="ml-[5px] rounded-full bg-brand-subtle px-1.5 py-0.5 text-[9px] font-bold text-[#786bdd]">{sources.length}</span></ListItemButton>
         </div>
         <div className="flex items-center justify-end pt-[11px] pr-3.5 pb-[7px] pl-3.5"><small className="text-[9px] text-ink-faint">按相关度展示</small></div>
-        <div className="grid grid-cols-1 gap-[9px] px-3 pb-3.5 max-[901px]:grid-cols-2 max-[768px]:grid-cols-1">{sources.length ? sources.map((source, index) => <SourceCard source={source} index={index} key={source.chunk_id}/>) : <div className="grid min-h-[220px] place-items-center text-center text-ink-faint"><FileText size={28}/><strong className="mt-[10px] text-[13px] text-[#5e667a]">回答后查看证据</strong><p className="mt-[6px] mb-0 max-w-[220px] text-[11px] leading-[1.6]">答案引用的文件、位置与原文会显示在这里。</p></div>}</div>
+        <div className="grid grid-cols-1 gap-[9px] px-3 pb-3.5 max-[901px]:grid-cols-2 max-[768px]:grid-cols-1">{groups.length ? groups.map((group) => <section className="col-span-full grid grid-cols-1 gap-[9px] max-[901px]:grid-cols-2 max-[768px]:grid-cols-1" key={group.key} aria-label={group.title}><h4 className="col-span-full m-0 text-[11px] font-semibold text-ink-faint">{group.title} <span className="font-normal">{group.items.length} 条</span></h4>{group.items.map(({ source, index }) => <SourceCard source={source} index={index} key={source.chunk_id}/>)}</section>) : directResponse ? <div className="grid min-h-[220px] place-items-center text-center text-ink-faint"><Bot size={28}/><strong className="mt-[10px] text-[13px] text-[#5e667a]">本次是对话回复</strong><p className="mt-[6px] mb-0 max-w-[220px] text-[11px] leading-[1.6]">问候与寒暄不触发检索，所以这里没有引用证据。提一个能在资料中找到依据的问题就会出现。</p></div> : <div className="grid min-h-[220px] place-items-center text-center text-ink-faint"><FileText size={28}/><strong className="mt-[10px] text-[13px] text-[#5e667a]">回答后查看证据</strong><p className="mt-[6px] mb-0 max-w-[220px] text-[11px] leading-[1.6]">答案引用的文件、位置与原文会显示在这里。</p></div>}</div>
       </section>
       <section className="mt-3.5 rounded-[9px] border border-line bg-surface p-4 min-[1025px]:mt-[11px] min-[1025px]:p-3.5">
         <h3 className="m-0 mb-3.5 text-[13px]">对话信息</h3>
@@ -131,14 +152,21 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
     const filters = categoryFilter || tags.length || sourceTypeFilter ? { ...(categoryFilter ? { category_ids: [categoryFilter] } : {}), ...(tags.length ? { tags: [...new Set(tags)] } : {}), ...(sourceTypeFilter ? { source_types: [sourceTypeFilter] } : {}) } : undefined;
     const controller = new AbortController();
     streamController.current = controller;
-    setBusy(true); setError(""); setResult(null); setStreamingText(""); setStreamingSources([]); setStreamingStage("正在检索资料"); setPendingQuestion(value); setQuestion("");
+    setBusy(true); setError(""); setResult(null); setStreamingText(""); setStreamingSources([]); setStreamingStage("正在理解问题"); setPendingQuestion(value); setQuestion("");
     let finalAnswer: QueryResult | null = null;
     let streamError = "";
     let failedConversationId: string | undefined = conversationId;
     try {
       await api.streamKnowledgeBaseQuery(baseId, value, conversationId, filters, controller.signal, (message) => {
         if (message.event === "stage") setStreamingStage(message.data.message);
-        else if (message.event === "routing_completed") setStreamingStage(message.data.intent ? "已选择受控问答管线" : "正在确认问题范围");
+        // 问候旁路只有 routing_completed 与 final 两个有效事件，没有任何 stage——
+        // 按 intent 真假判会说成"已选择受控问答管线"，而它根本不进管线。
+        else if (message.event === "routing_completed") setStreamingStage(message.data.control_outcome === "social" ? "已识别为问候" : message.data.intent ? "已选择受控问答管线" : "正在确认问题范围");
+        else if (message.event === "module_started" && message.data.module_key === "evidence.preliminary_gate") setStreamingStage("正在判断是否需要补充 Web 证据");
+        else if (message.event === "preliminary_gate_completed") setStreamingStage(PRELIMINARY_GATE_STAGES[message.data.outcome] ?? "已完成证据初判");
+        // 真实决策，不是"正在联网"这种一律通用的说法。此刻还没到 Final Gate，
+        // 采用数未知（webCount: null），所以 executed 只说搜到几条，不谎报已采用。
+        else if (message.event === "web_retrieval_completed") setStreamingStage(`联网：${describeWebExecution({ decision: message.data.decision, resultCount: message.data.result_count, webCount: null, reasonCodes: [] })}`);
         else if (message.event === "answer_delta") setStreamingText((current) => current + message.data.text);
         else if (message.event === "sources") setStreamingSources(message.data.items);
         else if (message.event === "replace") setStreamingText(message.data.answer);
@@ -203,7 +231,7 @@ export function ChatPage({ conversationId, onOpen }: { conversationId?: string; 
         <div ref={messageListRef} className="min-h-0 overflow-y-auto scroll-smooth pt-[26px] px-7 pb-[18px] max-[768px]:pt-[18px] max-[768px]:px-3 min-[768px]:px-[18px] min-[1025px]:pt-5 min-[1025px]:px-[22px] min-[1025px]:pb-3.5">
           {/* 弹层开着时错误只在弹层里显示：这条横幅在 Radix 的 aria-hidden 背景里。 */}
           {error && !confirmDelete ? <ErrorBanner>{error}</ErrorBanner> : null}
-          {history?.records.map((record, index) => <div className="mx-auto mb-[30px] grid max-w-[760px] gap-[18px]" key={record.record_id}><article className="flex items-start justify-end gap-2.5"><span className="block max-w-[78%] rounded-[14px_14px_3px_14px] bg-[#eeeaff] px-4 py-[13px] leading-[1.65] text-[#332878] max-[768px]:max-w-[85%]">{record.question}</span><b className="grid h-[30px] w-[30px] flex-none place-items-center rounded-full bg-[#9a8ce8] text-[11px] font-bold text-white">你</b></article><article className="flex items-start gap-2.5"><span className="grid h-[30px] w-[30px] flex-none place-items-center rounded-full bg-brand text-white"><Bot size={17}/></span><div className="max-w-[min(86%,720px)] rounded-[3px_14px_14px_14px] border border-line bg-surface py-4 px-[18px] shadow-[0_5px_18px_rgba(31,38,63,0.04)] max-[768px]:max-w-[calc(100%-40px)] max-[768px]:p-[13px]"><p className="m-0 leading-[1.85] whitespace-pre-wrap text-[#343c50]">{record.answer ?? record.error_message ?? "本次回答失败。"}</p><small className="block mt-3 text-[10px] text-ink-faint">{record.sources.length} 条来源 · {new Date(record.created_at).toLocaleString("zh-CN")}</small>{index === history.records.length - 1 && historicalResult ? <TechnicalDrawer result={historicalResult}/> : null}</div></article></div>)}
+          {history?.records.map((record, index) => <div className="mx-auto mb-[30px] grid max-w-[760px] gap-[18px]" key={record.record_id}><article className="flex items-start justify-end gap-2.5"><span className="block max-w-[78%] rounded-[14px_14px_3px_14px] bg-[#eeeaff] px-4 py-[13px] leading-[1.65] text-[#332878] max-[768px]:max-w-[85%]">{record.question}</span><b className="grid h-[30px] w-[30px] flex-none place-items-center rounded-full bg-[#9a8ce8] text-[11px] font-bold text-white">你</b></article><article className="flex items-start gap-2.5"><span className="grid h-[30px] w-[30px] flex-none place-items-center rounded-full bg-brand text-white"><Bot size={17}/></span><div className="max-w-[min(86%,720px)] rounded-[3px_14px_14px_14px] border border-line bg-surface py-4 px-[18px] shadow-[0_5px_18px_rgba(31,38,63,0.04)] max-[768px]:max-w-[calc(100%-40px)] max-[768px]:p-[13px]">{record.answer_status === "answered_stale" ? <div className="mb-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2.5 text-warning"><div className="text-[10px] font-semibold">{ANSWER_STATUS_LABELS.answered_stale}</div><p className="mt-1.5 mb-0 text-[0.82rem]">{ANSWER_STATUS_DESCRIPTIONS.answered_stale}</p></div> : null}<p className="m-0 leading-[1.85] whitespace-pre-wrap text-[#343c50]">{record.answer ?? record.error_message ?? "本次回答失败。"}</p><small className="block mt-3 text-[10px] text-ink-faint">{record.sources.length} 条来源 · {new Date(record.created_at).toLocaleString("zh-CN")}</small>{index === history.records.length - 1 && historicalResult && historicalResult.answer_status !== "direct_response" ? <TechnicalDrawer result={historicalResult}/> : null}</div></article></div>)}
           {pendingQuestion ? <article className="mx-auto mb-[18px] flex max-w-[760px] items-start justify-end gap-2.5"><span className="block max-w-[78%] rounded-[14px_14px_3px_14px] bg-[#eeeaff] px-4 py-[13px] leading-[1.65] text-[#332878]">{pendingQuestion}</span><b className="grid h-[30px] w-[30px] flex-none place-items-center rounded-full bg-[#9a8ce8] text-[11px] font-bold text-white">你</b></article> : null}
           {!history?.records.length && !result && !busy && !streamingText ? <AnswerPanel result={null} loading={false} showSources={false}/> : null}
           {result || busy || streamingText ? <AnswerPanel result={result} loading={busy} streamingText={streamingText} streamingStage={streamingStage} showSources={false}/> : null}

@@ -72,7 +72,7 @@ def _record_report(
                (evaluation_run_id,evaluation_type,dataset_id,dataset_version,commit_sha,
                 models,metrics,passed,official,run_at,status,attempt_count,max_attempts,
                 started_at,finished_at,updated_at)
-               VALUES (%s,'intent_routing','intent_routing_v1','1.0.0',%s,%s,%s,true,true,
+               VALUES (%s,'intent_routing','intent_routing_v1','1.1.0',%s,%s,%s,true,true,
                        %s,'succeeded',1,1,%s,%s,%s)""",
             (
                 f"eval_{uuid4().hex[:16]}",

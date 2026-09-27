@@ -47,6 +47,7 @@ import type {
   DocumentIndexState,
   Citation,
   QueryExecutionDetail,
+  WebDecision,
 } from "./types";
 
 let accessToken: string | null = null;
@@ -108,7 +109,40 @@ export type QueryStreamEvent =
   | { event: "routing_completed"; data: NonNullable<QueryResult["routing"]> }
   | { event: "module_started"; data: { module_key: string } }
   | { event: "module_completed"; data: { module_key: string; status: string } }
-  | { event: "evidence_gate_completed"; data: { sufficient: boolean; evidence_count: number } }
+  // 闭环链（fact_lookup_v1）专有：KB 精排之后、Web 决策之前的初步门禁结论。
+  | {
+      event: "preliminary_gate_completed";
+      data: {
+        outcome: "pass" | "needs_web" | "stale" | "reject";
+        sufficient: boolean;
+        evidence_count: number;
+        kb_count: number;
+        requires_freshness: boolean;
+        web_available: boolean;
+        reason_codes: string[];
+      };
+    }
+  // 只在真的发起过一次 Web 搜索时到达（decision ∈ executed / no_result / failed）。
+  | {
+      event: "web_retrieval_completed";
+      data: { decision: WebDecision; result_count: number; reason_code: string | null };
+    }
+  // 扩展后的 Final Gate 事件。**六个新键只有闭环链才发**：未改造的三个 Profile 仍然
+  // 只发 `{sufficient, evidence_count}`（service.py 的非闭环分支），所以它们必须可选，
+  // 读的时候也要按「可能没有」处理。闭环链里它先于 sources，非闭环链里在 sources 之后。
+  | {
+      event: "evidence_gate_completed";
+      data: {
+        sufficient: boolean;
+        evidence_count: number;
+        outcome?: "pass" | "stale" | "reject";
+        kb_count?: number;
+        web_count?: number;
+        requires_freshness?: boolean;
+        freshness_verified?: boolean;
+        reason_codes?: string[];
+      };
+    }
   | { event: "generation_verified"; data: { citation_valid: boolean; claim_citation_coverage: boolean } }
   | { event: "answer_delta"; data: { text: string } }
   | { event: "sources"; data: { items: QueryResult["sources"] } }
@@ -361,7 +395,7 @@ export const api = {
     request<void>(`/api/knowledge-bases/${knowledgeBaseId}/conversations/${conversationId}`, { method: "DELETE" }),
   getRagPolicy: (knowledgeBaseId: string) =>
     request<import("./types").RAGPolicy>(`/api/knowledge-bases/${knowledgeBaseId}/rag-policy`),
-  updateRagPolicy: (knowledgeBaseId: string, payload: Omit<import("./types").RAGPolicy, "knowledge_base_id" | "profile_versions">) =>
+  updateRagPolicy: (knowledgeBaseId: string, payload: import("./types").RAGPolicyUpdatePayload) =>
     request<import("./types").RAGPolicy>(`/api/knowledge-bases/${knowledgeBaseId}/rag-policy`, {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
     }),
